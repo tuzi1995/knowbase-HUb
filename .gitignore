@@ -1,0 +1,47 @@
+.DS_Store
+Thumbs.db
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# JavaScript dependencies and build outputs
+node_modules/
+KnowledgeBaseTool_Local/link_viewer/dist/
+
+# Local databases and generated archives
+*.db
+*.sqlite
+*.sqlite3
+instance/
+KnowledgeBaseTool_Local/instance/
+*.zip
+
+# Logs and local deployment traces
+*.log
+Logs/
+KnowledgeBaseTool_Local/mac脚本/Logs/
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+**/ai_config.json
+**/scoring_config.json
+**/supabase_config*.json
+
+# Debug scripts with hard-coded credentials or remote keys
+KnowledgeBaseTool_Local/Scripts/fix_failed_scores.py
+KnowledgeBaseTool_Local/direct_query_modifications.py
+KnowledgeBaseTool_Local/update_old_modifications.py
+KnowledgeBaseTool_Local/DevTools/check_table.py
+KnowledgeBaseTool_Local/DevTools/check_data_direct.py
+KnowledgeBaseTool_Local/DevTools/debug_insert.py
+KnowledgeBaseTool_Local/DevTools/test_fetch_limit.py
+KnowledgeBaseTool_Local/DevTools/test_supabase_select.py
+KnowledgeBaseTool_Local/DevTools/verify_setup.py

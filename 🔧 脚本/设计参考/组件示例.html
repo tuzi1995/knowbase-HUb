@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Minimalist Modern 设计系统 - 组件示例</title>
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Calistoga&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Design System CSS -->
+  <link rel="stylesheet" href="design-system.css">
+  
+  <style>
+    /* 示例页面专用样式 */
+    .demo-section {
+      margin: 4rem 0;
+      padding: 3rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    
+    .demo-section:last-child {
+      border-bottom: none;
+    }
+    
+    .demo-title {
+      font-family: var(--font-display);
+      font-size: 2rem;
+      margin-bottom: 1rem;
+      color: var(--foreground);
+    }
+    
+    .demo-description {
+      color: var(--muted-foreground);
+      margin-bottom: 2rem;
+      line-height: 1.75;
+    }
+    
+    .demo-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 2rem;
+      margin: 2rem 0;
+    }
+    
+    .demo-item {
+      padding: 1.5rem;
+      background: var(--muted);
+      border-radius: var(--radius-lg);
+    }
+    
+    .demo-item-title {
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: var(--foreground);
+    }
+    
+    .code-block {
+      background: var(--foreground);
+      color: var(--background);
+      padding: 1.5rem;
+      border-radius: var(--radius-lg);
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 0.875rem;
+      line-height: 1.6;
+      margin: 1rem 0;
+    }
+    
+    .color-swatch {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin: 0.5rem 0;
+    }
+    
+    .color-box {
+      width: 60px;
+      height: 60px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+    }
+    
+    .color-info {
+      flex: 1;
+    }
+    
+    .color-name {
+      font-weight: 600;
+      color: var(--foreground);
+    }
+    
+    .color-value {
+      font-family: var(--font-mono);
+      font-size: 0.875rem;
+      color: var(--muted-foreground);
+    }
+  </style>
+</head>
+<body>
+  <!-- Hero Section -->
+  <section class="section-spacing" style="background: linear-gradient(135deg, var(--background) 0%, var(--muted) 100%);">
+    <div class="container-modern">
+      <div class="badge-section" style="margin-bottom: 2rem;">
+        <span class="badge-dot badge-dot-pulse"></span>
+        <span>Design System</span>
+      </div>
+      
+      <h1 class="font-display" style="font-size: 3.5rem; line-height: 1.1; margin-bottom: 1.5rem;">
+        Minimalist Modern <br>
+        <span class="gradient-text">设计系统</span>
+      </h1>
+      
+      <p style="font-size: 1.25rem; color: var(--muted-foreground); max-width: 600px; line-height: 1.75;">
+        基于 Electric Blue 渐变的现代极简设计系统，通过结构实现清晰，通过大胆细节展现个性。
+      </p>
+      
+      <div style="display: flex; gap: 1rem; margin-top: 2rem; flex-wrap: wrap;">
+        <button class="btn-primary-gradient">
+          <span>开始使用</span>
+          <i class="fas fa-arrow-right icon-arrow"></i>
+        </button>
+        <button class="btn-secondary-outline">
+          <span>查看文档</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Color System -->
+  <section class="demo-section">
+    <div class="container-modern">
+      <h2 class="demo-title">色彩系统</h2>
+      <p class="demo-description">
+        温暖的近单色调色板，通过 Electric Blue 双色渐变强化。重点色彩使用克制但影响力最大。
+      </p>
+      
+      <div class="demo-grid">
+        <div>
+          <h3 style="margin-bottom: 1.5rem; font-weight: 600;">主色调</h3>
+          <div class="color-swatch">
+            <div class="color-box" style="background: var(--accent);"></div>
+            <div class="color-info">
+              <div class="color-name">Accent</div>
+              <div class="color-value">#0052FF</div>
+            </div>
+          </div>
+          <div class="color-swatch">
+            <div class="color-box" style="background: var(--accent-secondary);"></div>
+            <div class="color-info">
+              <div class="color-name">Accent Secondary</div>
+              <div class="color-value">#4D7CFF</div>
+            </div>
+          </div>
+          <div class="color-swatch">
+            <div class="color-box" style="background: var(--gradient-primary);"></div>
+            <div class="color-info">
+              <div class="color-name">Gradient Primary</div>
+              <div class="color-value">linear-gradient</div>
+            </div>
+          </div>
+        </div>
+        
+        <div>
+          <h3 style="margin-bottom: 1.5rem; font-weight: 600;">中性色</h3>
+          <div class="color-swatch">
+            <div class="color-box" style="background: var(--background);"></div>
+            <div class="color-info">
+              <div class="color-name">Background</div>
+              <div class="color-value">#FAFAFA</div>
+            </div>
+          </div>
+          <div class="color-swatch">
+            <div class="color-box" style="background: var(--foreground);"></div>
+            <div class="color-info">
+              <div class="color-name">Foreground</div>
+              <div class="color-value">#0F172A</div>
+            </div>
+          </div>
+          <div class="color-swatch">
+            <div class="color-box" style="background: var(--muted);"></div>
+            <div class="color-info">
+              <div class="color-name">Muted</div>
+              <div class="color-value">#F1F5F9</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Typography -->
+  <section class="demo-section">
+    <div class="container-modern">
+      <h2 class="demo-title">字体系统</h2>
+      <p class="demo-description">
+        Calistoga（展示）与 Inter（UI/正文）的双字体配对创造了令人难忘的字体特征。
+      </p>
+      
+      <div class="demo-grid">
+        <div class="demo-item">
+          <div class="demo-item-title">Display Font - Calistoga</div>
+          <h1 class="font-display" style="font-size: 2.5rem; margin: 1rem 0;">
+            知识库管理
+          </h1>
+          <p style="color: var(--muted-foreground); font-size: 0.875rem;">
+            温暖、有个性、略带趣味。用于 h1/h2 标题。
+          </p>
+        </div>
+        
+        <div class="demo-item">
+          <div class="demo-item-title">Body Font - Inter</div>
+          <p style="font-size: 1.125rem; line-height: 1.75; margin: 1rem 0;">
+            清晰、高度可读、专业。处理正文、标签和 UI 元素的主力字体。
+          </p>
+          <p style="color: var(--muted-foreground); font-size: 0.875rem;">
+            清晰、高度可读、专业。
+          </p>
+        </div>
+        
+        <div class="demo-item">
+          <div class="demo-item-title">Mono Font - JetBrains Mono</div>
+          <code class="font-mono" style="display: block; font-size: 1rem; margin: 1rem 0;">
+            const accent = "#0052FF";
+          </code>
+          <p style="color: var(--muted-foreground); font-size: 0.875rem;">
+            用于代码、徽章和技术标注。
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Buttons -->
+  <section class="demo-section">
+    <div class="container-modern">
+      <h2 class="demo-title">按钮系统</h2>
+      <p class="demo-description">
+        三种按钮样式，每种都有明确的用途和视觉层级。
+      </p>
+      
+      <div class="demo-grid">
+        <div class="demo-item">
+          <div class="demo-item-title">Primary Button</div>
+          <button class="btn-primary-gradient" style="margin: 1rem 0;">
+            <span>立即开始</span>
+            <i class="fas fa-arrow-right icon-arrow"></i>
+          </button>
+          <div class="code-block">
+&lt;button class="btn-primary-gradient"&gt;
+  &lt;span&gt;立即开始&lt;/span&gt;
+  &lt;i class="fas fa-arrow-right icon-arrow"&gt;&lt;/i&gt;
+&lt;/button&gt;
+          </div>
+        </div>
+        
+        <div class="demo-item">
+          <div class="demo-item-title">Secondary Button</div>
+          <button class="btn-secondary-outline" style="margin: 1rem 0;">
+            <span>了解更多</span>
+          </button>
+          <div class="code-block">
+&lt;button class="btn-secondary-outline"&gt;
+  &lt;span&gt;了解更多&lt;/span&gt;
+&lt;/button&gt;
+          </div>
+        </div>
+        
+        <div class="demo-item">
+          <div class="demo-item-title">Ghost Button</div>
+          <button class="btn-ghost" style="margin: 1rem 0;">
+            <span>取消</span>
+          </button>
+          <div class="code-block">
+&lt;button class="btn-ghost"&gt;
+  &lt;span&gt;取消&lt;/span&gt;
+&lt;/button&gt;
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Inputs -->
+  <section class="demo-section">
+    <div class="container-modern">
+      <h2 class="demo-title">输入框系统</h2>
+      <p class="demo-description">
+        现代化的输入框，带有聚焦光环和悬停效果。
+      </p>
+      
+      <div class="demo-grid">
+        <div class="demo-item">
+          <div class="demo-item-title">Text Input</div>
+          <input type="text" class="input-modern" placeholder="请输入文本..." style="margin: 1rem 0;">
+          <div class="code-block">
+&lt;input type="text" 
+       class="input-modern" 
+       placeholder="请输入文本..."&gt;
+          </div>
+        </div>
+        
+        <div class="demo-item">
+          <div class="demo-item-title">Select</div>
+          <select class="input-modern" style="margin: 1rem 0;">
+            <option>选项 1</option>
+            <option>选项 2</option>
+            <option>选项 3</option>
+          </select>
+          <div class="code-block">
+&lt;select class="input-modern"&gt;
+  &lt;option&gt;选项 1&lt;/option&gt;
+  &lt;option&gt;选项 2&lt;/option&gt;
+&lt;/select&gt;
+          </div>
+        </div>
+        
+        <div class="demo-item">
+          <div class="demo-item-title">Textarea</div>
+          <textarea class="input-modern" placeholder="请输入多行文本..." rows="3" style="margin: 1rem 0;"></textarea>
+          <div class="code-block">
+&lt;textarea class="input-modern" 
+          placeholder="请输入多行文本..." 
+          rows="3"&gt;&lt;/textarea&gt;
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Cards -->
+  <section class="demo-section">
+    <div class="container-modern">
+      <h2 class="demo-title">卡片系统</h2>
+      <p class="demo-description">
+        两种卡片样式：标准卡片和渐变边框卡片。
+      </p>
+      
+      <div class="demo-grid">
+        <div class="card-elevated hover-lift">
+          <h3 style="margin-top: 0;">标准卡片</h3>
+          <p style="color: var(--muted-foreground);">
+            纯白背景，带有阴影和边框。悬停时会上浮。
+          </p>
+          <button class="btn-primary-gradient" style="margin-top: 1rem;">
+            <span>查看详情</span>
+          </button>
+        </div>
+        
+        <div class="card-gradient-border">
+          <div class="card-gradient-border-inner">
+            <h3 style="margin-top: 0;">渐变边框卡片</h3>
+            <p style="color: var(--muted-foreground);">
+              带有 Electric Blue 渐变边框的特色卡片。
+            </p>
+            <button class="btn-secondary-outline" style="margin-top: 1rem;">
+              <span>了解更多</span>
+            </button>
+          </div>
+        </div>
+        
+        <div class="card-elevated hover-gradient-overlay">
+          <h3 style="margin-top: 0;">渐变覆盖卡片</h3>
+          <p style="color: var(--muted-foreground);">
+            悬停时显示渐变覆盖层的卡片。
+          </p>
+          <button class="btn-ghost" style="margin-top: 1rem;">
+            <span>取消</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Badges -->
+  <section class="demo-section">
+    <div class="container-modern">
+      <h2 class="demo-title">徽章系统</h2>
+      <p class="demo-description">
+        用于区域标签的徽章组件，可选脉冲动画。
+      </p>
+      
+      <div style="display: flex; flex-direction: column; gap: 1.5rem; margin: 2rem 0;">
+        <div class="badge-section">
+          <span class="badge-dot"></span>
+          <span>功能特性</span>
+        </div>
+        
+        <div class="badge-section">
+          <span class="badge-dot badge-dot-pulse"></span>
+          <span>实时更新</span>
+        </div>
+        
+        <div class="badge-section">
+          <span class="badge-dot"></span>
+          <span>知识库管理</span>
+        </div>
+      </div>
+      
+      <div class="code-block">
+&lt;div class="badge-section"&gt;
+  &lt;span class="badge-dot badge-dot-pulse"&gt;&lt;/span&gt;
+  &lt;span&gt;实时更新&lt;/span&gt;
+&lt;/div&gt;
+      </div>
+    </div>
+  </section>
+
+  <!-- Tabs -->
+  <section class="demo-section">
+    <div class="container-modern">
+      <h2 class="demo-title">标签页系统</h2>
+      <p class="demo-description">
+        现代化的标签页导航，带有平滑过渡效果。
+      </p>
+      
+      <div class="tabs-modern" style="margin: 2rem 0;">
+        <button class="tab-modern active">知识库</button>
+        <button class="tab-modern">机型矩阵</button>
+        <button class="tab-modern">多媒体</button>
+        <button class="tab-modern">评分</button>
+        <button class="tab-modern">治理</button>
+      </div>
+      
+      <div class="code-block">
+&lt;div class="tabs-modern"&gt;
+  &lt;button class="tab-modern active"&gt;知识库&lt;/button&gt;
+  &lt;button class="tab-modern"&gt;机型矩阵&lt;/button&gt;
+  &lt;button class="tab-modern"&gt;多媒体&lt;/button&gt;
+&lt;/div&gt;
+      </div>
+    </div>
+  </section>
+
+  <!-- Inverted Section -->
+  <section class="section-inverted section-spacing">
+    <div class="container-modern">
+      <div class="badge-section" style="margin-bottom: 2rem; background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.3); color: white;">
+        <span class="badge-dot" style="background: white;"></span>
+        <span>反转对比度</span>
+      </div>
+      
+      <h2 class="demo-title" style="color: white;">反转对比度区域</h2>
+      <p class="demo-description" style="color: rgba(255, 255, 255, 0.8);">
+        深色背景配浅色文字，带有点阵纹理和径向光晕效果。用于创造视觉节奏和强调重要内容。
+      </p>
+      
+      <div class="demo-grid" style="margin-top: 3rem;">
+        <div style="background: rgba(255, 255, 255, 0.1); padding: 2rem; border-radius: var(--radius-xl);">
+          <h3 style="color: white; margin-top: 0;">统计数据 1</h3>
+          <p style="font-size: 2.5rem; font-weight: 700; color: white; margin: 1rem 0;">1,234</p>
+          <p style="color: rgba(255, 255, 255, 0.7);">总记录数</p>
+        </div>
+        
+        <div style="background: rgba(255, 255, 255, 0.1); padding: 2rem; border-radius: var(--radius-xl);">
+          <h3 style="color: white; margin-top: 0;">统计数据 2</h3>
+          <p style="font-size: 2.5rem; font-weight: 700; color: white; margin: 1rem 0;">567</p>
+          <p style="color: rgba(255, 255, 255, 0.7);">活跃用户</p>
+        </div>
+        
+        <div style="background: rgba(255, 255, 255, 0.1); padding: 2rem; border-radius: var(--radius-xl);">
+          <h3 style="color: white; margin-top: 0;">统计数据 3</h3>
+          <p style="font-size: 2.5rem; font-weight: 700; color: white; margin: 1rem 0;">89%</p>
+          <p style="color: rgba(255, 255, 255, 0.7);">满意度</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer style="padding: 3rem 0; text-align: center; color: var(--muted-foreground);">
+    <div class="container-modern">
+      <p>Minimalist Modern Design System v1.0</p>
+      <p style="font-size: 0.875rem; margin-top: 0.5rem;">
+        基于 Electric Blue 渐变的现代极简设计系统
+      </p>
+    </div>
+  </footer>
+
+  <script>
+    // 简单的标签页切换演示
+    document.querySelectorAll('.tab-modern').forEach(tab => {
+      tab.addEventListener('click', function() {
+        document.querySelectorAll('.tab-modern').forEach(t => t.classList.remove('active'));
+        this.classList.add('active');
+      });
+    });
+  </script>
+</body>
+</html>

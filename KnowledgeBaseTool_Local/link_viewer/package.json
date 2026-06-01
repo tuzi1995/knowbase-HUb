@@ -1,0 +1,19 @@
+{
+  "name": "link_viewer",
+  "version": "1.0.0",
+  "description": "K-Matrix 助手前端",
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "build:report": "node build.js && cat dist/build-report.json"
+  },
+  "keywords": ["k-matrix", "knowledge-base"],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "cssnano": "^7.0.7",
+    "postcss-cli": "^11.0.0",
+    "terser": "^5.46.1",
+    "vite": "^8.0.9"
+  }
+}

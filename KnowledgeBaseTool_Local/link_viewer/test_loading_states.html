@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>加载状态测试 - K-Matrix 助手</title>
+  <link rel="stylesheet" href="loading-states.css">
+  <script src="loading-manager.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: #f5f7fa;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      color: #1f2937;
+      margin-bottom: 10px;
+    }
+
+    .subtitle {
+      color: #6b7280;
+      margin-bottom: 30px;
+    }
+
+    .section {
+      background: white;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+
+    .section-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #1f2937;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .section-description {
+      color: #6b7280;
+      font-size: 14px;
+      margin-bottom: 20px;
+    }
+
+    .demo-container {
+      border: 2px dashed #e5e7eb;
+      border-radius: 8px;
+      padding: 20px;
+      min-height: 200px;
+      position: relative;
+      background: #fafafa;
+    }
+
+    .demo-container.table-demo {
+      min-height: 300px;
+    }
+
+    .controls {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: #3b82f6;
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #2563eb;
+    }
+
+    .btn-secondary {
+      background: #6b7280;
+      color: white;
+    }
+
+    .btn-secondary:hover {
+      background: #4b5563;
+    }
+
+    .btn-success {
+      background: #10b981;
+      color: white;
+    }
+
+    .btn-success:hover {
+      background: #059669;
+    }
+
+    .btn-danger {
+      background: #ef4444;
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background: #dc2626;
+    }
+
+    .demo-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .demo-table th,
+    .demo-table td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid #e5e7eb;
+    }
+
+    .demo-table th {
+      background: #f9fafb;
+      font-weight: 600;
+      color: #374151;
+    }
+
+    .code-block {
+      background: #1f2937;
+      color: #e5e7eb;
+      padding: 16px;
+      border-radius: 6px;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      overflow-x: auto;
+      margin-top: 12px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .badge-info {
+      background: #dbeafe;
+      color: #1e40af;
+    }
+
+    .badge-success {
+      background: #d1fae5;
+      color: #065f46;
+    }
+
+    .badge-warning {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 20px;
+    }
+
+    .stat-card {
+      background: #f9fafb;
+      padding: 16px;
+      border-radius: 6px;
+      border-left: 4px solid #3b82f6;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: #6b7280;
+      margin-bottom: 4px;
+    }
+
+    .stat-value {
+      font-size: 24px;
+      font-weight: 700;
+      color: #1f2937;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎨 加载状态测试页面</h1>
+    <p class="subtitle">测试 K-Matrix 助手的所有加载状态组件</p>
+
+    <!-- 1. 骨架屏 -->
+    <div class="section">
+      <div class="section-title">
+        <span>📦</span>
+        <span>骨架屏（Skeleton Screen）</span>
+        <span class="badge badge-info">推荐用于首次加载</span>
+      </div>
+      <div class="section-description">
+        骨架屏提供内容结构预览，减少感知等待时间，适合表格、卡片、列表的首次加载。
+      </div>
+      
+      <div class="controls">
+        <button class="btn btn-primary" onclick="testTableSkeleton()">显示表格骨架屏</button>
+        <button class="btn btn-primary" onclick="testCardSkeleton()">显示卡片骨架屏</button>
+        <button class="btn btn-primary" onclick="testListSkeleton()">显示列表骨架屏</button>
+        <button class="btn btn-secondary" onclick="clearDemo('skeleton-demo')">清除</button>
+      </div>
+
+      <div id="skeleton-demo" class="demo-container table-demo"></div>
+
+      <div class="code-block">
+LoadingManager.showSkeleton('container', 'table', 5);
+// 数据加载完成后会自动替换骨架屏
+      </div>
+    </div>
+
+    <!-- 2. 顶部进度条 -->
+    <div class="section">
+      <div class="section-title">
+        <span>⚡</span>
+        <span>顶部进度条（Top Progress Bar）</span>
+        <span class="badge badge-success">轻量级</span>
+      </div>
+      <div class="section-description">
+        顶部进度条不遮挡内容，适合页面切换、后台同步等不阻塞用户操作的场景。
+      </div>
+      
+      <div class="controls">
+        <button class="btn btn-primary" onclick="testTopProgress()">显示顶部进度条 (3秒)</button>
+        <button class="btn btn-secondary" onclick="LoadingManager.hideTopProgress()">立即隐藏</button>
+      </div>
+
+      <div class="code-block">
+LoadingManager.showTopProgress();
+await fetchData();
+LoadingManager.hideTopProgress();
+      </div>
+    </div>
+
+    <!-- 3. 表格加载遮罩 -->
+    <div class="section">
+      <div class="section-title">
+        <span>🔄</span>
+        <span>表格加载遮罩（Table Loading Overlay）</span>
+        <span class="badge badge-warning">阻塞操作</span>
+      </div>
+      <div class="section-description">
+        表格加载遮罩明确提示加载状态，防止用户重复操作，适合刷新、筛选、排序等场景。
+      </div>
+      
+      <div class="controls">
+        <button class="btn btn-primary" onclick="testTableLoading()">显示加载遮罩 (3秒)</button>
+        <button class="btn btn-primary" onclick="testTableLoadingTransparent()">显示透明遮罩 (3秒)</button>
+        <button class="btn btn-secondary" onclick="LoadingManager.hideTableLoading('table-loading-demo')">立即隐藏</button>
+      </div>
+
+      <div id="table-loading-demo" class="demo-container table-demo">
+        <table class="demo-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>产品名称</th>
+              <th>状态</th>
+              <th>更新时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>001</td>
+              <td>产品 A</td>
+              <td><span class="badge badge-success">正常</span></td>
+              <td>2026-04-22</td>
+            </tr>
+            <tr>
+              <td>002</td>
+              <td>产品 B</td>
+              <td><span class="badge badge-info">处理中</span></td>
+              <td>2026-04-22</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="code-block">
+LoadingManager.showTableLoading('tableBody', '正在加载数据...');
+await loadData();
+LoadingManager.hideTableLoading('tableBody');
+      </div>
+    </div>
+
+    <!-- 4. 按钮加载状态 -->
+    <div class="section">
+      <div class="section-title">
+        <span>🔘</span>
+        <span>按钮加载状态（Button Loading）</span>
+        <span class="badge badge-info">防止重复提交</span>
+      </div>
+      <div class="section-description">
+        按钮加载状态防止用户重复点击，提供明确的操作反馈，适合表单提交、保存、删除等操作。
+      </div>
+      
+      <div class="controls">
+        <button id="test-btn-1" class="btn btn-primary" onclick="testButtonLoading('test-btn-1')">保存数据</button>
+        <button id="test-btn-2" class="btn btn-success" onclick="testButtonLoading('test-btn-2')">提交表单</button>
+        <button id="test-btn-3" class="btn btn-danger" onclick="testButtonLoading('test-btn-3')">删除记录</button>
+      </div>
+
+      <div class="code-block">
+LoadingManager.setButtonLoading(button, true);
+await saveData();
+LoadingManager.setButtonLoading(button, false);
+      </div>
+    </div>
+
+    <!-- 5. 内联加载 -->
+    <div class="section">
+      <div class="section-title">
+        <span>📝</span>
+        <span>内联加载（Inline Loading）</span>
+        <span class="badge badge-success">轻量级</span>
+      </div>
+      <div class="section-description">
+        内联加载适合小区域的加载提示，如搜索结果、下拉列表等。
+      </div>
+      
+      <div class="controls">
+        <button class="btn btn-primary" onclick="testInlineLoading()">显示内联加载 (3秒)</button>
+        <button class="btn btn-secondary" onclick="clearDemo('inline-demo')">清除</button>
+      </div>
+
+      <div id="inline-demo" class="demo-container"></div>
+
+      <div class="code-block">
+LoadingManager.showInlineLoading('container', '搜索中...');
+      </div>
+    </div>
+
+    <!-- 6. 空状态提示 -->
+    <div class="section">
+      <div class="section-title">
+        <span>📭</span>
+        <span>空状态提示（Empty State）</span>
+        <span class="badge badge-info">友好提示</span>
+      </div>
+      <div class="section-description">
+        空状态提示用于数据为空、搜索无结果、加载失败等场景，提供友好的提示和操作建议。
+      </div>
+      
+      <div class="controls">
+        <button class="btn btn-primary" onclick="testEmptyStateNoData()">暂无数据</button>
+        <button class="btn btn-primary" onclick="testEmptyStateNoResults()">搜索无结果</button>
+        <button class="btn btn-primary" onclick="testEmptyStateError()">加载失败</button>
+        <button class="btn btn-secondary" onclick="clearDemo('empty-demo')">清除</button>
+      </div>
+
+      <div id="empty-demo" class="demo-container"></div>
+
+      <div class="code-block">
+LoadingManager.showEmptyState('container', {
+  icon: '📭',
+  title: '暂无数据',
+  description: '当前没有可显示的内容',
+  actionText: '刷新',
+  onAction: () => refresh()
+});
+      </div>
+    </div>
+
+    <!-- 7. 全屏加载 -->
+    <div class="section">
+      <div class="section-title">
+        <span>🌐</span>
+        <span>全屏加载遮罩（Fullscreen Loading）</span>
+        <span class="badge badge-warning">阻塞全部操作</span>
+      </div>
+      <div class="section-description">
+        全屏加载遮罩用于重要的、耗时的操作，如数据同步、批量处理等，完全阻止用户操作。
+      </div>
+      
+      <div class="controls">
+        <button class="btn btn-primary" onclick="testFullscreenLoading()">显示全屏加载 (3秒)</button>
+        <button class="btn btn-secondary" onclick="LoadingManager.hideFullscreenLoading()">立即隐藏</button>
+      </div>
+
+      <div class="code-block">
+LoadingManager.showFullscreenLoading('正在同步数据，请稍候...');
+await syncData();
+LoadingManager.hideFullscreenLoading();
+      </div>
+    </div>
+
+    <!-- 8. 包装函数 -->
+    <div class="section">
+      <div class="section-title">
+        <span>🎁</span>
+        <span>包装函数（Wrapper Functions）</span>
+        <span class="badge badge-success">推荐使用</span>
+      </div>
+      <div class="section-description">
+        使用包装函数可以自动处理加载状态的显示和隐藏，代码更简洁。
+      </div>
+      
+      <div class="controls">
+        <button class="btn btn-primary" onclick="testWrapperFunction()">测试包装函数 (3秒)</button>
+      </div>
+
+      <div id="wrapper-demo" class="demo-container table-demo"></div>
+
+      <div class="code-block">
+// 包装异步函数
+const loadDataWithLoading = LoadingManager.withSkeleton(
+  'container',
+  async () => {
+    const data = await fetchData();
+    renderData(data);
+  },
+  'table',
+  5
+);
+
+// 调用时自动显示/隐藏加载状态
+await loadDataWithLoading();
+      </div>
+    </div>
+
+    <!-- 统计信息 -->
+    <div class="section">
+      <div class="section-title">
+        <span>📊</span>
+        <span>性能统计</span>
+      </div>
+      
+      <div class="stats">
+        <div class="stat-card">
+          <div class="stat-label">CSS 文件大小</div>
+          <div class="stat-value">~15 KB</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">JS 文件大小</div>
+          <div class="stat-value">~12 KB</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">加载状态类型</div>
+          <div class="stat-value">8 种</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">GPU 加速</div>
+          <div class="stat-value">✅ 已启用</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 测试函数
+    function testTableSkeleton() {
+      LoadingManager.showSkeleton('skeleton-demo', 'table', 5);
+    }
+
+    function testCardSkeleton() {
+      LoadingManager.showSkeleton('skeleton-demo', 'card', 3);
+    }
+
+    function testListSkeleton() {
+      LoadingManager.showSkeleton('skeleton-demo', 'list', 5);
+    }
+
+    function testTopProgress() {
+      LoadingManager.showTopProgress();
+      setTimeout(() => LoadingManager.hideTopProgress(), 3000);
+    }
+
+    function testTableLoading() {
+      LoadingManager.showTableLoading('table-loading-demo', '正在加载数据...');
+      setTimeout(() => LoadingManager.hideTableLoading('table-loading-demo'), 3000);
+    }
+
+    function testTableLoadingTransparent() {
+      LoadingManager.showTableLoading('table-loading-demo', '正在刷新...', true);
+      setTimeout(() => LoadingManager.hideTableLoading('table-loading-demo'), 3000);
+    }
+
+    function testButtonLoading(btnId) {
+      const btn = document.getElementById(btnId);
+      LoadingManager.setButtonLoading(btn, true);
+      setTimeout(() => LoadingManager.setButtonLoading(btn, false), 3000);
+    }
+
+    function testInlineLoading() {
+      LoadingManager.showInlineLoading('inline-demo', '搜索中...');
+      setTimeout(() => {
+        document.getElementById('inline-demo').innerHTML = '<p style="padding: 20px; color: #10b981;">✅ 搜索完成！</p>';
+      }, 3000);
+    }
+
+    function testEmptyStateNoData() {
+      LoadingManager.showEmptyState('empty-demo', {
+        icon: '📭',
+        title: '暂无数据',
+        description: '当前没有可显示的内容',
+        actionText: '刷新',
+        onAction: () => alert('刷新操作')
+      });
+    }
+
+    function testEmptyStateNoResults() {
+      LoadingManager.showEmptyState('empty-demo', {
+        icon: '🔍',
+        title: '未找到结果',
+        description: '没有找到与 "测试" 相关的内容',
+        actionText: '清除搜索',
+        onAction: () => alert('清除搜索')
+      });
+    }
+
+    function testEmptyStateError() {
+      LoadingManager.showEmptyState('empty-demo', {
+        icon: '⚠️',
+        title: '加载失败',
+        description: '网络连接异常，请检查网络设置',
+        actionText: '重试',
+        onAction: () => alert('重试操作')
+      });
+    }
+
+    function testFullscreenLoading() {
+      LoadingManager.showFullscreenLoading('正在处理数据，请稍候...');
+      setTimeout(() => LoadingManager.hideFullscreenLoading(), 3000);
+    }
+
+    async function testWrapperFunction() {
+      const mockFetch = () => new Promise(resolve => setTimeout(resolve, 3000));
+      
+      const loadWithSkeleton = LoadingManager.withSkeleton(
+        'wrapper-demo',
+        async () => {
+          await mockFetch();
+          document.getElementById('wrapper-demo').innerHTML = `
+            <div style="padding: 20px; text-align: center; color: #10b981;">
+              <h3>✅ 数据加载完成！</h3>
+              <p>使用包装函数自动处理加载状态</p>
+            </div>
+          `;
+        },
+        'table',
+        5
+      );
+      
+      await loadWithSkeleton();
+    }
+
+    function clearDemo(id) {
+      const container = document.getElementById(id);
+      if (container) {
+        container.innerHTML = '';
+      }
+    }
+
+    // 页面加载完成提示
+    window.addEventListener('load', () => {
+      console.log('✅ 加载状态测试页面已就绪');
+      console.log('📖 请点击各个按钮测试不同的加载状态效果');
+    });
+  </script>
+</body>
+</html>

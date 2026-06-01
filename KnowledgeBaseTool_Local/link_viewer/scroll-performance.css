@@ -1,0 +1,48 @@
+/* ============================================
+   滚动性能优化 CSS - 轻量版
+   只保留最关键的优化，避免过度优化
+   ============================================ */
+
+/* 1. 平滑滚动 */
+html {
+  scroll-behavior: smooth;
+}
+
+/* 2. 优化表格容器滚动 - 最关键 */
+.table-container,
+#kbTableContainer,
+#matrixTableContainer {
+  /* 优化滚动 */
+  -webkit-overflow-scrolling: touch;
+  /* 只优化滚动容器 */
+  overflow: auto;
+}
+
+/* 3. 固定表格布局 - 防止重排 */
+.kb-table {
+  table-layout: fixed;
+}
+
+/* 4. 优化文本渲染 */
+body,
+input,
+textarea,
+button {
+  text-rendering: optimizeSpeed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 5. 移动端优化 */
+@media (max-width: 768px) {
+  body,
+  .table-container {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+}
+
+/* ============================================
+   说明：移除了过度的硬件加速和will-change
+   这些可能导致内存占用过高，反而更卡
+   ============================================ */

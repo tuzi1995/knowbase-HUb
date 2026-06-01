@@ -1,0 +1,3257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>K-Matrix 助手</title>
+  
+  <!-- Google Fonts - 设计系统字体 -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Calistoga&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  
+  <!-- 设计系统 CSS - 必须在其他样式之前加载 -->
+  <link rel="stylesheet" href="design-system.css?v=2">
+  
+  <!-- 原有样式 -->
+  <link rel="stylesheet" href="styles.min.css">
+  <link rel="stylesheet" href="extra_styles.min.css">
+  <!-- 滚动性能优化 - 暂时禁用 -->
+  <!-- <link rel="stylesheet" href="scroll-performance.css?v=2"> -->
+  <!-- 加载状态提示样式 -->
+  <link rel="stylesheet" href="loading-states.css?v=2">
+  <!-- Font Awesome (本地化) -->
+  <link rel="stylesheet" href="vendor/fontawesome.min.css">
+  <!-- TOAST UI Editor (本地化) -->
+  <link rel="stylesheet" href="vendor/toastui-editor.min.css" />
+  <script src="vendor/toastui-editor-all.min.js"></script>
+  <!-- 加载状态管理器 -->
+  <script src="loading-manager.js?v=1"></script>
+  <style>
+    /* Markdown Editor Styles */
+    .markdown-editor-container {
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    .markdown-toolbar {
+        background: #f5f5f5;
+        border-bottom: 1px solid #ddd;
+        padding: 5px;
+        display: flex;
+        gap: 5px;
+        align-items: center;
+    }
+    .markdown-toolbar button {
+        border: 1px solid transparent;
+        background: none;
+        cursor: pointer;
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-size: 14px;
+    }
+    .markdown-toolbar button:hover {
+        background: #e0e0e0;
+        border-color: #ccc;
+    }
+    .markdown-textarea {
+        width: 100%;
+        border: none;
+        padding: 10px;
+        resize: vertical;
+        font-family: monospace;
+        outline: none;
+        display: block; /* Default display */
+    }
+    .markdown-preview {
+        padding: 10px;
+        min-height: 150px;
+        background: #fff;
+        overflow-y: auto;
+        border-top: 1px solid #eee; /* Optional visual separation */
+    }
+    /* Preview content styling */
+    .markdown-preview h1, .markdown-preview h2, .markdown-preview h3 { margin-top: 10px; margin-bottom: 10px; }
+    .markdown-preview ul, .markdown-preview ol { padding-left: 20px; margin-bottom: 10px; }
+    .markdown-preview p { margin-bottom: 10px; }
+    .markdown-preview code { background: #f0f0f0; padding: 2px 4px; border-radius: 3px; font-family: monospace; }
+    .markdown-preview pre { background: #f0f0f0; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    .markdown-preview blockquote { border-left: 4px solid #ddd; padding-left: 10px; color: #666; margin: 10px 0; }
+
+    /* 弹窗头部关闭按钮样式 */
+    .close-modal-btn:hover {
+      background-color: #f1f5f9 !important;
+      transform: scale(1.1);
+    }
+    .close-modal-btn:active {
+      transform: scale(0.9);
+    }
+
+    .gov-filter-row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: end;
+    }
+    .gov-filter-row + .gov-filter-row {
+        margin-top: 12px;
+    }
+    .gov-advanced-summary {
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: #f8fafc;
+        border: 1px dashed #dbe4ff;
+        color: #475569;
+        font-size: 13px;
+        line-height: 1.5;
+    }
+    .gov-advanced-summary strong {
+        color: #334155;
+    }
+    .gov-filter-field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-width: 0;
+    }
+    .gov-filter-field label {
+        font-size: 12px;
+        color: #64748b;
+        font-weight: 600;
+        line-height: 1;
+    }
+    .gov-filter-field input,
+    .gov-filter-field select {
+        min-height: 38px;
+    }
+    .gov-filter-field-id {
+        flex: 1 1 180px;
+        max-width: 220px;
+    }
+    .gov-filter-field-question {
+        flex: 2 1 380px;
+    }
+    .gov-filter-field-status {
+        flex: 1 1 170px;
+        max-width: 210px;
+    }
+    .gov-filter-row-advanced {
+        padding-top: 4px;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .gov-range-cluster {
+        display: flex;
+        gap: 20px;
+        flex-wrap: wrap;
+        align-items: center;
+        flex: 1 1 auto;
+    }
+    .gov-range-group {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+    .gov-range-label {
+        font-size: 13px;
+        font-weight: 600;
+        color: #334155;
+        white-space: nowrap;
+    }
+    .gov-range-group input {
+        width: 110px;
+        min-height: 36px;
+    }
+    .gov-range-sep {
+        color: #94a3b8;
+        font-weight: 600;
+    }
+    .gov-filter-actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px dashed #e2e8f0;
+    }
+    .gov-summary-panel {
+        margin-bottom: 10px;
+        padding: 18px 20px;
+        border-radius: 18px;
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(244, 248, 255, 0.96));
+        border: 1px solid rgba(191, 219, 254, 0.9);
+        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
+    }
+    .gov-filter-panel {
+        margin-bottom: 10px;
+        padding: 18px 20px;
+        border-radius: 18px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.96));
+        border: 1px solid rgba(226, 232, 240, 0.95);
+        box-shadow: 0 14px 32px rgba(15, 23, 42, 0.06);
+    }
+    .matrix-category-group {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        flex-wrap: wrap;
+    }
+    .matrix-category-label {
+        min-width: 72px;
+        padding-top: 6px;
+        color: #334155;
+    }
+    .matrix-category-chips,
+    .matrix-selected-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        min-height: 32px;
+        align-items: center;
+    }
+    .tag-chip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 32px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(191, 219, 254, 0.95);
+        background: #f8fbff;
+        color: #475569;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+    .tag-chip:hover {
+        border-color: rgba(96, 165, 250, 0.95);
+        background: #eef5ff;
+        color: #1d4ed8;
+    }
+    .tag-chip.active {
+        border-color: rgba(37, 99, 235, 0.98);
+        background: linear-gradient(135deg, #2563eb, #4f8dfd);
+        color: #ffffff;
+        box-shadow: 0 10px 22px rgba(37, 99, 235, 0.22);
+    }
+    .gov-filter-btn-group {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+    .gov-inline-link-btn {
+        border: none;
+        background: transparent;
+        color: #6366f1;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        padding: 4px 2px;
+    }
+    .gov-inline-link-btn:hover {
+        color: #4338ca;
+        text-decoration: underline;
+    }
+    #linkView .link-toolbar-row {
+        column-gap: 12px !important;
+        row-gap: 10px !important;
+    }
+    #linkView .link-toolbar-panel,
+    #linkView .link-filter-panel {
+        padding-top: 10px !important;
+        padding-bottom: 10px !important;
+    }
+    #linkView .link-batch-actions {
+        margin-top: 10px !important;
+        padding-top: 0 !important;
+        border-top: 0 !important;
+    }
+    #linkView .link-toolbar-panel,
+    #linkView .link-filter-panel,
+    #linkView .table-container {
+        margin-bottom: 10px !important;
+    }
+    #linkView .link-filter-search-row {
+        row-gap: 10px !important;
+    }
+    #linkView .gov-filter-row + .gov-filter-row {
+        margin-top: 10px !important;
+    }
+    #linkView .pagination-container {
+        margin-top: 10px !important;
+    }
+    @media (max-width: 1100px) {
+        .gov-filter-field-id,
+        .gov-filter-field-question,
+        .gov-filter-field-status {
+            flex: 1 1 calc(50% - 12px);
+            max-width: none;
+        }
+        .gov-filter-actions {
+            justify-content: flex-start;
+        }
+        .gov-filter-btn-group {
+            justify-content: flex-start;
+        }
+    }
+    @media (max-width: 720px) {
+        .gov-filter-panel {
+            padding: 14px;
+        }
+        .gov-summary-panel {
+            padding: 14px;
+        }
+        .gov-filter-field-id,
+        .gov-filter-field-question,
+        .gov-filter-field-status {
+            flex: 1 1 100%;
+        }
+        .matrix-filter-control-panel {
+            min-width: 100%;
+        }
+        .matrix-category-label {
+            min-width: auto;
+            width: 100%;
+            padding-top: 0;
+        }
+        .gov-range-group input {
+            width: 100px;
+        }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section id="loginPanel" class="login-panel">
+      <h2>请先登录</h2>
+      <div class="login-form">
+        <input type="text" id="username" placeholder="用户名" class="input-modern" />
+        <input type="password" id="password" placeholder="密码" class="input-modern" />
+        <button id="loginBtn" class="primary-btn btn-primary-gradient btn-lg">登录</button>
+      </div>
+    </section>
+
+    <section id="mainContent" class="d-none">
+      <div class="header-info workbench-header">
+        <div class="workbench-header-main">
+          <div class="workbench-badge">K-matrix</div>
+          <div class="workbench-title-group">
+            <h2 id="currentModuleTitle">知识库管理</h2>
+            <p id="currentModuleDesc">维护 V1 / V1T-1 知识库内容，支持搜索、编辑、导出与同步。</p>
+          </div>
+          <div class="workbench-status-row">
+            <span class="workbench-status-pill">当前分组：<b id="currentModuleGroup">核心数据</b></span>
+            <span class="workbench-status-pill">当前用户：<b id="currentUser"></b></span>
+            <span class="workbench-status-pill">运行环境：<b>本地工作台</b></span>
+          </div>
+        </div>
+        <div class="workbench-header-actions">
+          <button onclick="openManual()" class="btn-ghost workbench-header-btn" style="color: var(--muted-foreground);">
+            <i class="fas fa-book"></i> 使用说明
+          </button>
+          <button id="logoutBtn" class="btn-ghost workbench-header-btn" style="color: var(--muted-foreground);" onclick="logout()">
+            退出
+          </button>
+        </div>
+      </div>
+
+      <div class="workbench-layout" id="workbenchLayout">
+        <aside class="workbench-sidebar">
+          <div class="workbench-sidebar-card">
+            <div class="workbench-sidebar-header">
+              <div class="workbench-sidebar-header-copy">
+                <div class="workbench-sidebar-title">模块导航</div>
+                <div class="workbench-sidebar-subtitle">按任务分组，保留原有功能入口</div>
+              </div>
+              <button
+                type="button"
+                class="workbench-sidebar-toggle"
+                id="workbenchSidebarToggle"
+                aria-label="收起模块导航"
+                aria-expanded="true"
+                title="收起模块导航"
+                onclick="toggleWorkbenchSidebar()"
+              >
+                <i class="fas fa-angle-left" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="workbench-sidebar-nav">
+              <div class="workbench-nav-group" data-nav-group="核心数据">
+                <div class="workbench-nav-group-title">核心数据</div>
+                <button onclick="switchTab('kbView')" class="tab-modern workbench-nav-btn active" id="tab-kbView">知识库管理</button>
+                <button onclick="switchTab('matrixView')" class="tab-modern workbench-nav-btn" id="tab-matrixView">机型矩阵管理</button>
+                <button onclick="switchTab('linkView')" class="tab-modern workbench-nav-btn" id="tab-linkView">多媒体预览</button>
+              </div>
+
+              <div class="workbench-nav-group" data-nav-group="质量管控">
+                <div class="workbench-nav-group-title">质量管控</div>
+                <button onclick="switchTab('scoringView')" class="tab-modern workbench-nav-btn" id="tab-scoringView">知识库评分</button>
+                <button onclick="switchTab('governanceView')" class="tab-modern workbench-nav-btn" id="tab-governanceView">知识库治理</button>
+              </div>
+
+              <div class="workbench-nav-group" data-nav-group="工具与映射">
+                <div class="workbench-nav-group-title">工具与映射</div>
+                <button onclick="switchTab('dataSettingsView')" class="tab-modern workbench-nav-btn" id="tab-dataSettingsView">数据设置</button>
+                <button onclick="switchTab('smartMappingView')" class="tab-modern workbench-nav-btn" id="tab-smartMappingView">智能映射</button>
+              </div>
+
+              <div class="workbench-nav-group" data-nav-group="日志与归档">
+                <div class="workbench-nav-group-title">日志与归档</div>
+                <button onclick="switchTab('modificationsView')" class="tab-modern workbench-nav-btn" id="tab-modificationsView">修改记录</button>
+                <button onclick="switchTab('archiveView')" class="tab-modern workbench-nav-btn" id="tab-archiveView">归档管理</button>
+              </div>
+            </div>
+          </div>
+        </aside>
+        <button
+          type="button"
+          class="workbench-sidebar-toggle workbench-sidebar-toggle-float"
+          id="workbenchSidebarToggleFloat"
+          aria-label="展开模块导航"
+          aria-expanded="false"
+          title="展开模块导航"
+          onclick="toggleWorkbenchSidebar()"
+        >
+          <i class="fas fa-angle-right" aria-hidden="true"></i>
+        </button>
+
+        <div class="workbench-main">
+          <div class="workbench-content-panel">
+            <div class="workbench-content-head">
+              <div class="workbench-content-head-label">当前模块</div>
+              <div id="currentModuleLabel" class="workbench-content-head-value">核心数据 / 知识库管理</div>
+            </div>
+
+            <div class="workbench-views">
+
+      <!-- Tab Content: Knowledge Base -->
+      <div id="kbView">
+          <div class="kb-section">
+            <div class="gov-summary-panel" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
+                <div>
+                    <div style="font-weight: 600; color: #1E3A8A; margin-bottom: 4px;">维护 V1 / V1T-1 知识库内容</div>
+                    <div class="text-muted" style="font-size: 13px;">当前数据源: 
+                        <label class="radio-label" style="display:inline-flex; margin-left: 8px;">
+                            <input type="radio" name="kbTable" value="knowledge_base_v1" checked onchange="clearKBCache(); loadKBTable()"> 此刻库
+                        </label>
+                        <label class="radio-label" style="display:inline-flex; margin-left: 8px;">
+                            <input type="radio" name="kbTable" value="knowledge_base_v1_t1" onchange="clearKBCache(); loadKBTable()"> 前刻库
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="action-bar" style="margin: 0; padding: 0; border: none; background: transparent;">
+                    <button onclick="openKBEditModal()" class="primary-btn btn-primary-gradient">➕ 新增数据</button>
+                    <button onclick="loadKBTable()" class="action-btn btn-secondary-outline">🔄 刷新数据</button>
+                    <button onclick="openExportModal()" class="action-btn btn-secondary-outline">📤 导出数据</button>
+                    <button id="kbPreviewSelectedBtn" class="action-btn btn-secondary-outline">👁️ 仅预览勾选</button>
+                    <button onclick="showRevisionModal()" class="success-btn btn-success-solid" title="将所有修改中/删除中的状态重置为未调整">✅ 已完成修订</button>
+                    <button onclick="deleteSelectedKBItems()" class="danger-btn btn-danger-solid">🗑️ 删除选中</button>
+                    <button onclick="switchTab('dataSettingsView')" class="action-btn btn-secondary-outline">⚙️ 数据设置</button>
+                </div>
+            </div>
+
+            <!-- Import Panel (Hidden by default) -->
+            <div id="importKBPanel" class="gov-filter-panel d-none" style="background: #f8fafc; border-color: #cbd5e1;">
+                <div style="display:flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <strong style="color:#1e293b;">导入数据到 V1</strong>
+                    <button onclick="document.getElementById('importKBPanel').classList.add('d-none')" class="btn-ghost" style="padding: 4px; min-height: auto; border: none; background: transparent; cursor: pointer; font-size: 16px;">✖</button>
+                </div>
+                <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">
+                    <div>
+                        <div style="margin-bottom: 8px; font-size: 13px; font-weight: 600;">导入模式:</div>
+                        <div style="display: flex; gap: 16px;">
+                            <label class="radio-label"><input type="radio" name="importMode" value="upsert" checked> 增量更新</label>
+                            <label class="radio-label"><input type="radio" name="importMode" value="append"> 批量新增</label>
+                            <label class="radio-label"><input type="radio" name="importMode" value="overwrite"> <span class="text-danger">全量覆盖</span></label>
+                        </div>
+                    </div>
+                    <div>
+                        <div style="margin-bottom: 8px; font-size: 13px; font-weight: 600;">选择 Excel 文件:</div>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <input type="file" id="importFileKB" accept=".xlsx,.xls,.csv" class="input-modern" style="width: 240px; min-height: 36px; padding: 4px 8px;">
+                            <button onclick="previewCheckDuplicates()" class="action-btn btn-secondary-outline" style="min-height: 36px; padding: 4px 12px;">🔍 查重预览</button>
+                            <button onclick="importKB()" id="importBtn" class="primary-btn btn-primary-gradient" style="min-height: 36px; padding: 4px 12px;">开始导入</button>
+                            <button onclick="downloadTemplate()" class="action-btn btn-secondary-outline" style="min-height: 36px; padding: 4px 12px;">📥 模板</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="checkResult" class="d-none" style="margin-top: 12px; max-height: 200px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; background: white; border-radius: 8px;"></div>
+                <span id="importStatus" class="text-muted" style="margin-top: 8px; display: block; font-size: 13px;"></span>
+            </div>
+
+            <!-- Filter Section -->
+            <div class="gov-filter-panel kb-filter-panel-compact">
+                <div class="gov-filter-row gov-filter-row-basic kb-filter-search-row">
+                    <div class="gov-filter-field">
+                        <input type="text" id="idSearch" class="input-modern" placeholder="搜索ID...">
+                    </div>
+                    <div class="gov-filter-field">
+                        <input type="text" id="questionSearch" class="input-modern" placeholder="搜索问题...">
+                    </div>
+                    <div class="gov-filter-field">
+                        <input type="text" id="similarQuestionSearch" class="input-modern" placeholder="搜索相似问题...">
+                    </div>
+                    <div class="gov-filter-field">
+                        <input type="text" id="answerSearch" class="input-modern" placeholder="搜索答案...">
+                    </div>
+                    <div class="gov-filter-field">
+                        <input type="text" id="productNameSearch" class="input-modern" placeholder="产品名称...">
+                    </div>
+                    <div class="gov-filter-field">
+                        <input type="text" id="urlSearch" class="input-modern" placeholder="搜索URL...">
+                    </div>
+                </div>
+
+                <div class="gov-filter-row gov-filter-row-basic kb-filter-chip-row">
+                    <div id="reviewStatusChips" class="kb-filter-group kb-filter-group-wrap">
+                            <span class="kb-filter-label">状态:</span>
+                            <div class="tag-chip active" data-value="unadjusted" onclick="toggleStatusFilter(this)">未调整</div>
+                            <div class="tag-chip active" data-value="creating" onclick="toggleStatusFilter(this)">新增中</div>
+                            <div class="tag-chip active" data-value="modifying" onclick="toggleStatusFilter(this)">修改中</div>
+                            <div class="tag-chip active" data-value="deleting" onclick="toggleStatusFilter(this)">删除中</div>
+                    </div>
+                    <div id="kbProductCategoryFilter" class="kb-filter-group kb-filter-group-wrap">
+                            <span class="kb-filter-label">产品分类:</span>
+                            <div id="kbProductCategoryChips" class="kb-filter-chips"></div>
+                    </div>
+                    <div id="kbDraftStatusChips" class="kb-filter-group kb-filter-group-wrap">
+                            <span class="kb-filter-label">草稿状态:</span>
+                            <input type="hidden" id="kbDraftStatusFilter" value="">
+                            <div class="tag-chip active" data-value="" onclick="setKBDraftStatusFilter(this)">全部</div>
+                            <div class="tag-chip" data-value="has_draft" onclick="setKBDraftStatusFilter(this)">有草稿</div>
+                            <div class="tag-chip" data-value="pending_sync" onclick="setKBDraftStatusFilter(this)">待同步</div>
+                            <div class="tag-chip" data-value="no_draft" onclick="setKBDraftStatusFilter(this)">无草稿</div>
+                    </div>
+                    <div class="kb-tag-filter-inline">
+                        <button type="button" id="kbTagFilterModalBtn" onclick="openKbTagFilterModal()" class="action-btn btn-secondary-outline">
+                            🏷️ 标签筛选 <span id="kbTagFilterCount" style="background: #e2e8f0; color: #475569; padding: 2px 6px; border-radius: 10px; font-size: 11px; display: none;">0</span>
+                        </button>
+                        <input type="hidden" name="kbTagFilterMode" value="OR">
+                    </div>
+                    <div class="gov-filter-btn-group kb-filter-actions-inline">
+                        <button onclick="searchKB()" class="primary-btn btn-primary-gradient">🔍 搜索</button>
+                        <button onclick="resetKBSearch()" class="action-btn btn-secondary-outline">重置</button>
+                    </div>
+                </div>
+            </div>
+
+                <div id="kbTableContainer" class="table-container min-h-200 mb-0">
+                    <table class="kb-table" id="kbTable">
+                        <thead>
+                            <tr>
+                                <th class="col-checkbox" style="width: 40px; text-align: center;">
+                                    <input type="checkbox" id="kbSelectAll" onclick="toggleKBSelectAll()" title="全选/取消全选 (当前页)">
+                                </th>
+                                <th class="col-status" style="width: 80px;">修订状态</th>
+                                <th class="col-id" onclick="handleKBSort('question_wiki_id')" title="点击排序">ID</th>
+                                <th class="col-question" onclick="handleKBSort('question')" title="点击排序">问题</th>
+                                <th class="col-answer" onclick="handleKBSort('answer')" title="点击排序">答案</th>
+                                <th class="col-product" onclick="handleKBSort('product_name')" title="点击排序">产品型号</th>
+                                <th class="col-category">产品分类</th>
+                                <th class="col-type">问题类型</th>
+                                <th class="col-type">答案类型</th>
+                                <th class="col-similar">相似问题</th>
+                                <th class="col-bm25">BM25</th>
+                                <th class="col-keyword">关键词</th>
+                                <th class="col-image-urls">图片链接</th>
+                                <th class="col-video-urls">视频链接</th>
+                                <th class="col-file-urls">文件链接</th>
+                                <th class="col-link-type">外链类型</th>
+                                <th class="col-link-url">外部链接</th>
+                                <th class="col-time" onclick="handleKBSort('update_time')" title="点击排序">更新时间</th>
+                                <th class="col-tags" style="width: 200px;">标签</th>
+                                <th class="col-action">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="kbTableBody">
+                            <tr><td colspan="15" class="empty-message">请选择知识库查看数据</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="pagination-container">
+                    <div class="pagination-left">
+                        <div class="page-size-wrapper">
+                            <span class="page-size-label">每页显示：</span>
+                            <select id="kbPageSizeSelect" onchange="changeKBPageSize()" class="page-size-select input-modern input-sm">
+                                <option value="10">10</option>
+                                <option value="20">20</option>
+                                <option value="50" selected>50</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="pagination-right">
+                        <span id="kbPageInfo" class="page-info">共 0 条</span>
+                        <button onclick="changeKBPage(-1)" id="prevKBPageBtn" disabled class="pagination-btn btn-pagination-modern">上一页</button>
+                        <button onclick="changeKBPage(1)" id="nextKBPageBtn" disabled class="pagination-btn btn-pagination-modern">下一页</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+      </div>
+
+
+      <div id="dataSettingsView" class="d-none">
+          <div class="kb-section data-settings-section">
+            <div class="data-settings-hero">
+                <div>
+                    <div class="data-settings-eyebrow">DATA CONTROL CENTER</div>
+                    <h3 class="data-settings-title">数据设置</h3>
+                    <p class="data-settings-desc">集中管理知识库导入、同步链路、AI 配置、型号库和表格展示，原“更多操作”已统一迁移到这里。</p>
+                </div>
+                <div class="data-settings-hero-actions">
+                    <button onclick="switchTab('kbView')" class="action-btn btn-secondary-outline">返回知识库</button>
+                    <button onclick="loadKBTable()" class="primary-btn btn-primary-gradient">刷新知识库数据</button>
+                </div>
+            </div>
+
+            <div class="data-settings-grid">
+                <article class="data-setting-card data-setting-card-primary">
+                    <div class="data-setting-card-head">
+                        <div class="data-setting-icon">📥</div>
+                        <div>
+                            <h4>导入数据</h4>
+                            <p>将 Excel / CSV 导入 V1，支持增量更新、批量新增和全量覆盖。</p>
+                        </div>
+                    </div>
+                    <div class="data-setting-tags">
+                        <span>V1 数据源</span>
+                        <span>查重预览</span>
+                        <span>模板下载</span>
+                    </div>
+                    <div class="data-setting-actions">
+                        <button onclick="openDataSettingsImport()" class="primary-btn btn-primary-gradient">打开导入面板</button>
+                        <button onclick="downloadTemplate()" class="action-btn btn-secondary-outline">下载模板</button>
+                    </div>
+                </article>
+
+                <article class="data-setting-card data-setting-card-danger">
+                    <div class="data-setting-card-head">
+                        <div class="data-setting-icon">🔄</div>
+                        <div>
+                            <h4>同步此刻到前刻</h4>
+                            <p>将 V1 全量覆盖到 V1T-1，用于保留上一时刻知识库快照。</p>
+                        </div>
+                    </div>
+                    <div class="data-setting-tags">
+                        <span>高风险操作</span>
+                        <span>全量覆盖</span>
+                    </div>
+                    <div class="data-setting-actions">
+                        <button id="syncBtn" onclick="syncKB()" class="danger-btn btn-danger-solid">执行同步</button>
+                        <span id="syncStatus" class="data-setting-status"></span>
+                    </div>
+                </article>
+
+                <article class="data-setting-card">
+                    <div class="data-setting-card-head">
+                        <div class="data-setting-icon">🔗</div>
+                        <div>
+                            <h4>一键同步下游</h4>
+                            <p>把当前 V1 同步到机型矩阵、多媒体链接与评分表。</p>
+                        </div>
+                    </div>
+                    <div class="data-setting-tags">
+                        <span>矩阵</span>
+                        <span>多媒体</span>
+                        <span>评分</span>
+                    </div>
+                    <div class="data-setting-actions">
+                        <button id="syncDownstreamBtn" onclick="syncDownstreamFromV1()" class="primary-btn btn-primary-gradient">同步下游</button>
+                        <span id="syncDownstreamStatus" class="data-setting-status"></span>
+                    </div>
+                </article>
+
+                <article class="data-setting-card">
+                    <div class="data-setting-card-head">
+                        <div class="data-setting-icon">🤖</div>
+                        <div>
+                            <h4>AI 配置</h4>
+                            <p>配置模型接口、问题润色、答案结构化和相似问题生成提示词。</p>
+                        </div>
+                    </div>
+                    <div class="data-setting-tags">
+                        <span>模型接口</span>
+                        <span>Prompt</span>
+                        <span>编辑助手</span>
+                    </div>
+                    <div class="data-setting-actions">
+                        <button onclick="openAiConfigModal()" class="action-btn btn-secondary-outline">打开 AI 配置</button>
+                    </div>
+                </article>
+
+                <article class="data-setting-card">
+                    <div class="data-setting-card-head">
+                        <div class="data-setting-icon">⚙️</div>
+                        <div>
+                            <h4>管理型号库</h4>
+                            <p>维护产品分类和型号目录，为知识库与矩阵提供统一选项。</p>
+                        </div>
+                    </div>
+                    <div class="data-setting-tags">
+                        <span>产品分类</span>
+                        <span>型号目录</span>
+                    </div>
+                    <div class="data-setting-actions">
+                        <button onclick="openProductManager()" class="action-btn btn-secondary-outline">进入型号库</button>
+                    </div>
+                </article>
+
+                <article class="data-setting-card">
+                    <div class="data-setting-card-head">
+                        <div class="data-setting-icon">👁️</div>
+                        <div>
+                            <h4>显示列</h4>
+                            <p>按当前维护任务自定义知识库表格字段，降低横向浏览成本。</p>
+                        </div>
+                    </div>
+                    <div class="data-setting-tags">
+                        <span>表格展示</span>
+                        <span>字段配置</span>
+                    </div>
+                    <div class="data-setting-actions">
+                        <button onclick="openColumnSettingsModal()" class="action-btn btn-secondary-outline">配置显示列</button>
+                    </div>
+                </article>
+            </div>
+          </div>
+      </div>
+
+
+
+      <!-- Tab Content: Matrix View -->
+      <div id="matrixView" class="d-none">
+          <div class="kb-section">
+            
+            <!-- 层1：页面头 -->
+            <div class="gov-summary-panel">
+                <div>
+                    <div class="matrix-summary-title">维护各机型知识库配置矩阵</div>
+                    <div class="text-muted matrix-summary-desc">请注意：批量提交修改会写入操作日志</div>
+                </div>
+                
+                <div class="action-bar matrix-header-actions">
+                    <button onclick="loadMatrixData()" class="action-btn btn-secondary-outline">🔄 刷新数据</button>
+                    <button onclick="exportMatrix()" class="action-btn btn-secondary-outline">📤 导出矩阵</button>
+                    <div class="dropdown matrix-more-menu-wrap">
+                        <button class="action-btn btn-secondary-outline dropdown-toggle" onclick="toggleMatrixMoreMenu(this, event)">更多操作 ▼</button>
+                        <div class="dropdown-menu d-none matrix-more-menu">
+                            <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openSyncMatrixModal()" class="matrix-more-menu-danger">🔄 同步此刻库</a>
+                            <div class="matrix-more-menu-divider"></div>
+                            <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openProductManager()">⚙️ 管理型号库</a>
+                            <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openModelMappingModal()">🗺️ 机型映射配置</a>
+                            <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openCopyConfigModal()">📋 复制机型配置</a>
+                        </div>
+                    </div>
+                    <button id="matrixSubmitChangesBtn" onclick="submitMatrixChanges()" class="primary-btn" title="提交已选修改">✅ 提交已选修改</button>
+                    <button id="matrixSubmitAllChangesBtn" onclick="submitMatrixAllChanges()" class="action-btn btn-secondary-outline" title="提交全量修改">✅ 提交全量修改</button>
+                    <button onclick="openMatrixSubmitLogsModal()" class="action-btn btn-secondary-outline" title="查看提交日志">📜 提交日志</button>
+                    <button onclick="openMatrixDiffComparePicker()" class="action-btn btn-secondary-outline" title="多选表头型号后自动仅显示差异行">🔍 差异对比</button>
+                </div>
+            </div>
+            
+            <!-- 层2：条件层 -->
+            <div class="gov-filter-panel">
+                <div class="gov-filter-row gov-filter-row-basic matrix-filter-row-compact">
+                    <div class="gov-filter-field gov-filter-field-id">
+                        <input type="text" id="matrixSearchId" class="input-modern matrix-input-id" placeholder="搜索ID...">
+                    </div>
+                    <div class="gov-filter-field gov-filter-field-question">
+                        <input type="text" id="matrixSearchQuestion" class="input-modern matrix-input-question" placeholder="搜索问题...">
+                    </div>
+                    <div class="gov-filter-field gov-filter-field-status">
+                        <input type="text" id="matrixSearchAnswer" class="input-modern matrix-input-answer" placeholder="搜索答案...">
+                    </div>
+                    <div class="gov-filter-field gov-filter-field-category matrix-category-panel">
+                        <div class="matrix-category-group matrix-category-group-inline matrix-category-group-row">
+                            <span class="matrix-category-label">产品分类</span>
+                            <div id="matrixProductCategoryChips" class="matrix-category-chips"></div>
+                        </div>
+                    </div>
+                    <div class="gov-filter-field gov-filter-field-matrix-picker matrix-product-filter-field">
+                        <div class="matrix-product-filter-box">
+                            <div class="tags-input-container input-with-dropdown matrix-product-picker">
+                                <input type="text" id="matrixSearchProductInput" class="tags-input input-modern" placeholder="选择机型(多选)">
+                                <button id="matrixSearchProductDropdownBtn" class="dropdown-trigger-btn">▼</button>
+                                <div id="matrixSearchProductDropdown" class="dropdown-menu"></div>
+                            </div>
+                            <div class="matrix-search-product-meta">
+                                <div class="matrix-segmented-control" role="tablist" aria-label="机型匹配模式">
+                                    <button type="button" id="matrixMatchModeAny" class="matrix-segmented-btn active" onclick="setMatrixProductMatchMode('any')">任一</button>
+                                    <button type="button" id="matrixMatchModeAll" class="matrix-segmented-btn" onclick="setMatrixProductMatchMode('all')">所有</button>
+                                </div>
+                                <button onclick="clearMatrixSearchProductFilter()" class="btn-ghost matrix-clear-product-btn">清空</button>
+                            </div>
+                        </div>
+                        <div class="matrix-search-product-selected-wrap">
+                            <div id="matrixSearchProductSelectedChips" class="matrix-selected-chips"></div>
+                        </div>
+                    </div>
+                    <div class="gov-filter-field gov-filter-field-mapping matrix-category-panel matrix-mapping-field">
+                        <div class="matrix-category-group matrix-category-group-inline matrix-category-group-select matrix-mapping-inline">
+                            <label class="matrix-category-label" for="matrixMappingCategorySelect">映射分类</label>
+                            <select id="matrixMappingCategorySelect" class="input-modern form-select matrix-category-select"></select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gov-filter-row gov-filter-row-advanced">
+                    <div class="matrix-filter-control-panel matrix-status-panel">
+                        <div class="matrix-status-tabs" role="tablist" aria-label="修改状态">
+                            <button type="button" id="matrixStatusTabAll" class="matrix-status-tab active" onclick="setMatrixMarkFilterMode('all')">全部</button>
+                            <button type="button" id="matrixStatusTabModified" class="matrix-status-tab" onclick="setMatrixMarkFilterMode('modified')">已修改</button>
+                            <button type="button" id="matrixStatusTabUnmodified" class="matrix-status-tab" onclick="setMatrixMarkFilterMode('unmodified')">未修改</button>
+                        </div>
+                    </div>
+                    <div class="matrix-column-filter-row">
+                        <span class="matrix-filter-label">表头过滤</span>
+                        <div class="tags-input-container input-with-dropdown matrix-column-model-input">
+                            <input type="text" id="matrixColumnModelInput" class="tags-input input-modern" placeholder="选择表头型号">
+                            <button id="matrixColumnModelDropdownBtn" class="dropdown-trigger-btn">▼</button>
+                            <div id="matrixColumnModelDropdown" class="dropdown-menu"></div>
+                        </div>
+                        <button onclick="clearMatrixColumnModelFilter()" class="action-btn btn-sm matrix-column-clear-btn">清空</button>
+                    </div>
+                    <div class="gov-filter-btn-group matrix-inline-actions">
+                        <button onclick="loadMatrixData()" class="primary-btn btn-primary-gradient">🔍 搜索</button>
+                        <button onclick="resetMatrixSearch()" class="action-btn btn-secondary-outline">重置</button>
+                    </div>
+                    <div id="matrixColumnModelSelectedChips" class="matrix-selected-chips"></div>
+                </div>
+            </div>
+
+            <!-- 层3：操作层 (批量操作) -->
+            <div class="matrix-section-toolbar">
+                <div id="matrixBulkToolbar" class="matrix-bulk-toolbar d-none">
+                    <span class="matrix-bulk-title">批量操作:</span>
+                    <button onclick="bulkSetMatrixConfig(true)" class="success-btn btn-sm" title="对已勾选的问题行设为已配置">✅ 设为已配置</button>
+                    <button onclick="bulkSetMatrixConfig(false)" class="danger-btn btn-sm" title="对已勾选的问题行设为未配置">🚫 设为未配置</button>
+                    <button onclick="cancelMatrixSelection()" class="action-btn btn-sm">取消选择</button>
+                </div>
+            </div>
+            
+            <!-- 层4：表格层 -->
+            <div id="matrixTableContainer" class="table-container min-h-400 mb-0 custom-scrollbar matrix-table-wrap">
+                <div id="matrixDiffCompareNotice" class="matrix-diff-compare-notice d-none">当前为差异对比模式（检测到多选），可通过筛选区“重置”退出</div>
+                <table class="kb-table" id="matrixTable">
+                    <thead>
+                        <tr id="matrixTableHead">
+                            <!-- Headers will be generated dynamically -->
+                        </tr>
+                    </thead>
+                    <tbody id="matrixTableBody">
+                        <tr><td class="empty-message">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="pagination-container">
+                <div class="pagination-left">
+                    <div class="page-size-wrapper">
+                        <span class="page-size-label">每页显示：</span>
+                        <select id="matrixPageSizeSelect" onchange="changeMatrixPageSize()" class="page-size-select input-modern input-sm">
+                            <option value="10">10</option>
+                            <option value="20" selected>20</option>
+                            <option value="50">50</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="pagination-right">
+                    <span id="matrixPageInfo" class="page-info">共 0 条</span>
+                    <button onclick="changeMatrixPage(-1)" id="prevMatrixPageBtn" disabled class="pagination-btn btn-pagination-modern">上一页</button>
+                    <button onclick="changeMatrixPage(1)" id="nextMatrixPageBtn" disabled class="pagination-btn btn-pagination-modern">下一页</button>
+                </div>
+            </div>
+          </div>
+      </div>
+
+      <div id="scoringView" class="d-none">
+          <!-- Modals (Moved to end of file to avoid ID conflicts) -->
+          
+          <div class="kb-section">
+            <div class="kb-toolbar scoring-toolbar-row">
+                <div class="flex-center gap-10 scoring-fixed-group">
+                    <button id="syncScoringBtn" onclick="syncScoringData()" class="action-btn btn-secondary-outline" title="从V1库同步数据到评分表">🔄 同步此刻库</button>
+                    <div class="divider-vertical"></div>
+                    <span>随机抽样:</span>
+                    <button onclick="sampleScoring(10)" class="action-btn btn-secondary-outline">10条</button>
+                    <button onclick="sampleScoring(50)" class="action-btn btn-secondary-outline">50条</button>
+                    <button onclick="sampleScoring(100)" class="action-btn btn-secondary-outline">100条</button>
+                </div>
+                
+                <div class="divider-vertical"></div>
+
+                <div class="flex-center gap-10 scoring-fixed-group">
+                    <button onclick="openApiConfigModal()" class="action-btn btn-secondary-outline">⚙️ API 配置</button>
+                    <button onclick="openOpsLibraryModal()" class="action-btn btn-secondary-outline">📚 操作库管理</button>
+                    <button onclick="openScoringCriteriaModal()" class="action-btn btn-secondary-outline">📏 评分标准</button>
+                </div>
+
+                <div class="divider-vertical"></div>
+                
+                <div class="search-group flex-grow scoring-search-group">
+                    <input type="text" id="scoreSearchId" placeholder="ID..." class="scoring-input-id input-modern">
+                    <input type="text" id="scoreSearchProduct" placeholder="产品..." class="scoring-input-product input-modern">
+                    <input type="text" id="scoreSearchQuestion" placeholder="问题..." class="flex-grow scoring-input-question input-modern">
+                </div>
+            </div>
+
+            <div class="kb-toolbar scoring-toolbar-row scoring-toolbar-row-tight">
+                <div class="search-group flex-grow scoring-search-group scoring-search-group-right">
+                    <select id="scoreSearchStatus" class="form-select scoring-status-select">
+                        <option value="">所有状态</option>
+                        <option value="unscored">未评分</option>
+                        <option value="scored">已评分</option>
+                        <option value="scoring">评分中</option>
+                        <option value="outdated">已过期</option>
+                    </select>
+                    <button onclick="scoringPage=1; renderScoringTable(true)" class="primary-btn nowrap-btn">🔍 筛选</button>
+                    <button onclick="resetScoringFilter()" class="action-btn nowrap-btn">🔄 重置</button>
+                    <button id="refreshScoringBtn" onclick="loadScoringData()" class="action-btn nowrap-btn">🔄 刷新</button>
+                </div>
+            </div>
+
+            <div class="action-bar mt-10 mb-10">
+                 <span id="scoringStats" class="text-muted text-sm mr-auto">加载中...</span>
+                 <label class="mr-10 scoring-inline-check">
+                    <input type="checkbox" id="useCacheCb" class="scoring-inline-check-input" checked> 使用缓存
+                 </label>
+                 <button onclick="clearScoringCache()" class="action-btn btn-secondary-outline danger-outline-btn">🗑️ 清空评分缓存</button>
+                 <button id="batchScoreBtn" onclick="batchEvaluateSelected()" class="primary-btn btn-primary-gradient">🤖 批量评分选中项</button>
+                 <button id="evaluateAllBtn" onclick="evaluateAll()" class="success-btn btn-success-solid">评分未缓存项</button>
+                 <button id="pauseScoringBtn" onclick="pauseScoring()" class="action-btn btn-secondary-outline" disabled>⏸️ 暂停评分</button>
+                 <button id="resumeScoringBtn" onclick="resumeScoring()" class="action-btn btn-secondary-outline" disabled>▶️ 继续评分</button>
+                 <button onclick="exportScores()" class="action-btn btn-secondary-outline">📤 导出评分</button>
+            </div>
+
+            <div id="scoringTableContainer" class="table-container min-h-400 mb-0">
+                <table class="kb-table" id="scoringTable">
+                    <thead>
+                        <tr>
+                            <th class="col-check"><input type="checkbox" id="selectAllScoring" onchange="toggleSelectAllScoring()"></th>
+                            <th class="col-id">ID</th>
+                            <th class="col-product">产品</th>
+                            <th class="col-question">问题</th>
+                            <th class="col-answer">答案</th>
+                            <th title="问题质量(10)" class="col-score-quality">质量</th>
+                            <th title="答案合规(30)" class="col-score-compliance">合规</th>
+                            <th title="时效性(20)" class="col-score-timeliness">时效</th>
+                            <th title="解决力(30)" class="col-score-utility">解决</th>
+                            <th title="非冗余(10)" class="col-score-redundancy">非冗余</th>
+                            <th title="多媒体(加分)" class="col-score-multimedia">多媒体</th>
+                            <th class="col-score-total">总分</th>
+                            <th class="col-remarks">建议</th>
+                            <th class="col-analysis">分析</th>
+                            <th class="col-status">状态</th>
+                            <th class="col-action">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="scoringTableBody">
+                        <tr><td colspan="16" class="empty-message">请点击“刷新列表”或“同步 V1 库”加载数据</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="pagination-container">
+                <div class="pagination-left">
+                    <div class="page-size-wrapper">
+                        <span class="page-size-label">每页显示：</span>
+                        <select id="scoringPageSizeSelect" onchange="changeScoringPageSize()" class="page-size-select input-modern input-sm">
+                            <option value="10">10</option>
+                            <option value="20">20</option>
+                            <option value="50" selected>50</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="pagination-right">
+                    <span id="scoringPageInfo" class="page-info">共 0 条</span>
+                    <button onclick="changeScoringPage(-1)" id="prevScoringPageBtn" disabled class="pagination-btn btn-pagination-modern">上一页</button>
+                    <button onclick="changeScoringPage(1)" id="nextScoringPageBtn" disabled class="pagination-btn btn-pagination-modern">下一页</button>
+                </div>
+            </div>
+          </div>
+      </div>
+
+      <!-- Tab Content: Link Viewer -->
+      <div id="linkView" class="d-none">
+        <!-- Image Modal -->
+        <div id="imageModal" class="modal">
+          <div class="modal-content modal-img-container">
+            <div class="image-modal-toolbar">
+              <div class="image-modal-title-group">
+                <div class="image-modal-eyebrow">媒体预览</div>
+                <div class="image-modal-title">图片查看</div>
+              </div>
+              <div class="image-modal-toolbar-actions">
+                <button id="downloadBtn" class="primary-btn image-modal-download-btn">下载</button>
+                <button class="close-modal-btn image-modal-close-btn" type="button">×</button>
+              </div>
+            </div>
+            <div class="image-modal-stage">
+              <img id="modalImg" src="" alt="Preview" class="modal-img">
+              <video id="modalVideo" src="" controls class="modal-img d-none" style="max-height: 85vh; width: auto; max-width: 100%;" referrerpolicy="no-referrer"></video>
+            </div>
+          </div>
+        </div>
+
+        <section class="input-panel link-toolbar-panel">
+          <div class="link-toolbar-row">
+            <button id="openLinkImportModalBtn" class="primary-btn">🔗 链接导入</button>
+            <button id="syncKBPreviewBtn" onclick="syncKBPreview()" class="action-btn" title="从知识库V1同步URL">🔄 同步此刻库</button>
+            <button id="filterDupUrlBtn" class="action-btn" title="仅显示URL重复的记录">🔁 URL 重复项</button>
+            <button id="showLastManualUrlBtn" class="action-btn" title="定位最近一次手动录入的URL">🕒 最近手动导入</button>
+            <button id="exportData" class="action-btn">📤 导出数据</button>
+          </div>
+        </section>
+
+        <div id="linkImportModal" class="modal">
+          <div class="modal-content link-import-modal-content">
+            <div class="link-import-modal-header">
+              <div class="link-import-hero">
+                <div class="link-import-hero-badge">多媒体录入</div>
+                <h3 class="modal-title-no-top">链接导入</h3>
+                <div class="text-muted">统一处理单条录入、批量粘贴与 JSON 文件导入，让新增内容更快进入数据区。</div>
+              </div>
+              <button class="close-modal-btn link-import-close-btn" type="button">关闭</button>
+            </div>
+            <div class="link-import-modal-body">
+              <div class="link-import-card link-import-card-primary">
+                <div class="link-import-card-head">
+                  <div>
+                    <div class="link-import-card-title">单条导入</div>
+                    <div class="link-import-card-desc">适合录入一条图片、视频或页面链接，同时补充标签。</div>
+                  </div>
+                </div>
+                <div class="input-group-row link-import-inline-row">
+                  <div class="input-wrapper flex-grow">
+                      <input id="urlInput" type="url" placeholder="粘贴图片/视频/页面链接" class="modern-input" oninput="this.title=this.value">
+                  </div>
+                  <div class="input-with-dropdown tags-input-container">
+                    <input id="tagsInput" type="text" placeholder="标签，逗号分隔" class="modern-input">
+                    <button id="tagsDropdownBtn" class="dropdown-trigger-btn" title="选择标签">▼</button>
+                    <div id="tagsDropdown" class="dropdown-menu"></div>
+                  </div>
+                  <button id="addBtn" class="primary-btn btn-lg">添加</button>
+                </div>
+              </div>
+
+              <div class="link-import-card">
+                <div class="link-import-card-head">
+                  <div>
+                    <div class="link-import-card-title">批量导入</div>
+                    <div class="link-import-card-desc">每行一个链接，适合一次性导入一批内容；也可直接导入 JSON 数据文件。</div>
+                  </div>
+                </div>
+                <div class="bulk-input-row link-import-bulk-row">
+                  <div class="input-wrapper flex-grow">
+                     <textarea id="bulkInput" placeholder="批量添加：每行一个链接" class="modern-textarea" rows="6"></textarea>
+                  </div>
+                  <div class="link-import-bulk-actions">
+                    <button id="bulkBtn" class="action-btn">批量添加</button>
+                    <button id="openImportFileLinkBtn" class="action-btn" type="button">📥 导入数据</button>
+                    <input id="importFileLink" type="file" accept="application/json" class="d-none">
+                  </div>
+                </div>
+              </div>
+
+              <div id="linkAddError" class="inline-error d-none"></div>
+            </div>
+          </div>
+        </div>
+    
+        <section class="gov-filter-panel link-filter-panel">
+          <div class="gov-filter-row gov-filter-row-basic link-filter-search-row">
+             <div class="gov-filter-field gov-filter-field-id link-filter-field-id">
+                <input type="text" id="linkSearchKBID" placeholder="搜索 KB ID..." class="input-modern" oninput="renderLinkTable(); this.title=this.value">
+             </div>
+             <div class="gov-filter-field gov-filter-field-status link-filter-field-status">
+                <select id="linkFilterStatus" class="input-modern form-select" onchange="renderLinkTable()">
+                   <option value="all">ID状态（全部）</option>
+                   <option value="has_id">有ID</option>
+                   <option value="no_id">无ID</option>
+                </select>
+             </div>
+             <div class="gov-filter-field gov-filter-field-status link-filter-field-type">
+                <select id="linkFilterType" class="input-modern form-select" onchange="renderLinkTable()">
+                   <option value="all">链接类型（全部）</option>
+                   <option value="image">图片</option>
+                   <option value="video">视频</option>
+                   <option value="youtube">YouTube</option>
+                   <option value="link">网页/链接</option>
+                   <option value="other">其他</option>
+                </select>
+             </div>
+             <div class="gov-filter-field gov-filter-field-question link-filter-field-url">
+                <input type="text" id="linkSearchURL" placeholder="搜索 URL..." class="input-modern" oninput="renderLinkTable(); this.title=this.value">
+             </div>
+             <div class="gov-filter-field link-tag-selector-field">
+                <div class="link-tag-inline-group">
+                  <div class="matrix-status-tabs link-tag-mode-tabs" role="tablist" aria-label="标签筛选逻辑">
+                    <button type="button" class="matrix-status-tab active" data-tag-mode="any" onclick="document.querySelector('input[name=tagFilterMode][value=any]').checked=true; renderLinkTable();">包含任一</button>
+                    <button type="button" class="matrix-status-tab" data-tag-mode="all" onclick="document.querySelector('input[name=tagFilterMode][value=all]').checked=true; renderLinkTable();">包含所有</button>
+                  </div>
+                  <div class="d-none">
+                    <input type="radio" name="tagFilterMode" value="any" checked onchange="renderLinkTable()">
+                    <input type="radio" name="tagFilterMode" value="all" onchange="renderLinkTable()">
+                  </div>
+                  <div class="link-tag-selector-wrap" id="linkTagSelectorWrap">
+                  <button type="button" id="linkTagSelectorBtn" class="link-tag-selector-btn" aria-expanded="false">
+                    <span class="link-tag-selector-label">选择标签</span>
+                    <span id="linkTagSelectorValue" class="link-tag-selector-value">未选择</span>
+                    <span class="link-tag-selector-arrow">▼</span>
+                  </button>
+                  <div id="linkTagDropdown" class="link-tag-dropdown d-none">
+                    <div id="tagFilter" class="link-tag-dropdown-list"></div>
+                  </div>
+                </div>
+                </div>
+             </div>
+             <div class="gov-filter-btn-group link-filter-actions">
+              <button type="button" onclick="renderLinkTable()" class="primary-btn btn-primary-gradient">🔍 搜索</button>
+              <button id="clearFilter" type="button" class="action-btn btn-secondary-outline">重置</button>
+             </div>
+          </div>
+
+          <div class="actions link-batch-actions">
+            <button id="batchDeleteBtn" class="danger-btn d-none">🗑️ 批量删除</button>
+            <button id="batchCopyBtn" class="action-btn d-none">📋 复制预览到表格</button>
+            <button id="batchFeishuBtn" class="feishu-btn d-none">📝 复制为飞书公式</button>
+          </div>
+        </section>
+    
+        <section class="table-container link-table-container">
+          <table id="linkTable" class="kb-table">
+            <colgroup id="linkTableColgroup">
+              <col data-col-key="checkbox">
+              <col data-col-key="preview">
+              <col data-col-key="kb_id">
+              <col data-col-key="url">
+              <col data-col-key="type">
+              <col data-col-key="tags">
+              <col data-col-key="action">
+            </colgroup>
+            <thead>
+              <tr>
+                <th width="40" data-col-key="checkbox"><input type="checkbox" id="selectAll"></th>
+                <th class="col-urls" data-col-key="preview">预览</th>
+                <th class="col-id" data-col-key="kb_id" onclick="handleLinkSort('kb_id')" title="点击排序">KB ID</th>
+                <th class="col-question" data-col-key="url" onclick="handleLinkSort('url')" title="点击排序">链接信息</th>
+                <th class="col-link-src" data-col-key="type" onclick="handleLinkSort('type')" title="点击排序">链接类型</th>
+                <th class="col-keyword" data-col-key="tags" onclick="handleLinkSort('tags')" title="点击排序">标签管理</th>
+                <th class="col-action" data-col-key="action">操作</th>
+              </tr>
+            </thead>
+            <tbody id="tableBody"></tbody>
+          </table>
+        </section>
+
+        <!-- Link Viewer Pagination -->
+        <div class="pagination-container">
+            <div class="pagination-left">
+                <div class="page-size-wrapper">
+                    <span class="page-size-label">每页显示：</span>
+                    <select id="linkPageSizeSelect" onchange="changeLinkPageSize()" class="page-size-select">
+                        <option value="10">10</option>
+                        <option value="20" selected>20</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+            </div>
+            <div class="pagination-right">
+                <span id="linkPageInfo" class="page-info">共 0 条</span>
+                <button onclick="changeLinkPage(-1)" id="prevLinkPageBtn" disabled class="pagination-btn">上一页</button>
+                <button onclick="changeLinkPage(1)" id="nextLinkPageBtn" disabled class="pagination-btn">下一页</button>
+            </div>
+        </div>
+
+        <div id="duplicateUrlModal" class="modal">
+          <span class="close-modal-icon close-modal">&times;</span>
+          <div class="modal-content">
+            <h3 class="modal-title-no-top">重复URL检测与去重</h3>
+            <div id="duplicateUrlSummary" class="text-muted mb-12"></div>
+            <div class="duplicate-modal-box">
+              <pre id="duplicateUrlList" class="duplicate-modal-pre"></pre>
+            </div>
+            <div class="duplicate-modal-actions">
+              <button id="duplicateUrlDedupBtn" class="danger-btn">🧽 一键去重（保留1条）</button>
+              <button class="action-btn close-modal-btn">关闭</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="bulkDuplicateModal" class="modal">
+          <span class="close-modal-icon close-modal">&times;</span>
+          <div class="modal-content">
+            <h3 class="modal-title-no-top">发现重复URL</h3>
+            <div class="text-muted mb-12">请确认如何处理后再继续添加</div>
+            <div class="duplicate-modal-box">
+              <pre id="bulkDuplicateList" class="duplicate-modal-pre"></pre>
+            </div>
+            <div class="duplicate-modal-actions">
+              <button id="bulkDuplicateCancelBtn" class="action-btn">取消添加</button>
+              <button id="bulkDuplicateProceedBtn" class="primary-btn">仅添加非重复项</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab Content: Governance View -->
+      <div id="governanceView" class="d-none">
+          <div class="kb-section">
+            <div class="gov-toolbar-wrap">
+                <div class="gov-toolbar-main">
+                    <label class="form-label gov-inline-label">选择月份范围:</label>
+                    <select id="govStartMonth" class="form-select w-150">
+                        <option value="">起始月份</option>
+                    </select>
+                    <span>至</span>
+                    <select id="govEndMonth" class="form-select w-150">
+                        <option value="">结束月份</option>
+                    </select>
+                    <button onclick="loadGovernanceData()" class="primary-btn">查询</button>
+                    <button onclick="deleteGovernanceData()" class="danger-btn">删除当前月数据</button>
+                    <button onclick="deleteSelectedGovItems()" id="btnDeleteSelectedGov" class="danger-btn d-none">批量删除</button>
+                    <button onclick="downloadGovernanceTemplate()" class="action-btn">📄 下载导入模板</button>
+                    <button onclick="openGovImportModal()" class="primary-btn">📥 导入召回数据</button>
+                </div>
+            </div>
+            
+            <div id="govSummary" class="gov-summary-panel">
+                <span class="text-muted">请选择月份查看数据概览</span>
+            </div>
+
+            <!-- Filter Section -->
+            <div class="gov-filter-panel">
+                <div id="govAdvancedSummary" class="gov-advanced-summary">
+                    <strong>当前已启用：</strong> 未启用按月高级条件
+                </div>
+                <div class="gov-filter-row gov-filter-row-basic">
+                    <div class="gov-filter-field gov-filter-field-id">
+                        <label for="govFilterId">WikiID / 问题ID</label>
+                        <input type="text" id="govFilterId" placeholder="WikiID / 问题ID" class="form-control">
+                    </div>
+                    <div class="gov-filter-field gov-filter-field-question">
+                        <label for="govFilterQuestion">问题关键词</label>
+                        <input type="text" id="govFilterQuestion" placeholder="问题关键词搜索... (支持模糊匹配)" class="form-control">
+                    </div>
+                    <div class="gov-filter-field gov-filter-field-status">
+                        <label for="govFilterStatus">状态</label>
+                        <select id="govFilterStatus" class="form-select">
+                            <option value="">全部</option>
+                            <option value="使用中">使用中</option>
+                            <option value="主库不存在">主库不存在</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="govAdvancedInlineBar" class="gov-filter-row gov-filter-row-advanced d-none">
+                    <div class="gov-range-cluster">
+                        <div class="gov-range-group">
+                            <span class="gov-range-label">召回频数:</span>
+                            <input type="number" id="govFilterRecallMin" placeholder="最小值" class="form-control" min="0" step="1">
+                            <span class="gov-range-sep">~</span>
+                            <input type="number" id="govFilterRecallMax" placeholder="最大值" class="form-control" min="0" step="1">
+                        </div>
+                        <div class="gov-range-group">
+                            <span class="gov-range-label">有效召回:</span>
+                            <input type="number" id="govFilterValidRecallMin" placeholder="最小值" class="form-control" min="0" step="1">
+                            <span class="gov-range-sep">~</span>
+                            <input type="number" id="govFilterValidRecallMax" placeholder="最大值" class="form-control" min="0" step="1">
+                        </div>
+                    </div>
+                    <button onclick="openGovAdvancedFilterModal()" class="gov-inline-link-btn" type="button">按月高级条件</button>
+                </div>
+
+                <div class="gov-filter-actions">
+                    <div class="gov-filter-btn-group">
+                        <button onclick="applyGovFilter()" class="primary-btn btn-primary-gradient">筛选</button>
+                        <button onclick="resetGovFilter()" class="action-btn btn-secondary-outline">重置</button>
+                        <button onclick="exportGovernanceFilteredExcel()" id="govExportBtn" class="action-btn btn-secondary-outline" type="button">导出 Excel</button>
+                        <button onclick="toggleGovAdvancedBar()" id="govAdvancedToggleBtn" class="action-btn btn-secondary-outline" type="button">高级条件 ▼</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="table-container min-h-200 mb-0">
+                <table class="kb-table" id="govTable">
+                    <thead id="govThead">
+                        <tr>
+                            <th class="col-id"><div class="sortable-header" onclick="handleGovSort('id')">WikiID<span class="sort-icon"></span></div></th>
+                            <th class="col-question"><div class="sortable-header" onclick="handleGovSort('question')">问题<span class="sort-icon"></span></div></th>
+                            <th class="col-score"><div class="sortable-header" onclick="handleGovSort('ai_score')">AI评分<span class="sort-icon"></span></div></th>
+                            <th class="col-count"><div class="sortable-header" onclick="handleGovSort('recall_count')">召回频数<span class="sort-icon"></span></div></th>
+                            <th class="col-count"><div class="sortable-header" onclick="handleGovSort('valid_recall_count')">有效召回频数<span class="sort-icon"></span></div></th>
+                            <th class="col-ratio"><div class="sortable-header" onclick="handleGovSort('recall_ratio')">召回占比<span class="sort-icon"></span></div></th>
+                            <th class="col-ratio"><div class="sortable-header" onclick="handleGovSort('valid_recall_ratio')">有效召回占比<span class="sort-icon"></span></div></th>
+                            <th class="col-ratio"><div class="sortable-header" onclick="handleGovSort('valid_rate')">有效召回率<span class="sort-icon"></span></div></th>
+                            <th class="col-status"><div class="sortable-header" onclick="handleGovSort('status')">状态<span class="sort-icon"></span></div></th>
+                        </tr>
+                    </thead>
+                    <tbody id="govTableBody">
+                        <tr><td colspan="9" class="empty-message">请选择月份查看数据</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="pagination-container">
+                <div class="pagination-left">
+                    <div class="page-size-wrapper">
+                        <span class="page-size-label">每页显示：</span>
+                        <select id="govPageSizeSelect" onchange="changeGovPageSize()" class="page-size-select">
+                            <option value="10">10</option>
+                            <option value="20" selected>20</option>
+                            <option value="50">50</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="pagination-right">
+                    <span id="govPageInfo" class="page-info">共 0 条</span>
+                    <button onclick="changeGovPage(-1)" id="prevGovPageBtn" disabled class="pagination-btn">上一页</button>
+                    <button onclick="changeGovPage(1)" id="nextGovPageBtn" disabled class="pagination-btn">下一页</button>
+                </div>
+            </div>
+          </div>
+      </div>
+
+      <!-- Governance Advanced Filter Modal -->
+      <div id="govAdvancedFilterModal" class="modal">
+        <div class="modal-content gov-advanced-modal">
+          <div class="modal-header">
+            <h3 class="modal-title">按月高级筛选条件</h3>
+            <button class="close-modal-btn" onclick="closeGovAdvancedFilterModal()">&times;</button>
+          </div>
+          <div class="modal-body">
+            <p class="text-muted gov-advanced-tip">
+              为每个月单独设置【召回频数 / 有效召回】的区间条件（留空表示该月份不限制）。条件之间为“并且”关系。
+            </p>
+            <div id="govAdvancedFilterTableWrapper" class="gov-advanced-table-wrap">
+              <table class="kb-table gov-advanced-table">
+                <thead>
+                  <tr>
+                    <th class="gov-col-month">月份</th>
+                    <th class="gov-col-range">召回频数范围</th>
+                    <th class="gov-col-range">有效召回范围</th>
+                  </tr>
+                </thead>
+                <tbody id="govAdvancedFilterTableBody">
+                  <!-- JS 动态填充每个月的行 -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="modal-footer gov-advanced-footer">
+            <button class="action-btn" onclick="clearGovAdvancedConditions()">清空条件</button>
+            <button class="primary-btn" onclick="applyGovAdvancedConditions()">应用条件</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab Content: Modifications View -->
+      <div id="modificationsView" class="d-none">
+          <div class="kb-section">
+            <div class="gov-summary-panel mod-summary-panel">
+                <div class="mod-summary-copy">
+                    <div class="mod-summary-title-row">
+                        <div>
+                            <div class="mod-summary-title">修改记录</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="mod-summary-actions">
+                    <button onclick="smartMergeExportModifications()" class="primary-btn">智能合并导出</button>
+                    <button onclick="createArchiveFromCurrent()" class="action-btn">🗂️ 归档当前结果</button>
+                    <button onclick="exportRawModifications()" class="action-btn">📤 导出原始记录</button>
+                    <button onclick="loadModifications(1)" class="action-btn">🔄 刷新结果</button>
+                    <button onclick="deleteSelectedModifications()" class="danger-btn">🗑 删除选中</button>
+                </div>
+            </div>
+
+            <div class="gov-filter-panel mod-filter-panel">
+                <div class="mod-filter-grid mod-filter-grid-primary">
+                    <label class="mod-filter-field">
+                        <input type="text" id="modSearchId" name="modSearchId" placeholder="输入 question_wiki_id…" class="form-control" autocomplete="off" aria-label="按问题编号筛选修改记录">
+                    </label>
+                    <label class="mod-filter-field">
+                        <input type="text" id="modSearchQuestion" name="modSearchQuestion" placeholder="搜索问题内容…" class="form-control" autocomplete="off" aria-label="按问题内容筛选修改记录">
+                    </label>
+                    <label class="mod-filter-field">
+                        <input type="text" id="modSearchProduct" name="modSearchProduct" placeholder="搜索产品型号…" class="form-control" autocomplete="off" aria-label="按产品型号筛选修改记录">
+                    </label>
+                    <label class="mod-filter-field">
+                        <select id="modSourceSelect" name="modSourceSelect" class="form-control" onchange="loadModifications(1)" aria-label="按来源模块筛选修改记录">
+                            <option value="">全部来源模块</option>
+                            <option value="知识库管理">知识库管理</option>
+                            <option value="机型矩阵管理">机型矩阵管理</option>
+                            <option value="智能映射">智能映射</option>
+                        </select>
+                    </label>
+                    <label class="mod-filter-field">
+                        <select id="modOpSelect" name="modOpSelect" class="form-control" onchange="loadModifications(1)" aria-label="按操作类型筛选修改记录">
+                            <option value="">全部操作类型</option>
+                            <option value="create">增加</option>
+                            <option value="edit">修改</option>
+                            <option value="delete">删除</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div class="mod-filter-grid mod-filter-grid-secondary">
+                    <label class="mod-filter-field mod-filter-field-compact">
+                        <input type="text" id="modSearchAnswer" name="modSearchAnswer" placeholder="搜索答案内容…" class="form-control" autocomplete="off" aria-label="按答案内容筛选修改记录">
+                    </label>
+                    <label class="mod-filter-field mod-filter-field-compact">
+                        <input type="datetime-local" id="modStartTime" name="modStartTime" class="form-control" aria-label="修改记录开始时间">
+                    </label>
+                    <label class="mod-filter-field mod-filter-field-compact">
+                        <input type="datetime-local" id="modEndTime" name="modEndTime" class="form-control" aria-label="修改记录结束时间">
+                    </label>
+                    <label class="inline-check-label mod-inline-pill">
+                        <input type="checkbox" id="modDupOnlyToggle" onchange="loadModifications(1)">
+                        仅重复编号
+                    </label>
+                    <label class="inline-check-label mod-inline-pill">
+                        <input type="checkbox" id="modAutoRefreshToggle" onchange="setModAutoRefreshEnabled(this.checked)">
+                        自动刷新
+                    </label>
+                    <div class="mod-filter-actions">
+                        <button onclick="loadModifications(1)" class="primary-btn">查询结果</button>
+                        <button onclick="resetModificationsFilter()" class="action-btn">重置筛选</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-container min-h-200 mb-0">
+                <table class="kb-table" id="modTable">
+                    <thead>
+                        <tr>
+                            <th class="col-check" style="width: 44px; text-align:center;"><input type="checkbox" id="modSelectAll" aria-label="全选当前页可删除的修改记录"></th>
+                            <th class="col-op" style="width: 90px;">操作</th>
+                            <th class="col-id sortable" data-mod-sort-by="kb_id" style="width: 160px; cursor: pointer;">问题编号</th>
+                            <th class="col-question sortable" data-mod-sort-by="question" style="width: 260px; cursor: pointer;">问题</th>
+                            <th class="col-qtype" style="width: 130px;">问题类型</th>
+                            <th class="col-answer" style="width: 320px;">答案</th>
+                            <th class="col-atype" style="width: 130px;">答案类型</th>
+                            <th class="col-error" style="width: 200px;">错误列表</th>
+                            <th class="col-keyword" style="width: 200px;">关键词</th>
+                            <th class="col-similar" style="width: 220px;">相似提问</th>
+                            <th class="col-bm25" style="width: 90px;">BM25</th>
+                            <th class="col-products" style="width: 220px;">机型</th>
+                            <th class="col-image" style="width: 240px;">图片链接</th>
+                            <th class="col-video" style="width: 240px;">视频链接</th>
+                            <th class="col-file" style="width: 240px;">文件链接</th>
+                            <th class="col-linktype" style="width: 140px;">跳转链接类型</th>
+                            <th class="col-linkurl" style="width: 240px;">跳转链接（url/key）</th>
+                            <th class="col-source" style="width: 140px;">来源</th>
+                            <th class="col-time" style="width: 160px;">修改时间</th>
+                            <th class="col-details" style="width: 140px;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="modTableBody">
+                        <tr><td colspan="20" class="empty-message">无数据</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="pagination-container">
+                <div class="pagination-left">
+                    <div class="page-size-wrapper">
+                        <span class="page-size-label">每页显示：</span>
+                        <select id="modPageSizeSelect" onchange="changeModPageSize()" class="page-size-select" aria-label="修改记录每页显示条数">
+                            <option value="10">10</option>
+                            <option value="20" selected>20</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                        </select>
+                    </div>
+                    <span id="modPageInfo" class="page-info">共 0 条</span>
+                </div>
+                <div class="pagination-right">
+                    <div class="mod-page-jump">
+                        <label for="modPageJumpInput" class="page-size-label">跳至</label>
+                        <input type="number" id="modPageJumpInput" class="form-control mod-page-jump-input" min="1" inputmode="numeric" autocomplete="off" aria-label="跳转到修改记录页码">
+                        <button type="button" onclick="jumpModPage()" class="pagination-btn">跳转</button>
+                    </div>
+                    <button onclick="changeModPage(-1)" id="prevModPageBtn" disabled class="pagination-btn">上一页</button>
+                    <button onclick="changeModPage(1)" id="nextModPageBtn" disabled class="pagination-btn">下一页</button>
+                </div>
+            </div>
+          </div>
+      </div>
+
+      <div id="archiveView" class="d-none">
+          <div class="kb-section">
+            <div class="filter-section unified-filter-row">
+                <input type="text" id="archiveSearchQ" placeholder="按批次名称搜索" class="form-control w-220">
+                <button onclick="loadArchives()" class="primary-btn">查询</button>
+                <button onclick="resetArchivesFilter()" class="action-btn">重置</button>
+                <button onclick="loadArchives()" class="action-btn">🔄 刷新</button>
+                <input type="text" id="archiveBatchName" placeholder="批次名称 (如 2024_Q1_版本)" class="form-control w-240">
+                <button onclick="createArchiveBatch()" class="primary-btn">创建归档</button>
+                <span id="archiveStatus" class="text-muted"></span>
+            </div>
+            <div class="table-container min-h-200 mb-0">
+                <table class="kb-table" id="archiveTable">
+                    <thead>
+                        <tr>
+                            <th style="width: 80px;">ID</th>
+                            <th>批次名称</th>
+                            <th style="width: 120px;">记录数</th>
+                            <th style="width: 140px;">创建人</th>
+                            <th style="width: 180px;">创建时间</th>
+                            <th style="width: 200px;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="archiveTableBody">
+                        <tr><td colspan="6" class="empty-message">无数据</td></tr>
+                    </tbody>
+                </table>
+            </div>
+          </div>
+      </div>
+
+      <div id="smartMappingView" class="d-none">
+          <div class="kb-section">
+            <div class="kb-header-group">
+                <div class="kb-title">模块一：数据源准备与筛选</div>
+
+                <div class="sm-two-col">
+                    <div class="sm-card">
+                        <div class="sm-card-title">知识库筛选区</div>
+                        <div class="sm-row">
+                            <div class="sm-field">
+                                <div class="mb-5 text-sm text-muted">产品型号</div>
+                                <div id="smModelSelect"></div>
+                            </div>
+                            <button onclick="smDownloadCompareTemplate()" id="smTemplateBtn" class="primary-btn">生成对比Excel</button>
+                            <span id="smKbStatus" class="text-muted"></span>
+                        </div>
+                        <div class="form-hint">生成的Excel包含两张工作表：产品FAQ表、知识库表（已按型号筛选）。</div>
+                    </div>
+
+                    <div class="sm-card">
+                        <div class="sm-card-title">对比Excel导入区</div>
+                        <div id="smExcelDropzone" class="sm-dropzone" onclick="smChooseCompareExcelFile()">
+                            <div class="sm-dropzone-text">拖拽 .xlsx/.xls 到此处（含两张工作表），或点击选择文件</div>
+                            <input type="file" id="smExcelFile" accept=".xlsx,.xls" class="d-none">
+                        </div>
+                        <div class="sm-row mt-12">
+                            <button onclick="smUploadAndParseCompareExcel()" id="smParseExcelBtn" class="primary-btn">上传并解析</button>
+                            <span id="smExcelStatus" class="text-muted"></span>
+                        </div>
+                        <div class="form-hint">工作表名称固定：产品FAQ表（A=问题 B=答案 C=适配型号）、知识库表（A=ID B=问题 C=答案 D=适配型号）。</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kb-header-group">
+                <div class="kb-title">模块二：智能语义比对引擎</div>
+                <div class="sm-row">
+                    <button onclick="smStartCompare()" id="smCompareBtn" class="primary-btn" disabled>开始比对</button>
+                    <div class="sm-progress-wrapper">
+                        <div class="sm-progress-bar">
+                            <div id="smProgressInner" class="sm-progress-inner"></div>
+                        </div>
+                        <span id="smProgressText" class="text-muted"></span>
+                    </div>
+                    <span class="text-muted">阈值：0.7</span>
+                </div>
+            </div>
+
+            <div class="kb-header-group">
+                <div class="kb-title">模块三：在线对比预览与配置工作台</div>
+                <div class="sm-workbench-toolbar">
+                    <div class="sm-workbench-toolbar-left">
+                        <input id="smWorkbenchSearch" type="text" class="form-control sm-workbench-search" placeholder="搜索（问题/答案/ID/理由）" oninput="smSetWorkbenchFilter('q', this.value)">
+                        <select id="smWorkbenchModelFilter" class="form-control sm-workbench-select" onchange="smSetWorkbenchFilter('model', this.value)"></select>
+                        <select id="smWorkbenchMatchTypeFilter" class="form-control sm-workbench-select" onchange="smSetWorkbenchFilter('matchType', this.value)">
+                            <option value="all">匹配状态：全部</option>
+                            <option value="问题+答案均一致">🟢 完全匹配</option>
+                            <option value="仅问题一致">🟡 部分匹配-问题</option>
+                            <option value="仅答案一致">🟡 部分匹配-答案</option>
+                            <option value="无匹配">🔴 不匹配</option>
+                        </select>
+                        <select id="smWorkbenchSort" class="form-control sm-workbench-select" onchange="smSetWorkbenchFilter('sort', this.value)">
+                            <option value="default">排序：默认</option>
+                            <option value="pendingFirst">排序：待处理优先</option>
+                            <option value="rowNumberAsc">排序：行号升序</option>
+                            <option value="matchBestFirst">排序：匹配度优先</option>
+                        </select>
+                    </div>
+                    <div class="sm-workbench-toolbar-right">
+                        <select id="smWorkbenchPageSize" class="form-control sm-workbench-select" onchange="smSetWorkbenchFilter('pageSize', this.value)">
+                            <option value="50">50/页</option>
+                            <option value="100">100/页</option>
+                            <option value="0">全部</option>
+                        </select>
+                        <button type="button" class="action-btn sm-workbench-page-btn" onclick="smPrevWorkbenchPage()">上一页</button>
+                        <button type="button" class="action-btn sm-workbench-page-btn" onclick="smNextWorkbenchPage()">下一页</button>
+                        <span id="smWorkbenchPageInfo" class="text-muted"></span>
+                        <span id="smWorkbenchSelectedInfo" class="text-muted"></span>
+                        <button type="button" class="action-btn" onclick="smBatchMarkSubmit()">采纳选中</button>
+                        <button type="button" class="action-btn" onclick="smBatchMarkSkip()">跳过选中</button>
+                        <button type="button" class="action-btn" onclick="smClearWorkbenchSelection()">清除选择</button>
+                    </div>
+                </div>
+                <div class="table-container min-h-200 mb-0">
+                    <table class="kb-table" id="smWorkbenchTable">
+                        <colgroup>
+                            <col style="width: 70px;">
+                            <col style="width: 140px;">
+                            <col style="width: 16%;">
+                            <col style="width: 18%;">
+                            <col style="width: 100px;">
+                            <col style="width: 16%;">
+                            <col style="width: 18%;">
+                            <col style="width: 140px;">
+                            <col style="width: 160px;">
+                            <col style="width: 18%;">
+                            <col style="width: 180px;">
+                        </colgroup>
+                        <thead>
+                            <tr class="sm-group-head">
+                                <th colspan="4">FAQ原始数据</th>
+                                <th colspan="4">知识库匹配数据</th>
+                                <th colspan="2">匹配评估</th>
+                                <th>🛠️ 操作</th>
+                            </tr>
+                            <tr class="sm-col-head">
+                                <th title="FAQ原始行号">行号</th>
+                                <th title="FAQ适配型号">型号</th>
+                                <th title="FAQ_问题">❓ 问题</th>
+                                <th title="FAQ_答案">💡 答案</th>
+                                <th title="知识库ID">🆔 ID</th>
+                                <th title="知识库_问题">❓ 问题</th>
+                                <th title="知识库_答案">💡 答案</th>
+                                <th title="知识库其他信息">ℹ️ 其他信息</th>
+                                <th title="匹配维度">🧩 维度</th>
+                                <th title="判定理由">📝 理由</th>
+                                <th title="操作">🛠️ 按钮组</th>
+                            </tr>
+                        </thead>
+                        <tbody id="smWorkbenchBody">
+                            <tr><td colspan="11" class="empty-message">请先导入对比Excel</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="sm-submit-bar">
+                <div class="sm-submit-left">
+                    <span id="smSummary" class="text-muted"></span>
+                </div>
+                <div class="sm-submit-right">
+                    <button type="button" onclick="smMarkAllSkip()" class="action-btn">全部跳过</button>
+                    <button type="button" onclick="smClearCompareCache()" class="action-btn">清除缓存</button>
+                    <button type="button" onclick="smExportResult()" id="smExportBtn" class="action-btn" disabled>导出对比结果</button>
+                    <button type="button" onclick="smOpenArchiveModal()" id="smArchiveBtn" class="action-btn" disabled>归档本次提交</button>
+                    <button type="button" onclick="smSubmitChanges()" id="smSubmitBtn" class="primary-btn" disabled>提交修改</button>
+                </div>
+            </div>
+          </div>
+      </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="globalDrawerMount" class="global-drawer-mount" aria-hidden="true"></div>
+    </section>
+  </main>
+
+  <div id="smSearchModal" class="modal">
+    <div class="modal-content sm-search-modal-content">
+        <div class="modal-header">
+            <h3>手动选择匹配对象</h3>
+            <button type="button" class="close-modal-btn" onclick="smCloseSearchModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="filter-section sm-search-filter-row">
+                <input type="text" id="smSearchQ" placeholder="输入关键词（问题/答案/ID）" class="form-control sm-search-input">
+                <button type="button" onclick="smDoManualSearch()" class="primary-btn">搜索</button>
+                <span id="smSearchStatus" class="text-muted"></span>
+            </div>
+            <div class="table-container min-h-200 mb-0">
+                <table class="kb-table">
+                    <thead>
+                        <tr>
+                            <th class="sm-search-id-col">ID</th>
+                            <th>问题</th>
+                            <th>答案</th>
+                            <th class="sm-search-op-col">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="smSearchBody">
+                        <tr><td colspan="4" class="empty-message">请输入关键词搜索</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="smCloseSearchModal()" class="action-btn">关闭</button>
+        </div>
+    </div>
+  </div>
+
+  <div id="smTextModal" class="modal">
+    <div class="modal-content sm-text-modal-content">
+        <div class="modal-header">
+            <h3 id="smTextModalTitle">查看内容</h3>
+            <button class="close-modal-btn" onclick="smCloseTextModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="smTextModalBody" class="sm-text-modal-body"></div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="smCloseTextModal()" class="action-btn">关闭</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- Governance Import Modal -->
+  <div id="govImportModal" class="modal">
+    <div class="modal-content" style="width: 500px;">
+        <div class="modal-header">
+            <h3>导入召回数据</h3>
+            <button class="close-modal-btn" onclick="closeGovImportModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">选择月份:</label>
+                <input type="month" id="govImportMonth" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div class="form-group">
+                <label class="form-label">选择文件:</label>
+                <input type="file" id="govImportFileModal" accept=".xlsx,.xls,.csv" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="closeGovImportModal()" class="action-btn">取消</button>
+            <button onclick="confirmGovImport()" id="confirmImportBtn" class="primary-btn">开始导入</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- KB Detail Modal -->
+  <div id="kbDetailModal" class="modal">
+    <div class="modal-content" style="width: 800px; max-width: 90vw;">
+      <div class="modal-header">
+        <h3>知识库详情</h3>
+        <button class="close-modal-btn" onclick="closeKBDetailModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+         <div id="kbDetailContent"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export Modal -->
+  <div id="exportModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>导出知识库数据</h3>
+            <button class="close-modal-btn" onclick="closeExportModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">导出范围：</label>
+                <div class="checkbox-list">
+                    <label class="block-label">
+                        <input type="radio" name="exportScope" value="all" checked> 导出所有筛选结果 (全部)
+                    </label>
+                    <label class="block-label">
+                        <input type="radio" name="exportScope" value="selected" id="exportSelectedRadio"> 仅导出勾选的行 <span id="exportSelectedCount" class="text-muted" style="font-size: 0.9em;"></span>
+                    </label>
+                    <div class="form-hint">
+                        注意：将导出符合当前搜索条件的所有数据，不仅仅是当前页。
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">导出列：</label>
+                <div class="checkbox-list">
+                    <label class="radio-label mr-15">
+                        <input type="radio" name="exportCols" value="all" checked onchange="toggleExportCols()"> 全部列
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="exportCols" value="selected" onchange="toggleExportCols()"> 选定列
+                    </label>
+                </div>
+                
+                <div id="columnSelector" class="column-selector">
+                    <!-- Checkboxes will be generated by JS -->
+                </div>
+            </div>
+            
+            <div class="modal-footer">
+                <button onclick="closeExportModal()" class="action-btn">取消</button>
+                <button onclick="confirmExport()" id="confirmExportBtn" class="primary-btn">确认导出</button>
+            </div>
+        </div>
+    </div>
+  </div>
+
+  <!-- KB Edit Modal (New/Edit) -->
+  <div id="kbEditModal" class="modal">
+    <div class="modal-content kb-edit-modal-content" style="width: 1000px; max-width: 95vw;">
+        <div class="modal-header kb-edit-modal-header">
+            <div class="kb-edit-title-block">
+                <h3 id="kbEditTitle">新增数据</h3>
+                <div class="kb-edit-title-meta">
+                    <span>ID：<b id="kbEditHeaderId">保存后自动生成</b></span>
+                    <span id="kbEditHeaderTemplateRefWrap">参考ID：<b id="kbEditHeaderTemplateRef">未选择</b></span>
+                    <span>状态：<b id="kbEditHeaderStatus">新增中</b></span>
+                    <span>更新时间：<b id="kbEditHeaderUpdated">-</b></span>
+                </div>
+            </div>
+            <button class="close-modal-btn" onclick="closeKBEditModal()">&times;</button>
+        </div>
+        <div class="modal-body kb-edit-modal-body" style="padding: 24px;">
+            <form id="kbEditForm" onsubmit="return false;" class="kb-edit-form" style="display: flex; flex-direction: column; gap: 16px;">
+                <div class="kb-edit-workbench">
+                    <aside class="kb-edit-preview-pane">
+                        <div class="kb-preview-sticky">
+                            <div class="kb-preview-eyebrow">实时预览</div>
+                            <div class="kb-preview-title" id="kbEditPreviewMode">新增知识库条目</div>
+                            <div class="kb-preview-meta-grid">
+                                <div>
+                                    <span>新条目 ID</span>
+                                    <b id="kbEditPreviewId">保存后自动生成</b>
+                                </div>
+                                <div>
+                                    <span>ID 参考</span>
+                                    <b id="kbEditPreviewTemplateRef">未选择</b>
+                                </div>
+                                <div>
+                                    <span>状态</span>
+                                    <b id="kbEditPreviewStatus">新增中</b>
+                                </div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="product_category_name">
+                                <label>产品分类</label>
+                                <div id="kbEditPreviewCategory" class="kb-preview-chip-row"></div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="product_name">
+                                <label>产品型号</label>
+                                <div id="kbEditPreviewProducts" class="kb-preview-chip-row"></div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="kb_tags_input">
+                                <label>标签</label>
+                                <div id="kbEditPreviewTags" class="kb-preview-chip-row"></div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="basic_meta">
+                                <label>属性</label>
+                                <div id="kbEditPreviewAttrs" class="kb-preview-chip-row"></div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="question">
+                                <label>问题</label>
+                                <div id="kbEditPreviewQuestion" class="kb-preview-text kb-preview-question">暂无问题内容</div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="answer">
+                                <label>答案</label>
+                                <div id="kbEditPreviewAnswer" class="kb-preview-text kb-preview-answer">暂无答案内容</div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="resources">
+                                <label>资源链接</label>
+                                <div id="kbEditPreviewResources" class="kb-preview-resources"></div>
+                            </div>
+                        </div>
+                    </aside>
+
+                    <section class="kb-edit-main-pane">
+                <!-- 第一行：基础属性 (Grid 4列) -->
+                <div class="kb-edit-top-grid" style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 16px;">
+                    <div class="form-group">
+                        <label class="form-label">ID (wiki_id)</label>
+                        <input type="text" name="question_wiki_id" placeholder="自动生成" style="font-family: monospace; font-size: 12px;">
+                    </div>
+                     <div class="form-group">
+                        <label class="form-label">型号分类</label>
+                        <div class="input-with-dropdown" style="display:flex; gap:8px; align-items:center;">
+                            <input type="text" id="productCategorySelectInput" name="product_category_name" class="modern-input" placeholder="请选择（可多选）" readonly>
+                            <button type="button" id="productCategoryDropdownBtn" class="dropdown-trigger-btn" title="选择型号分类">▼</button>
+                            <div id="productCategoryDropdown" class="dropdown-menu" style="min-width: 220px; max-width: 320px;"></div>
+                        </div>
+                     </div>
+                     <div class="form-group">
+                        <div style="display:flex; justify-content:flex-start; align-items:center; gap:6px; margin-bottom:4px;">
+                            <label class="form-label" style="margin:0;">问题类型</label>
+                            <button type="button"
+                                    onclick="aiQuestionTypeAction()"
+                                    title="AI 分类"
+                                    style="border:none; background:none; padding:0; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; color:var(--primary-color); font-size:14px;">
+                                ✨
+                            </button>
+                            <span id="aiQuestionTypeMetrics" class="ai-metrics" style="margin-left:4px;"></span>
+                        </div>
+                        <input type="text" name="question_type">
+                     </div>
+                    <div class="form-group">
+                        <label class="form-label">BM25索引</label>
+                        <select name="if_bm25" class="w-full">
+                            <option value="false">否</option>
+                            <option value="true">是</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- 第三行：核心内容 (高亮区域) -->
+                <div class="kb-edit-core-card" style="background: #fff; padding: 0; border-radius: 12px; border: 1px solid #e0e0e0; box-shadow: 0 2px 8px rgba(0,0,0,0.02); overflow: hidden;">
+                    <div class="kb-qa-grid">
+                        <!-- Question -->
+                        <div class="kb-qa-panel kb-question-panel" style="padding: 16px; border-bottom: 1px solid #f0f0f0; background: #fafafa;">
+                            <div class="kb-panel-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
+                                <label class="form-label kb-panel-title" style="font-weight: 700; color: #333; font-size: 15px; margin: 0; display: block;">问题 (Question)</label>
+                                <div class="kb-panel-actions" style="display:flex; align-items:center; gap:8px;">
+                                    <button type="button"
+                                            onclick="aiQuestionAction('rewrite')"
+                                            title="AI 润色"
+                                            class="kb-ai-spark"
+                                            style="border:none; background:none; padding:0; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; color:var(--primary-color); font-size:14px;">
+                                        ✨
+                                    </button>
+                                    <span id="aiQuestionMetrics" class="ai-metrics"></span>
+                                </div>
+                            </div>
+                            <div style="position: relative;">
+                                <textarea name="question" id="questionEditor" rows="3" class="kb-textarea kb-question-textarea" style="font-size: 15px; border: 1px solid #ddd; width: 100%; padding: 10px; border-radius: 6px;" placeholder="输入问题描述..."></textarea>
+                                <div id="aiQuestionJsonActions" style="position: absolute; right: 10px; bottom: 10px; display: none; gap: 8px;">
+                                    <button type="button" class="primary-btn btn-sm" onclick="aiQuestionApplyJson(true)">替换</button>
+                                    <button type="button" class="action-btn btn-sm" onclick="aiQuestionApplyJson(false)">取消</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Answer -->
+                        <div class="kb-qa-panel kb-answer-panel" style="padding: 16px;">
+                            <div class="kb-panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                 <label class="form-label kb-panel-title" style="font-weight: 700; color: #333; font-size: 15px; margin: 0;">答案 (Answer)</label>
+                                 <div class="kb-panel-actions" style="display:flex; align-items:center; gap: 10px;">
+                                     <span id="aiAnswerStatus" class="ai-metrics" style="max-width: 260px;"> </span>
+                                     <span class="text-muted kb-hint" style="font-size: 12px;">支持 Markdown</span>
+                                     <span class="text-muted" style="font-size: 12px;">|</span>
+                                     <span id="answerStats" class="text-muted" style="font-size: 12px;">0 行 · 0 字</span>
+                                 </div>
+                            </div>
+
+                            <!-- Markdown Editor Container -->
+                            <div class="markdown-editor-container kb-markdown-editor" style="border: 1px solid #ddd; border-radius: 8px; overflow: visible; position: relative;">
+                            <!-- Toolbar -->
+                             <div class="markdown-toolbar kb-markdown-toolbar" style="border-bottom: 1px solid #eee; padding: 8px 12px; background: #f8f9fa; display: flex; gap: 5px; align-items: center;">
+                                <div style="flex-grow: 1;"></div>
+
+                                <!-- AI处理（下拉） -->
+                                <div class="kb-toolbar-dropdown" id="aiAnswerDropdown">
+                                    <button type="button" class="action-btn btn-sm" onclick="toggleToolbarDropdown('aiAnswerDropdown')">AI处理 ▾</button>
+                                    <div class="kb-toolbar-menu">
+                                        <button type="button" class="kb-toolbar-item" onclick="aiAnswerAction('structure'); closeAllToolbarDropdowns()">通用处理</button>
+                                        <button type="button" class="kb-toolbar-item" onclick="aiAnswerAction('fault'); closeAllToolbarDropdowns()">故障类处理</button>
+                                        <button type="button" class="kb-toolbar-item" onclick="aiAnswerAction('usage'); closeAllToolbarDropdowns()">使用类处理</button>
+                                        <button type="button" class="kb-toolbar-item" onclick="aiAnswerAction('feature'); closeAllToolbarDropdowns()">功能类处理</button>
+                                    </div>
+                                </div>
+
+                                <!-- 快捷录入（下拉 + 二级） -->
+                                <div class="kb-toolbar-dropdown" id="quickInsertDropdown">
+                                    <button type="button" class="action-btn btn-sm" onclick="toggleToolbarDropdown('quickInsertDropdown')">快捷录入 ▾</button>
+                                    <div class="kb-toolbar-menu">
+                                        <button type="button" class="kb-toolbar-item" onclick="openOpsPicker('app'); closeAllToolbarDropdowns()">APP操作</button>
+                                        <button type="button" class="kb-toolbar-item" onclick="openOpsPicker('product'); closeAllToolbarDropdowns()">产品操作</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="aiAnswerStreamPreview" class="ai-stream-preview d-none"></div>
+                            <div id="answerTuiEditorWrap" style="position: relative;">
+                                <div id="answerTuiEditor"></div>
+                            </div>
+                            <!-- Compatibility: keep textarea as source-of-truth field for submit/dirty-check -->
+                            <textarea name="answer" id="answerEditor" class="markdown-textarea" style="position:absolute; left:-99999px; top:-99999px; width:1px; height:1px; opacity:0;" tabindex="-1" aria-hidden="true"></textarea>
+                            <!-- 结构化结果应用按钮：仅在通用处理（structure）返回 JSON 时使用 -->
+                            <div id="aiAnswerJsonActions" style="position: absolute; right: 12px; bottom: 12px; display: none; gap: 8px;">
+                                <button type="button" class="primary-btn btn-sm" onclick="aiAnswerApplyJson(true)">替换</button>
+                                <button type="button" class="action-btn btn-sm" onclick="aiAnswerApplyJson(false)">取消</button>
+                            </div>
+                        </div>
+                        <div class="kb-answer-meta-row" style="margin-top: 8px; display: flex; gap: 10px; align-items: center;">
+                            <label class="form-label" style="margin: 0; font-size: 13px;">答案类型:</label>
+                            <select name="answer_type" style="width: 200px; font-size: 13px; padding: 4px 8px;">
+                                <option value="">请选择</option>
+                                <option value="文本">文本</option>
+                                <option value="图片">图片</option>
+                                <option value="视频">视频</option>
+                                <option value="链接">链接</option>
+                                <option value="混合">混合</option>
+                            </select>
+                        </div>
+                        </div>
+                    </div>
+                </div>
+                    </section>
+
+                    <aside class="kb-edit-side-pane">
+                <section id="kbEditTemplatePanel" class="kb-template-panel">
+                    <div class="kb-template-head">
+                        <div>
+                            <div class="kb-template-title">模板选择</div>
+                            <div class="kb-template-subtitle">按已有条目 ID 复用业务字段</div>
+                        </div>
+                        <button type="button" id="kbTemplateClearBtn" class="action-btn btn-sm" onclick="kbClearTemplateReference()" style="display:none;">清除参考</button>
+                    </div>
+                    <div class="kb-template-search-row">
+                        <input type="text" id="kbTemplateIdInput" class="modern-input" placeholder="输入已有条目 ID" autocomplete="off">
+                        <button type="button" id="kbTemplateSearchBtn" class="primary-btn btn-sm" onclick="kbSearchTemplateById()">搜索</button>
+                    </div>
+                    <div id="kbTemplateStatus" class="kb-template-status">未选择模板，新增条目将从空白表单开始。</div>
+                    <div id="kbTemplateResult" class="kb-template-result d-none"></div>
+                </section>
+
+                <!-- 产品（默认折叠，减少滚动负担） -->
+                <details id="kbEditProductsDetails" style="border: 1px solid #eee; border-radius: 8px; background: #fff;">
+                    <summary style="padding: 12px; cursor: pointer; font-weight: 600; color: #666; user-select: none; background: #fff; border-radius: 8px; display:flex; align-items:center; justify-content: space-between; gap: 10px;">
+                        <span>产品名称 / 机型</span>
+                        <span class="text-muted" style="font-size: 12px;">
+                            已选 <b id="kbEditSelectedProductsCount">0</b> 个
+                            <span id="kbEditProductsToggleText" style="margin-left: 8px;">点击展开</span>
+                        </span>
+                    </summary>
+                    <div style="padding: 16px; border-top: 1px solid #eee;">
+                        <div class="form-group" style="background: #fff; padding: 12px; border-radius: 12px; border: 1px solid #f0f0f0;">
+                            <div class="flex-center mb-5" style="justify-content: space-between;">
+                                <label class="form-label mb-0" style="font-weight: 600;">产品名称 (Product Name)</label>
+                            </div>
+                            <textarea name="product_name" id="kbEditProductName" rows="2" placeholder="多个型号用逗号分隔" style="margin-bottom: 8px; resize: vertical;"></textarea>
+                            <div id="productCheckboxes" class="product-checkbox-container custom-scrollbar">
+                                <small class="text-muted">加载型号列表中...</small>
+                            </div>
+                        </div>
+                    </div>
+                </details>
+
+                <!-- 第四行：扩展信息 (折叠) -->
+                <details style="border: 1px solid #eee; border-radius: 8px; background: #fff;">
+                    <summary style="padding: 12px; cursor: pointer; font-weight: 600; color: #666; user-select: none; background: #fcfcfc; border-radius: 8px;">
+                        更多扩展信息 (相似问题、关键词、JSON数据)
+                    </summary>
+                    <div class="kb-details-grid" style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; border-top: 1px solid #eee;">
+                        <div class="form-group">
+                            <div style="display:flex; justify-content:space-between; align-items:center; gap: 10px;">
+                                <label class="form-label" style="margin:0;">相似问题 (每行一个)</label>
+                                <div style="display:flex; align-items:center; gap: 8px;">
+                                    <button type="button" class="action-btn btn-sm" onclick="aiSimilarGenerate()">AI 生成</button>
+                                    <span id="aiSimilarMetrics" class="ai-metrics"></span>
+                                </div>
+                            </div>
+                            <textarea name="similar_questions" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
+                            <div id="aiSimilarPanel" class="ai-similar-panel d-none">
+                                <div id="aiSimilarList" class="ai-similar-list"></div>
+                                <div class="ai-action-row" style="justify-content:flex-end;">
+                                    <button type="button" class="action-btn btn-sm" onclick="aiSimilarApply()">一键替换列表</button>
+                                    <button type="button" class="action-btn btn-sm" onclick="aiSimilarRefresh()">局部刷新</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">关键词 (每行一个)</label>
+                            <textarea name="keyword_list" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">图片链接 (每行一个)</label>
+                            <textarea name="image_urls" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">视频链接 (每行一个)</label>
+                            <textarea name="video_urls" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">文件链接 (每行一个)</label>
+                            <textarea name="file_urls" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">外链类型</label>
+                            <input type="text" name="link_type" placeholder="如: 官网/手册/FAQ..." style="font-size: 13px; padding: 6px 8px;">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">外部链接</label>
+                            <textarea name="link_url" rows="2" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">标签（逗号分隔）</label>
+                            <textarea id="kbEditTagsInput" name="kb_tags_input" rows="2" class="font-mono" style="font-size: 12px; background: #f9f9f9;" placeholder="例如：故障, 维护, FAQ"></textarea>
+                        </div>
+                    </div>
+                </details>
+
+                <details id="kbClipboardDetails" style="border: 1px solid #eee; border-radius: 8px; background: #fff;">
+                    <summary style="padding: 12px; cursor: pointer; font-weight: 600; color: #666; user-select: none; background: #fcfcfc; border-radius: 8px;">
+                        剪切板暂存区（仅手动粘贴，不自动覆盖字段）
+                    </summary>
+                    <div style="padding: 16px; border-top: 1px solid #eee;">
+                        <div class="flex-center flex-wrap gap-12" style="margin-bottom: 8px;">
+                            <button type="button" class="action-btn btn-sm" onclick="kbReadClipboardToBuffer()">读取剪切板</button>
+                            <button type="button" class="action-btn btn-sm" onclick="kbClearClipboardBuffer()">清空</button>
+                            <span id="kbClipboardStats" class="text-muted" style="font-size: 12px;">0 行 · 0 字</span>
+                        </div>
+                        <textarea id="kbClipboardBuffer" rows="6" class="font-mono" style="font-size: 12px; background: #f9f9f9; width: 100%; resize: vertical;" placeholder="这里是剪切板暂存区。你可以读取剪切板内容到此处，再手动 Ctrl+V 到任意字段。"></textarea>
+                        <p class="form-hint" style="margin-top: 6px;">说明：该区域只做暂存，系统不会自动写入问题/答案等字段。</p>
+                    </div>
+                </details>
+                    </aside>
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <span id="kbEditDirtyHint" class="text-muted" style="margin-right:auto; font-size:12px;">未检测</span>
+            <span id="kbEditAutosaveHint" class="text-muted" style="margin-right:12px; font-size:12px;">草稿未保存</span>
+            <button onclick="closeKBEditModal()" class="action-btn">取消</button>
+            <button onclick="saveKBItem()" id="saveKBItemBtn" class="primary-btn">保存</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- API Config Modal -->
+  <div id="apiConfigModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>API 配置</h3>
+            <button class="close-modal-btn" onclick="document.getElementById('apiConfigModal').style.display='none'">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="apiConfigFields">
+                <div class="form-group">
+                    <label class="form-label">API Key:</label>
+                    <input type="text" id="apiKeyInput" placeholder="sk-...">
+                    <div id="apiConfigStatus" style="margin-top: 6px; font-size: 12px; color: #64748b;">知识库评分配置：未加载</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Base URL:</label>
+                    <input type="text" id="baseUrlInput" placeholder="https://api.moonshot.cn/v1">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Model:</label>
+                    <input type="text" id="modelNameInput" placeholder="moonshot-v1-8k">
+                </div>
+            </div>
+            <div id="aiPromptFields">
+                <div class="form-group">
+                    <label class="form-label">问题区 Prompt 模板:</label>
+                    <textarea id="aiPromptQuestionInput" rows="10" class="font-mono" placeholder="支持变量：{{task}} {{question}}"></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">答案区 Prompt 模板（拆分更快更稳）:</label>
+                    <div class="form-hint" style="font-size: 12px; color: #777; margin-top: 6px; margin-bottom: 10px;">
+                        系统会根据按钮类型自动选择对应模板：通用/故障/使用/功能。支持变量：{{task}} {{question}} {{answer}} {{urls}}
+                    </div>
+                    <div style="display:flex; justify-content:flex-end; margin-bottom: 10px;">
+                        <button type="button" class="action-btn btn-sm" onclick="copyAnswerPrompts()">一键复制答案区4个模板</button>
+                    </div>
+                    <label class="form-label" style="font-size: 13px; opacity: 0.9;">通用处理（structure）</label>
+                    <textarea id="aiPromptAnswerStructureInput" rows="10" class="font-mono" placeholder="用于：通用处理（structure）">你是知识库结构化处理专家，核心聚焦结构化处理，不进行任何标签化操作。
+任务：将输入的客服回答文本进行去噪精简与结构化拆解，输出可直接录入的 Markdown，并扩写 3-5 组潜在问答对。
+
+输入数据：
+- question：{{question}}
+- answer：{{answer}}
+- urls：{{urls}}
+
+处理规则（严格执行）：
+1) 去噪精简：删除寒暄语、语气词、营销化/情绪化表述；合并重复信息；仅保留客观核心信息，不改变原意。
+2) 结构化拆解（模块顺序不可调整，有则写，无则跳过，不硬凑）：
+   接入范围 → 技术底座 → 服务能力 → 服务方式 → 核心优势
+3) 格式要求：
+- 生成 ## 标准标题（≤20字，精准概括全文核心）
+- 每个模块用 ### 标注；模块内用 - 无序列表；每条仅一个信息点
+- 核心名词（关键技术/产品名词/功能名称/操作步骤等）加粗 **...**，仅对核心名词加粗
+- 输出分为「结构化正文」和「扩写问答对」两部分，模块之间仅 1 个空行
+4) 扩写问答对：基于结构化正文生成 3-5 组问答对，聚焦：
+   ① 用户可能进一步追问的问题
+   ② 正文中表述不完整、用户可能疑问的点
+   答案只补全必要信息，不新增无关信息，语义一致。
+
+结构要求（强约束 + 软容错）：
+- answer 必须包含两部分，并按此顺序输出：### 结构化正文、### 扩写问答对。
+- 结构化正文必须包含 ## 标题；模块顺序固定为：接入范围→技术底座→服务能力→服务方式→核心优势；允许缺失模块直接跳过（不要硬凑）。
+- 扩写问答对目标 3-5 组；若信息不足无法覆盖 3 组，也必须输出已能生成的问答对，并在 notes 说明原因。
+
+输出要求（严格遵循）：
+你必须只输出严格 JSON（不要输出 Markdown 代码块，不要输出任何额外文本）：
+{
+  "answer": string,
+  "urls": string[]|null,
+  "notes": string|null
+}</textarea>
+
+                    <div style="height: 10px;"></div>
+                    <label class="form-label" style="font-size: 13px; opacity: 0.9;">故障类处理（fault）</label>
+                    <textarea id="aiPromptAnswerFaultInput" rows="10" class="font-mono" placeholder="用于：故障类处理（fault）">你是知识库结构化处理专家，核心聚焦结构化处理，不进行任何标签化操作。
+任务：将产品故障类客服文本按规则处理，输出可直接录入的 Markdown，并扩写 3-5 组故障相关问答对。
+
+输入数据：
+- question：{{question}}
+- answer：{{answer}}
+- urls：{{urls}}
+
+处理规则（严格执行）：
+1) 去噪精简：删除寒暄语/语气词/营销化表述，仅保留故障现象、排查步骤、解决方法等客观信息，不改变原意。
+2) 结构化拆解（严格按此顺序，有则写，无则跳过）：
+- 接入范围：明确故障适用的产品型号、使用场景；
+- 技术底座：若涉及故障相关技术支撑（如检测模型、系统版本），简要说明；
+- 服务能力：明确可排查/解决的具体故障类型、异常现象；
+- 服务方式：故障排查、问题解决的具体操作步骤（按逻辑排序）；
+- 核心优势：故障处理的高效性、便捷性（客观描述，不主观夸赞）。
+3) 标题：生成 ## 标准标题（≤20字，含产品+故障关键词）
+4) 格式要求：模块用 ###，内容用 -；核心名词加粗；模块之间仅 1 个空行。
+5) 扩写问答对聚焦：
+   ① 故障相关后续咨询
+   ② 排查/解决步骤中不完整点的补全
+   答案只补全必要信息，不新增无关信息。
+
+结构要求（强约束 + 软容错）：
+- answer 必须包含两部分，并按此顺序输出：### 结构化正文、### 扩写问答对。
+- 模块顺序固定为：接入范围→技术底座→服务能力→服务方式→核心优势；允许缺失模块直接跳过（不要硬凑）。
+- 扩写问答对目标 3-5 组；若信息不足无法覆盖 3 组，也必须输出已能生成的问答对，并在 notes 说明原因。
+
+输出要求（严格遵循）：
+你必须只输出严格 JSON（不要输出 Markdown 代码块，不要输出任何额外文本）：
+{
+  "answer": string,
+  "urls": string[]|null,
+  "notes": string|null
+}</textarea>
+
+                    <div style="height: 10px;"></div>
+                    <label class="form-label" style="font-size: 13px; opacity: 0.9;">使用类处理（usage）</label>
+                    <textarea id="aiPromptAnswerUsageInput" rows="10" class="font-mono" placeholder="用于：使用类处理（usage）">你是知识库结构化处理专家，核心聚焦结构化处理，不进行任何标签化操作。
+任务：将使用方法类客服文本按规则处理，输出可直接录入的 Markdown，并扩写 3-5 组操作相关问答对。
+
+输入数据：
+- question：{{question}}
+- answer：{{answer}}
+- urls：{{urls}}
+
+处理规则（严格执行）：
+1) 去噪精简：删除寒暄语/语气词/营销化表述，仅保留操作对象、操作步骤、使用场景等客观信息，不改变原意。
+2) 结构化拆解（严格按此顺序，有则写，无则跳过）：
+- 接入范围：明确使用该方法的产品型号、适用场景、使用渠道；
+- 技术底座：若涉及使用相关技术支撑（如系统/功能模块），简要说明；
+- 服务能力：明确该方法可实现的功能、解决的使用需求；
+- 服务方式：具体操作步骤（按先后顺序）、操作注意事项；
+- 核心优势：便捷性/高效性/独特性（客观描述）。
+3) 标题：生成 ## 标准标题（≤20字，含产品+使用功能关键词）
+4) 格式要求：模块用 ###，内容用 -；核心名词加粗；模块之间仅 1 个空行。
+5) 扩写问答对聚焦：
+   ① 操作相关后续咨询
+   ② 步骤/注意事项不完整点的补全
+   答案只补全必要信息，不新增无关信息。
+
+结构要求（强约束 + 软容错）：
+- answer 必须包含两部分，并按此顺序输出：### 结构化正文、### 扩写问答对。
+- 模块顺序固定为：接入范围→技术底座→服务能力→服务方式→核心优势；允许缺失模块直接跳过（不要硬凑）。
+- 扩写问答对目标 3-5 组；若信息不足无法覆盖 3 组，也必须输出已能生成的问答对，并在 notes 说明原因。
+
+输出要求（严格遵循）：
+你必须只输出严格 JSON（不要输出 Markdown 代码块，不要输出任何额外文本）：
+{
+  "answer": string,
+  "urls": string[]|null,
+  "notes": string|null
+}</textarea>
+
+                    <div style="height: 10px;"></div>
+                    <label class="form-label" style="font-size: 13px; opacity: 0.9;">功能类处理（feature）</label>
+                    <textarea id="aiPromptAnswerFeatureInput" rows="10" class="font-mono" placeholder="用于：功能类处理（feature）">你是知识库结构化处理专家，核心聚焦结构化处理，不进行任何标签化操作。
+任务：将功能介绍类客服文本按规则处理，输出可直接录入的 Markdown，并扩写 3-5 组功能相关问答对。
+
+输入数据：
+- question：{{question}}
+- answer：{{answer}}
+- urls：{{urls}}
+
+处理规则（严格执行）：
+1) 去噪精简：删除寒暄语/语气词/营销化表述，仅保留功能定义、核心作用、适用场景等客观信息，不改变原意。
+2) 结构化拆解（严格按此顺序，有则写，无则跳过）：
+- 接入范围：明确该功能适用的产品型号、使用渠道、目标用户；
+- 技术底座：支撑该功能运行的核心技术、模型、系统等；
+- 服务能力：功能的核心作用、可实现的具体效果、覆盖的使用场景；
+- 服务方式：功能开启/使用路径（简要说明，避免复杂步骤）；
+- 核心优势：与同类功能的区别、独特价值（客观描述）。
+3) 标题：生成 ## 标准标题（≤20字，含产品+功能名称关键词）
+4) 格式要求：模块用 ###，内容用 -；核心名词加粗；模块之间仅 1 个空行。
+5) 扩写问答对聚焦：
+   ① 功能相关后续咨询
+   ② 功能作用/使用路径不完整点的补全
+   答案只补全必要信息，不新增无关信息。
+
+结构要求（强约束 + 软容错）：
+- answer 必须包含两部分，并按此顺序输出：### 结构化正文、### 扩写问答对。
+- 模块顺序固定为：接入范围→技术底座→服务能力→服务方式→核心优势；允许缺失模块直接跳过（不要硬凑）。
+- 扩写问答对目标 3-5 组；若信息不足无法覆盖 3 组，也必须输出已能生成的问答对，并在 notes 说明原因。
+
+输出要求（严格遵循）：
+你必须只输出严格 JSON（不要输出 Markdown 代码块，不要输出任何额外文本）：
+{
+  "answer": string,
+  "urls": string[]|null,
+  "notes": string|null
+}</textarea>
+
+                    <!-- legacy single template (compat) -->
+                    <textarea id="aiPromptAnswerInput" rows="1" class="font-mono" style="display:none;"></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">相似问题 Prompt 模板:</label>
+                    <textarea id="aiPromptSimilarInput" rows="10" class="font-mono" placeholder="支持变量：{{question}} {{target_min}} {{target_max}} {{count_min}} {{count_max}} {{difficulty}}"></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">问题类型分类配置 (JSON):</label>
+                    <textarea id="aiQuestionTypeConfigJsonInput" rows="10" class="font-mono" placeholder="粘贴分类配置 JSON（参考 current_config_20260316_133957.json）。系统会根据“型号分类”自动选择 swapper/mopping/washing 的 Prompt 进行分类。"></textarea>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="document.getElementById('apiConfigModal').style.display='none'" class="action-btn">取消</button>
+            <button onclick="testApiConfig()" class="action-btn btn-secondary-outline">测试当前配置</button>
+            <button onclick="saveApiConfig()" class="primary-btn">保存</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- Scoring Criteria Modal -->
+  <div id="scoringCriteriaModal" class="modal">
+    <div class="modal-content" style="width: 800px; max-width: 90vw;">
+        <div class="modal-header">
+            <h3>评分标准配置 (System Prompt)</h3>
+            <button class="close-modal-btn" onclick="document.getElementById('scoringCriteriaModal').style.display='none'">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">System Prompt:</label>
+                <textarea id="systemPromptInput" rows="20" class="font-mono" placeholder="输入系统提示词..."></textarea>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="document.getElementById('scoringCriteriaModal').style.display='none'" class="action-btn">取消</button>
+            <button onclick="saveScoringCriteria()" class="primary-btn">保存</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- Product Manager Modal -->
+  <div id="productManagerModal" class="modal">
+    <div class="modal-content" style="width: 900px; max-width: 95vw; border-radius: 12px; padding: 0;">
+        <div class="modal-header" style="padding: 20px 24px; border-bottom: 1px solid #f0f0f0;">
+            <h3 style="margin: 0; font-size: 20px;">产品型号管理</h3>
+            <button class="close-modal-btn" onclick="closeProductManager()">&times;</button>
+        </div>
+        <div class="modal-body" style="padding: 0;">
+            <div class="pm-layout">
+                <!-- Categories Sidebar -->
+                <div class="pm-sidebar">
+                    <div class="pm-sidebar-header">分类列表</div>
+                    <div id="productCategoryList" class="pm-category-list custom-scrollbar">
+                        <!-- Categories will be rendered here -->
+                    </div>
+                    
+                    <div class="pm-add-category-wrapper">
+                        <button onclick="showAddCategoryInput()" id="showAddCategoryBtn" class="pm-btn-outline" style="width: 100%;">+ 新增分类</button>
+                        
+                        <div id="addCategoryInputDiv" class="d-none" style="margin-top: 10px;">
+                            <input type="text" id="newCategoryName" placeholder="输入分类名称" class="pm-input" style="width: 100%; margin-bottom: 8px;">
+                            <div style="display: flex; gap: 8px;">
+                                <button onclick="addProductCategory()" class="pm-btn-primary" style="padding: 6px 0; flex: 1; font-size: 13px;">确认</button>
+                                <button onclick="hideAddCategoryInput()" class="pm-btn-outline" style="padding: 6px 0; flex: 1; font-size: 13px;">取消</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Models Content -->
+                <div class="pm-content">
+                    <div class="pm-content-header">
+                        <div id="currentCategoryTitle" class="pm-content-title">请选择分类</div>
+                        <button onclick="deleteCurrentCategory()" id="deleteCategoryBtn" class="danger-btn btn-sm d-none" style="padding: 6px 12px; font-size: 13px;">删除当前分类</button>
+                    </div>
+                    
+                    <div id="productModelList" class="pm-model-list custom-scrollbar">
+                        <div class="pm-empty-state">
+                            <i class="fas fa-arrow-left" style="font-size: 24px; margin-bottom: 10px; opacity: 0.5;"></i>
+                            请先在左侧选择一个分类
+                        </div>
+                    </div>
+
+                    <div id="addModelContainer" class="pm-add-model-wrapper d-none">
+                        <input type="text" id="newModelName" placeholder="输入新型号名称" class="pm-input">
+                        <button onclick="addProductModel()" class="pm-btn-primary">添加型号</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer" style="padding: 16px 24px; border-top: 1px solid #f0f0f0;">
+            <button onclick="closeProductManager()" class="action-btn">关闭</button>
+            <button type="button" onclick="exportProductCatalogXlsx()" class="action-btn"><i class="fas fa-file-excel"></i> 导出 xlsx（分类汇总）</button>
+            <button type="button" onclick="exportProductCatalogModelListXlsx()" class="action-btn"><i class="fas fa-list"></i> 导出型号清单 xlsx（型号+分类）</button>
+            <button id="productCatalogCleanupBtn" onclick="saveProductCatalogFromManager()" class="primary-btn">执行清理</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- Model Mapping Modal -->
+  <div id="modelMappingModal" class="modal">
+    <div class="modal-content mm-modal-content">
+        <div class="modal-header mm-modal-header">
+            <h3 class="mm-modal-title"><i class="fas fa-map-signs"></i>机型分类映射管理</h3>
+            <button class="close-modal-btn" onclick="closeModelMappingModal()">&times;</button>
+        </div>
+        
+        <div class="modal-body mm-modal-body">
+            <div class="mm-toolbar">
+                <button onclick="addMappingCategory()" class="primary-btn btn-sm"><i class="fas fa-plus"></i> 新增映射分类</button>
+                <button onclick="openModelMappingImportModal()" class="action-btn btn-sm"><i class="fas fa-file-import"></i> 批量导入</button>
+                <div class="mm-toolbar-spacer"></div>
+                <div class="mm-search-wrap">
+                    <i class="fas fa-search mm-search-icon"></i>
+                    <input id="modelMappingSearch" class="mm-search-input" type="text" placeholder="搜索分类或机型..." oninput="renderModelMappingTable()">
+                </div>
+                <button onclick="exportModelMappingsJson()" class="action-btn btn-sm" title="导出当前机型分类映射配置（Excel）">
+                    <i class="fas fa-file-export"></i> 导出配置
+                </button>
+                <button onclick="saveModelMappings()" class="success-btn btn-sm"><i class="fas fa-save"></i> 保存配置</button>
+            </div>
+            
+            <div class="mm-grid-container custom-scrollbar">
+                <div id="modelMappingGrid" class="mm-grid"></div>
+            </div>
+        </div>
+    </div>
+  </div>
+
+  <!-- Model Mapping Import Modal -->
+  <div id="modelMappingImportModal" class="modal" style="z-index: 2100;">
+    <div class="modal-content" style="width: 600px; max-width: 90vw;">
+        <div class="modal-header">
+            <h3>批量导入机型映射</h3>
+            <button class="close-modal-btn" onclick="closeModelMappingImportModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p style="color: #666; font-size: 14px; margin-bottom: 10px;">
+                请粘贴文本，每行一条。格式支持：<br>
+                <code>分类名称: 机型1, 机型2, ...</code><br>
+                或<br>
+                <code>分类名称 [Tab] 机型1, 机型2, ...</code> (支持从 Excel 复制)
+            </p>
+            <textarea id="modelMappingImportText" class="pm-textarea" style="height: 300px; font-family: monospace;" placeholder="示例：
+所有扫地机: S8 Pro Ultra, S7 MaxV
+G10 系列: G10S, G10S Pro"></textarea>
+        </div>
+        <div class="modal-footer">
+            <button onclick="closeModelMappingImportModal()" class="action-btn">取消</button>
+            <button onclick="importModelMappings()" class="primary-btn">确认导入</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- Model Selector Modal (Nested) -->
+  <div id="modelSelectorModal" class="modal" style="z-index: 2100;">
+    <div class="modal-content mm-selector-modal-content">
+        <div class="modal-header">
+            <h3>选择机型</h3>
+            <button class="close-modal-btn" onclick="closeModelSelector()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div style="margin-bottom: 16px;">
+                <input type="text" id="modelSelectorSearch" placeholder="搜索机型..." class="pm-input" oninput="filterModelSelector()">
+            </div>
+            <div id="modelSelectorSelected" class="mm-selected-bar"></div>
+            <div id="modelSelectorList" class="mm-selector-list custom-scrollbar">
+                <!-- Checkboxes will be rendered here -->
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="closeModelSelector()" class="action-btn">取消</button>
+            <button onclick="confirmModelSelection()" class="primary-btn">确认选择</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- Archive Name Modal (prompt replacement) -->
+  <div id="archiveNameModal" class="modal" style="z-index: 2100;">
+    <div class="modal-content" style="width: 420px; max-width: 90vw;">
+        <div class="modal-header">
+            <h3>创建归档批次</h3>
+            <button class="close-modal-btn" onclick="closeArchiveNameModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div style="margin-bottom: 10px; color: #666; font-size: 13px;">
+                请输入批次名称（如 2024_Q1_版本）
+            </div>
+            <div id="archiveImpactPreview" class="text-muted" style="margin-bottom: 10px; font-size: 13px; line-height: 1.5;"></div>
+            <input
+              type="text"
+              id="archiveNameInput"
+              class="form-control"
+              placeholder="批次名称 (如 2024_Q1_版本)"
+              onkeydown="if (event.key === 'Enter') confirmCreateArchiveFromCurrent()"
+              style="width: 100%;"
+            >
+        </div>
+        <div class="modal-footer">
+            <button onclick="closeArchiveNameModal()" class="action-btn">取消</button>
+            <button id="archiveNameConfirmBtn" onclick="confirmCreateArchiveFromCurrent()" class="primary-btn">归档</button>
+        </div>
+    </div>
+  </div>
+
+  <div id="manualModal" class="modal" style="z-index: 2100;">
+    <div class="modal-content manual-modal-content">
+        <div class="modal-header">
+            <h3 style="color: var(--primary-color);"><i class="fas fa-book" style="margin-right: 8px;"></i> K-Matrix 助手 - 产品使用说明书</h3>
+            <button class="close-modal-btn" onclick="closeManual()">&times;</button>
+        </div>
+        <div class="modal-body manual-modal-body">
+            
+            <!-- 简介 -->
+            <div class="intro-card">
+                <h4 style="margin-top:0; color:var(--primary-color); display: flex; align-items: center; gap: 8px;"><i class="fas fa-rocket"></i> K-Matrix 助手 (K-Matrix Assistant)</h4>
+                <p style="margin-bottom:0; font-size:14px; color:#555; line-height: 1.6;">
+                    <strong>定位 ：</strong>一站式智能知识库管理与质量评估平台，集成了数据维护、机型矩阵配置、多媒体资源管理及大模型自动化评分治理功能。
+                </p>
+            </div>
+
+            <!-- 1. 知识库管理 -->
+            <div class="manual-section">
+                <h3><i class="fas fa-database"></i> 1. 知识库管理 (Knowledge Base Management)</h3>
+                <p class="manual-desc">核心数据维护模块，支持对主库 (V1) 和测试库 (V1T-1) 的全生命周期管理。</p>
+                
+                <div class="feature-grid">
+                    <div class="feature-card">
+                        <h4><i class="fas fa-file-import" style="color: var(--primary-color);"></i> 数据导入 (Data Import)</h4>
+                        <ul class="feature-list">
+                            <li><strong>支持格式 ：</strong>Excel (.xlsx, .xls)、CSV。</li>
+                            <li><strong>三种导入模式 ：</strong></li>
+                            <ul style="padding-left: 15px; margin-top: 5px;">
+                                <li><span class="manual-badge badge-upsert">增量更新 (Upsert)</span> ID 存在则更新，不存在则新增（推荐用于日常维护）。</li>
+                                <li><span class="manual-badge badge-append">批量新增 (Append)</span> 自动跳过已存在的 ID，仅插入新数据（安全补充）。</li>
+                                <li><span class="manual-badge badge-overwrite">全量覆盖 (Overwrite)</span> 导入前先自动将 V1 同步至 V1T-1 备份，再清空 V1 并重新导入（用于重大版本重置）。</li>
+                            </ul>
+                            <li><strong>辅助功能 ：</strong></li>
+                            <ul style="padding-left: 15px; margin-top: 5px;">
+                                <li>查重预览 ：导入前检查重复 ID，避免冲突。</li>
+                                <li>模板下载 ：提供标准 Excel 导入模板。</li>
+                            </ul>
+                        </ul>
+                    </div>
+                    <div class="feature-card">
+                        <h4><i class="fas fa-sync-alt" style="color: var(--primary-color);"></i> 数据同步 (Data Sync)</h4>
+                        <ul class="feature-list">
+                            <li><strong>同步此刻到前刻 ：</strong>将 V1 库（此刻状态）全量覆盖同步至 V1T-1 库（前刻备份）。</li>
+                            <li><strong>一键同步下游 ：</strong>将当前 V1 同步至机型矩阵、多媒体预览、评分表；治理月度召回仍须在治理 Tab 导入 Excel，本操作会更新评分快照供治理关联展示。</li>
+                        </ul>
+                    </div>
+                    <div class="feature-card">
+                        <h4><i class="fas fa-search" style="color: var(--primary-color);"></i> 检索与筛选 (Search & Filter)</h4>
+                        <ul class="feature-list">
+                            <li><strong>多维搜索 ：</strong>支持按 ID、产品名称、问题、答案、URL 进行模糊匹配。</li>
+                            <li><strong>状态筛选 ：</strong>可按“未调整”、“修改中”、“删除中”三种状态快速过滤记录。</li>
+                        </ul>
+                    </div>
+                    <div class="feature-card">
+                        <h4><i class="fas fa-edit" style="color: var(--primary-color);"></i> 编辑与操作 (Edit & Actions)</h4>
+                        <ul class="feature-list">
+                            <li><strong>在线编辑 ：</strong>弹窗式编辑，支持 Markdown 实时预览，快捷勾选关联机型。</li>
+                            <li><strong>批量操作 ：</strong>支持批量删除、批量重置修订状态（完成本轮修订）。</li>
+                            <li><strong>型号库管理 ：</strong>内置产品型号管理器，支持动态增删产品分类及具体型号。</li>
+                            <li><strong>数据导出 ：</strong>支持导出当前筛选结果或全量数据。</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. 机型矩阵管理 -->
+            <div class="manual-section">
+                <h3><i class="fas fa-th"></i> 2. 机型矩阵管理 (Product Matrix)</h3>
+                <p class="manual-desc">专门用于维护“问题-机型”对应关系的二维矩阵视图。</p>
+                <div class="feature-grid">
+                    <div class="feature-card">
+                        <h4><i class="fas fa-toggle-on" style="color: var(--primary-color);"></i> 矩阵配置</h4>
+                        <ul class="feature-list">
+                            <li><strong>矩阵配置 ：</strong>直观展示每个问题适用的机型，支持单元格点击切换（适用/不适用）。</li>
+                            <li><strong>批量配置 ：</strong>支持整列（某机型）或整行（某问题）的批量开启/关闭。</li>
+                            <li><strong>列操作 ：</strong>支持动态添加新机型列、复制现有列配置。</li>
+                            <li><strong>同步逻辑 ：</strong>将矩阵中的配置关系自动同步回知识库的 product_name 字段，确保数据一致性。</li>
+                            <li><strong>导入导出 ：</strong>支持矩阵结构的独立导入与导出。</li>
+                            <li><strong>四个常用按钮（白话）：</strong>
+                                <ul style="padding-left: 15px; margin-top: 5px;">
+                                    <li><strong>✅ 设为已配置：</strong>先勾选多行问题 → 选一个机型列 → 把这些格子统一标成“对该机型生效”。例：勾选 10 条“尘袋/滤网”问题，选择机型 G30S Pro，批量设为✅。</li>
+                                    <li><strong>🚫 设为未配置：</strong>先勾选多行问题 → 选一个机型列 → 把这些格子统一标成“对该机型不生效”。例：把“不带蒸汽功能”的机型，在“蒸汽护理”相关问题上统一设为❌。</li>
+                                    <li><strong>提交修改：</strong>把你刚才单格点选/批量设置产生的“待提交修改”一次性正式保存，并写入提交日志与修改历史。例：你刚批量改了 100 个格子，不点提交刷新会丢；点提交后才算落库。</li>
+                                    <li><strong>提交日志：</strong>查看每次提交是否成功、失败原因、重试次数（按 operation_id 追踪）。例：提交后担心 Supabase 写入是否成功，打开提交日志就能看到 success/failed 与错误信息。</li>
+                                </ul>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="feature-card">
+                        <h4><i class="fas fa-filter" style="color: var(--primary-color);"></i> 筛选逻辑（行筛选 vs 表头收缩）</h4>
+                        <ul class="feature-list">
+                            <li><strong>固定列：</strong>表格左侧固定展示 ID / 问题 / 答案，右侧为各机型列。</li>
+                            <li><strong>搜索问题：</strong>只筛选数据行（哪些问题显示），不影响表头机型列。</li>
+                            <li><strong>搜索机型：</strong>只筛选数据行（只显示包含该机型的记录），不收缩表头机型列。</li>
+                            <li><strong>产品分类：</strong>同时筛选数据行 + 收缩表头机型列（只保留该分类机型）。</li>
+                            <li><strong>映射分类：</strong>筛选数据行（完全匹配：该问题关联机型集合必须与该映射机型集合一致，顺序不要求一致）+ 收缩表头机型列（只保留该映射对应机型）。</li>
+                            <li><strong>表头型号(多选)：</strong>仅收缩表头机型列，不筛选数据行；与“产品分类/映射分类”叠加时取交集。</li>
+                            <li><strong>列收缩合并规则：</strong>最终表头机型 = 产品分类白名单 ∩ 映射分类白名单 ∩ 表头型号多选白名单（未选的条件不参与）。</li>
+                            <li><strong>导出矩阵：</strong>当前仅跟随“搜索问题/搜索机型”的行筛选导出；表头收缩与分类 chips 不影响导出列。</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. 多媒体预览 -->
+            <div class="manual-section">
+                <h3><i class="fas fa-photo-video"></i> 3. 多媒体预览 (Multimedia Preview)</h3>
+                <p class="manual-desc">集中管理知识库中引用的图片、视频及链接资源。</p>
+                <div class="feature-grid">
+                    <div class="feature-card">
+                        <h4><i class="fas fa-images" style="color: var(--primary-color);"></i> 资源管理与预览</h4>
+                        <ul class="feature-list">
+                            <li><strong>资源聚合 ：</strong>自动提取知识库中的所有 URL 链接。</li>
+                            <li><strong>在线预览 ：</strong></li>
+                            <ul style="padding-left: 15px; margin-top: 5px;">
+                                <li>图片 ：支持点击放大查看细节。</li>
+                                <li>视频 ：支持直接在页面内播放。</li>
+                            </ul>
+                            <li><strong>标签管理 ：</strong>支持批量为资源打标（如 image , video , manual ）。</li>
+                            <li><strong>反向追溯 ：</strong>点击资源 ID 可直接跳转至知识库管理页面的对应记录，方便修改上下文。</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4. 知识库评分 -->
+            <div class="manual-section">
+                <h3><i class="fas fa-star-half-alt"></i> 4. 知识库评分 (Scoring)</h3>
+                <p class="manual-desc">利用大语言模型 (LLM) 对问答质量进行多维度自动化评估。</p>
+                <div class="feature-grid">
+                    <div class="feature-card">
+                        <h4><i class="fas fa-tasks" style="color: var(--primary-color);"></i> 评分执行</h4>
+                        <ul class="feature-list">
+                            <li><strong>随机抽样 ：</strong>支持快速抽取 10/50/100 条数据进行验证。</li>
+                            <li><strong>全量评分 ：</strong>对整个知识库进行批量打分。</li>
+                            <li><strong>同步数据 ：</strong>从 V1 库同步最新待评分数据。</li>
+                        </ul>
+                    </div>
+                    <div class="feature-card">
+                        <h4><i class="fas fa-chart-bar" style="color: var(--primary-color);"></i> 评分维度</h4>
+                        <ul class="feature-list">
+                            <li><span class="manual-badge badge-info">质量 (Quality)</span> 准确性、完整性。</li>
+                            <li><span class="manual-badge badge-info">合规 (Compliance)</span> 是否符合品牌规范。</li>
+                            <li><span class="manual-badge badge-info">时效 (Timeliness)</span> 信息是否过时。</li>
+                            <li><span class="manual-badge badge-info">解决力 (Resolution)</span> 能否有效解决用户问题。</li>
+                            <li><span class="manual-badge badge-info">非冗余 (Non-redundancy)</span> 是否存在重复信息。</li>
+                            <li><span class="manual-badge badge-info">多媒体 (Multimedia)</span> 图文/视频加分项。</li>
+                        </ul>
+                    </div>
+                    <div class="feature-card">
+                        <h4><i class="fas fa-cogs" style="color: var(--primary-color);"></i> 配置管理</h4>
+                        <ul class="feature-list">
+                            <li><strong>API 配置 ：</strong>自定义 LLM 的 API Key、Base URL 和模型名称。</li>
+                            <li><strong>标准配置 ：</strong>支持自定义 System Prompt（评分标准）。</li>
+                            <li><strong>报告导出 ：</strong>支持导出详细的评分报告及统计结果。</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 5 & 6. 治理与记录 -->
+            <div class="manual-section">
+                <h3><i class="fas fa-history"></i> 5. 治理与记录 (Governance & Logs)</h3>
+                <div class="feature-grid">
+                    <div class="feature-card">
+                        <h4><i class="fas fa-trash-alt" style="color: var(--primary-color);"></i> 知识库治理 (Governance)</h4>
+                        <p style="font-size:13px; color:#555; margin-bottom:8px;">用于数据的定期回顾与生命周期管理。</p>
+                        <ul class="feature-list">
+                            <li><strong>按月召回 ：</strong>查看特定月份的历史数据召回情况。</li>
+                            <li><strong>清理维护 ：</strong>支持对过期或无效的召回记录进行批量删除。</li>
+                        </ul>
+                    </div>
+                    <div class="feature-card">
+                        <h4><i class="fas fa-clipboard-list" style="color: var(--primary-color);"></i> 修改记录 (Modifications)</h4>
+                        <p style="font-size:13px; color:#555; margin-bottom:8px;">系统的审计日志模块。</p>
+                        <ul class="feature-list">
+                            <li><strong>日志查看 ：</strong>记录所有关键操作（新增、编辑、删除、矩阵变更）。</li>
+                            <li><strong>详情追踪 ：</strong>展示操作时间、操作人、变更类型及具体变更内容。</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+        <div class="modal-footer" style="border-top: 1px solid #f0e6e8; padding: 16px 32px; text-align: right;">
+             <button onclick="closeManual()" class="primary-btn">关闭</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- Matrix Sync Modal -->
+  <div id="matrixSyncModal" class="modal">
+    <span class="close-modal-icon close-modal">&times;</span>
+    <div class="modal-content" style="max-width: 600px; padding: 30px; border-radius: 12px;">
+        <h3 class="modal-title" style="margin-bottom: 25px; font-size: 20px; color: #333;">同步机型矩阵</h3>
+        <div class="form-group">
+            <label class="form-label" style="font-size: 15px; margin-bottom: 15px;">选择同步模式:</label>
+            <div class="sync-options-container">
+                <label class="sync-option-card selected">
+                    <div class="sync-option-radio">
+                        <input type="radio" name="matrixSyncMode" value="merge" checked>
+                    </div>
+                    <div class="sync-option-content">
+                        <div class="sync-option-header">
+                            <i class="fas fa-code-branch sync-icon icon-merge"></i>
+                            <b>增量合并 (推荐)</b>
+                        </div>
+                        <p class="sync-option-desc">保留所有手动修改的配置，仅更新来自知识库的新增/删除项。适用于日常同步。</p>
+                    </div>
+                </label>
+                
+                <label class="sync-option-card">
+                    <div class="sync-option-radio">
+                        <input type="radio" name="matrixSyncMode" value="reset">
+                    </div>
+                    <div class="sync-option-content">
+                        <div class="sync-option-header">
+                            <i class="fas fa-exclamation-triangle sync-icon icon-reset"></i>
+                            <b style="color: #d9534f;">重置同步 (慎用)</b>
+                        </div>
+                        <p class="sync-option-desc text-danger">⚠️ 清空当前矩阵所有数据，完全依照“此刻库”重新生成。手动配置将丢失！</p>
+                    </div>
+                </label>
+                
+                <label class="sync-option-card">
+                    <div class="sync-option-radio">
+                        <input type="radio" name="matrixSyncMode" value="content_refresh">
+                    </div>
+                    <div class="sync-option-content">
+                        <div class="sync-option-header">
+                            <i class="fas fa-sync sync-icon icon-refresh"></i>
+                            <b>内容刷新 (保留配置)</b>
+                        </div>
+                        <p class="sync-option-desc text-warning">⚠️ 保留现有条目的ID和产品设置，仅刷新问题/答案等内容。同时同步新增/删除的条目。</p>
+                    </div>
+                </label>
+            </div>
+        </div>
+        <div class="flex-end mt-30">
+            <button class="action-btn close-modal modal-footer-btn">取消</button>
+            <button onclick="confirmSyncMatrix()" class="primary-btn modal-footer-btn">开始同步</button>
+        </div>
+    </div>
+  </div>
+
+  <div id="matrixSubmitLogsModal" class="modal">
+    <div class="modal-content" style="max-width: 900px; width: 92vw;">
+        <div class="modal-header">
+            <h3>提交日志</h3>
+            <button class="close-modal-btn" onclick="closeMatrixSubmitLogsModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="matrixSubmitLogsStatus" class="text-muted mb-12">加载中...</div>
+            <div class="table-container min-h-200" style="max-height: 60vh; overflow: auto;">
+                <table class="kb-table" id="matrixSubmitLogsTable">
+                    <thead>
+                        <tr>
+                            <th style="width: 220px;">operation_id</th>
+                            <th style="width: 90px;">状态</th>
+                            <th style="width: 70px;">重试</th>
+                            <th style="width: 120px;">操作人</th>
+                            <th>错误</th>
+                            <th style="width: 170px;">时间</th>
+                            <th style="width: 90px;">明细</th>
+                        </tr>
+                    </thead>
+                    <tbody id="matrixSubmitLogsTbody"></tbody>
+                </table>
+            </div>
+        </div>
+        <div class="modal-footer" style="border-top: 1px solid #f5f5f5; padding: 16px 32px; text-align: right;">
+            <button onclick="closeMatrixSubmitLogsModal()" class="primary-btn">关闭</button>
+        </div>
+    </div>
+  </div>
+
+  <div id="matrixSubmitLogDetailsModal" class="modal">
+    <div class="modal-content" style="max-width: 1220px; width: 96vw;">
+        <div class="modal-header">
+            <h3>提交明细</h3>
+            <button class="close-modal-btn" onclick="closeMatrixSubmitLogDetailsModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="matrixSubmitLogDetailsMeta" class="text-muted mb-12">-</div>
+            <div id="matrixSubmitLogDetailsStatus" class="text-muted mb-12">加载中...</div>
+            <div class="table-container min-h-200" style="max-height: 62vh; overflow: auto;">
+                <table class="kb-table" id="matrixSubmitLogDetailsTable">
+                    <thead>
+                        <tr>
+                            <th style="width: 140px;">问题编号</th>
+                            <th>问题</th>
+                            <th style="width: 120px;">机型</th>
+                            <th style="width: 90px;">变更前</th>
+                            <th style="width: 90px;">变更后</th>
+                            <th style="width: 90px;">来源</th>
+                            <th style="width: 120px;">提交人</th>
+                            <th style="width: 170px;">时间</th>
+                            <th style="width: 90px;">详情</th>
+                        </tr>
+                    </thead>
+                    <tbody id="matrixSubmitLogDetailsTbody"></tbody>
+                </table>
+            </div>
+        </div>
+        <div class="modal-footer" style="border-top: 1px solid #f5f5f5; padding: 16px 32px; text-align: right;">
+            <button onclick="closeMatrixSubmitLogDetailsModal()" class="primary-btn">关闭</button>
+        </div>
+    </div>
+  </div>
+
+  <div id="matrixBulkConfigModal" class="modal">
+    <div class="modal-content" style="max-width: 520px; width: 92vw;">
+        <div class="modal-header">
+            <h3>批量设置机型状态</h3>
+            <button class="close-modal-btn" onclick="closeMatrixBulkConfigModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="text-muted mb-12">已选择 <b id="matrixBulkSelectedCount">0</b> 个问题</div>
+            <div class="form-group">
+                <label class="form-label">目标机型：</label>
+                <select id="matrixBulkProductSelect" class="form-control" style="width: 100%;"></select>
+            </div>
+            <div class="text-muted">将设置为：<b id="matrixBulkTargetStatus">-</b>（此操作会加入待提交修改，需要点击“提交修改”才会落库）</div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="closeMatrixBulkConfigModal()" class="action-btn">取消</button>
+            <button onclick="confirmMatrixBulkConfigModal()" class="primary-btn">确认批量设置</button>
+        </div>
+    </div>
+  </div>
+
+
+  <!-- Score Detail Modal -->
+  <div id="scoreDetailModal" class="modal">
+    <div class="modal-content" style="width: 800px; max-width: 90vw;">
+        <div class="modal-header">
+            <h3>评分详情</h3>
+            <button class="close-modal-btn" onclick="document.getElementById('scoreDetailModal').style.display='none'">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="scoreDetailContent" style="max-height: 70vh; overflow-y: auto;">
+                加载中...
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="document.getElementById('scoreDetailModal').style.display='none'" class="primary-btn">关闭</button>
+        </div>
+    </div>
+  </div>
+
+    <!-- Revision Confirmation Modal -->
+    <div id="revisionConfirmModal" class="modal-modern">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>确认完成修订</h3>
+                <span class="close" onclick="closeRevisionModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p style="font-size: 16px; color: #333; margin-bottom: 8px;">确定要完成本轮修订吗？</p>
+                <p class="text-muted" style="line-height: 1.5;">所有"修改中/删除中"的状态将被重置为"未调整"，且修改历史将被保留。</p>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeRevisionModal()" class="btn btn-cancel">取消</button>
+                <button onclick="executeRevisionCompletion()" class="btn btn-confirm">确定完成</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="dangerConfirmModal" class="modal-modern">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="dangerConfirmTitle">高风险操作确认</h3>
+                <span class="close" onclick="closeDangerConfirmModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p id="dangerConfirmMessage">确认继续执行该操作吗？</p>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeDangerConfirmModal(false)" class="btn btn-cancel">取消</button>
+                <button onclick="closeDangerConfirmModal(true)" class="btn btn-confirm">确认执行</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="kbEditCloseConfirmModal" class="modal-modern kb-edit-close-confirm-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>未保存的修改</h3>
+                <span class="close" onclick="closeKbEditUnsavedCloseModal('cancel')">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p id="kbEditCloseConfirmMessage" style="margin: 0; line-height: 1.55; color: #333;">
+                    相对打开本窗口时的内容，您还有未保存的修改。<br />
+                    <span class="text-muted" style="font-size: 13px;">「确定」保存到本地草稿并关闭；「取消」留在本页继续编辑；「不保存」放弃修改并关闭。</span>
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" onclick="closeKbEditUnsavedCloseModal('cancel')" class="btn btn-cancel">取消</button>
+                <button type="button" onclick="closeKbEditUnsavedCloseModal('discard')" class="btn btn-discard">不保存</button>
+                <button type="button" onclick="closeKbEditUnsavedCloseModal('save')" class="btn btn-confirm">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Column Settings Modal -->
+    <div id="columnSettingsModal" class="modal">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3>显示列设置</h3>
+                <span class="close" onclick="closeColumnSettingsModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div id="columnSettingsList" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <!-- Checkboxes will be generated here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeColumnSettingsModal()" class="primary-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <div id="modDetailsModal" class="modal" style="z-index: 2200;">
+        <div class="modal-content" style="width: 1000px; max-width: 96vw;">
+            <div class="modal-header">
+                <h3>修改详情（前 / 后对比）</h3>
+                <button class="close-modal-btn" onclick="closeModDetailsModal()">&times;</button>
+            </div>
+            <div class="modal-body" style="padding: 16px;">
+                <div id="modDetailsMeta" style="margin-bottom: 12px; color: #666;"></div>
+                <div id="modDetailsChanged" style="margin-bottom: 12px;"></div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <div>
+                        <div style="font-weight: 600; margin-bottom: 8px;">修改前</div>
+                        <div id="modDetailsBefore"></div>
+                    </div>
+                    <div>
+                        <div style="font-weight: 600; margin-bottom: 8px;">修改后</div>
+                        <div id="modDetailsAfter"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeModDetailsModal()" class="primary-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="archiveRecordsModal" class="modal" style="z-index: 2100;">
+        <div class="modal-content" style="width: 1200px; max-width: 96vw;">
+            <div class="modal-header">
+                <h3 id="archiveRecordsTitle">归档记录</h3>
+                <button class="close-modal-btn" onclick="closeArchiveRecordsModal()">&times;</button>
+            </div>
+            <div class="modal-body" style="padding: 16px;">
+                <div class="filter-section" style="display:flex; gap:10px; margin-bottom: 12px; align-items:center; flex-wrap:wrap;">
+                    <input type="text" id="archiveRecSearchId" placeholder="问题编号" class="form-control" style="width: 160px;">
+                    <input type="text" id="archiveRecSearchProduct" placeholder="产品型号" class="form-control" style="width: 160px;">
+                    <input type="text" id="archiveRecSearchQuestion" placeholder="问题" class="form-control" style="width: 220px;">
+                    <select id="archiveRecSourceSelect" class="form-control" style="width: 150px;">
+                        <option value="">来源模块(全部)</option>
+                        <option value="知识库管理">知识库管理</option>
+                        <option value="机型矩阵管理">机型矩阵管理</option>
+                    </select>
+                    <input type="datetime-local" id="archiveRecStartTime" class="form-control" style="width: 190px;">
+                    <input type="datetime-local" id="archiveRecEndTime" class="form-control" style="width: 190px;">
+                    <button onclick="loadArchiveRecords(1)" class="primary-btn">查询</button>
+                    <button onclick="resetArchiveRecordsFilter()" class="action-btn">重置</button>
+                    <button onclick="exportArchiveRecords()" class="action-btn">📤 导出</button>
+                </div>
+                <div class="table-container min-h-200 mb-0">
+                    <table class="kb-table" id="archiveRecTable">
+                        <thead>
+                            <tr>
+                                <th style="width: 90px;">操作</th>
+                                <th style="width: 140px;">question_wiki_id</th>
+                                <th style="width: 260px;">question</th>
+                                <th style="width: 120px;">question_type</th>
+                                <th style="width: 320px;">answer</th>
+                                <th style="width: 120px;">answer_type</th>
+                                <th style="width: 200px;">error_list</th>
+                                <th style="width: 200px;">keyword_list</th>
+                                <th style="width: 220px;">similar_questions</th>
+                                <th style="width: 80px;">if_bm25</th>
+                                <th style="width: 220px;">products</th>
+                                <th style="width: 240px;">image_urls</th>
+                                <th style="width: 240px;">video_urls</th>
+                                <th style="width: 240px;">file_urls</th>
+                                <th style="width: 140px;">link_type</th>
+                                <th style="width: 240px;">link_url</th>
+                                <th style="width: 140px;">来源</th>
+                                <th style="width: 160px;">修改时间</th>
+                                <th style="width: 140px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="archiveRecTableBody">
+                            <tr><td colspan="19" class="empty-message">无数据</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="pagination-container">
+                    <div class="pagination-left">
+                        <div class="page-size-wrapper">
+                            <span class="page-size-label">每页显示：</span>
+                            <select id="archiveRecPageSizeSelect" onchange="changeArchiveRecPageSize()" class="page-size-select">
+                                <option value="10">10</option>
+                                <option value="20" selected>20</option>
+                                <option value="50">50</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="pagination-right">
+                        <span id="archiveRecPageInfo" class="page-info">共 0 条</span>
+                        <button onclick="changeArchiveRecPage(-1)" id="prevArchiveRecPageBtn" disabled class="pagination-btn">上一页</button>
+                        <button onclick="changeArchiveRecPage(1)" id="nextArchiveRecPageBtn" disabled class="pagination-btn">下一页</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeArchiveRecordsModal()" class="primary-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app_v8.min.js"></script>
+
+  <!-- KB Tag Filter Modal -->
+  <div id="kbTagFilterModal" class="modal">
+      <div class="modal-content" style="max-width: 500px;">
+          <div class="modal-header" style="border-bottom: 1px solid #eee; padding-bottom: 15px;">
+              <h3 class="modal-title" style="margin: 0; color: #333;"><i class="fas fa-tags" style="color: #4CAF50; margin-right: 10px;"></i> 按标签筛选数据</h3>
+              <button class="close-modal-btn" onclick="closeKbTagFilterModal()">&times;</button>
+          </div>
+          <div class="modal-body" style="padding: 20px;">
+              <p class="text-muted" style="font-size: 13px; margin-bottom: 16px;">
+                  选择一个或多个标签来过滤知识库数据。仅用于当前列表的数据筛选。
+              </p>
+              <div style="display:flex; gap:16px; align-items:center; margin-bottom: 16px; font-size: 13px;">
+                  <span style="font-weight: 600; color: #334155;">匹配逻辑:</span>
+                  <label style="display:flex; gap:4px; align-items:center; cursor:pointer;">
+                      <input type="radio" name="kbTagFilterModeModal" value="OR" checked onchange="document.querySelector('input[name=kbTagFilterMode][value=OR]').checked = true;"> 包含任一 (OR)
+                  </label>
+                  <label style="display:flex; gap:4px; align-items:center; cursor:pointer;">
+                      <input type="radio" name="kbTagFilterModeModal" value="AND" onchange="document.querySelector('input[name=kbTagFilterMode][value=AND]').checked = true;"> 包含所有 (AND)
+                  </label>
+              </div>
+              
+              <div id="kbTagFilterModalList" style="max-height: 300px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; display: flex; flex-wrap: wrap; gap: 8px;">
+                  <div class="text-muted" style="width: 100%; text-align: center; padding: 20px;">加载中...</div>
+              </div>
+          </div>
+          <div class="modal-footer" style="display: flex; justify-content: space-between; border-top: 1px solid #eee; padding-top: 15px;">
+              <button class="action-btn btn-secondary-outline" onclick="clearKbTagFilterModal()">清空选择</button>
+              <div style="display: flex; gap: 8px;">
+                  <button class="action-btn" onclick="closeKbTagFilterModal()">取消</button>
+                  <button class="primary-btn btn-primary-gradient" onclick="applyKbTagFilterModal()">确认筛选</button>
+              </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- Copy Config Modal -->
+  <div id="copyConfigModal" class="modal">
+    <div class="modal-content" style="width: 600px;">
+        <div class="modal-header" style="border-bottom: 1px solid #eee; padding-bottom: 15px;">
+            <h3 style="margin: 0; color: #333;"><i class="fas fa-clipboard-check" style="color: #9B59B6; margin-right: 10px;"></i> 复制机型配置</h3>
+            <button class="close-modal-btn" onclick="closeCopyConfigModal()">&times;</button>
+        </div>
+        <div class="modal-body" style="padding: 20px;">
+            <!-- Tabs -->
+            <div class="tabs" style="margin-bottom: 20px; border-bottom: 1px solid #ddd; display: flex; gap: 20px;">
+                <button class="tab-btn active" onclick="switchCopyMode('model')" id="tab-copy-model" style="padding: 8px 16px; background: none; border: none; border-bottom: 3px solid #9B59B6; color: #9B59B6; cursor: pointer; font-weight: bold;">按源机型克隆</button>
+                <button class="tab-btn" onclick="switchCopyMode('category')" id="tab-copy-category" style="padding: 8px 16px; background: none; border: none; border-bottom: 3px solid transparent; color: #666; cursor: pointer;">按源分类克隆</button>
+            </div>
+
+            <!-- Content -->
+            <div id="copy-model-content">
+                <div class="form-group" style="margin-bottom: 15px;">
+                    <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: bold;">源机型 (Source Model)</label>
+                    <select id="copySourceModel" class="form-select" onchange="fetchCopyStats()" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></select>
+                    <div class="form-hint" id="copyModelStats" style="font-size: 12px; color: #666; margin-top: 5px; min-height: 18px;">请选择源机型...</div>
+                </div>
+            </div>
+
+            <div id="copy-category-content" style="display:none;">
+                <div class="form-group" style="margin-bottom: 15px;">
+                    <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: bold;">源分类 (Source Category)</label>
+                    <select id="copySourceCategory" class="form-select" onchange="fetchCopyStats()" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></select>
+                    <div class="form-hint" id="copyCategoryStats" style="font-size: 12px; color: #666; margin-top: 5px; min-height: 18px;">请选择源分类...</div>
+                </div>
+            </div>
+
+            <div class="form-group" style="margin-top: 20px; margin-bottom: 15px;">
+                <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: bold;">目标机型 (Target Models)</label>
+                <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                     <div style="position: relative; flex: 1;">
+                         <input type="text" id="copyTargetInput" placeholder="输入机型名称，按回车添加" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;" autocomplete="off">
+                         <div id="targetSuggestions" style="position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ddd; border-top: none; max-height: 200px; overflow-y: auto; z-index: 1000; display: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-radius: 0 0 4px 4px;"></div>
+                     </div>
+                     <button onclick="addCopyTarget()" class="action-btn" style="padding: 8px 16px; cursor: pointer;">添加</button>
+                </div>
+                <div id="copyTargetList" class="tag-container" style="min-height: 40px; border: 1px solid #ddd; padding: 5px; border-radius: 4px; display: flex; flex-wrap: wrap; gap: 5px;"></div>
+                <div class="form-hint" style="font-size: 12px; color: #999; margin-top: 5px;">支持手动输入新机型，按回车键确认。</div>
+            </div>
+
+            <div class="form-group" style="margin-top: 20px; background: #f9f9f9; padding: 15px; border-radius: 6px;">
+                <label class="form-label" style="display: block; margin-bottom: 10px; font-weight: bold;">执行策略</label>
+                <div class="radio-group" style="display: flex; flex-direction: column; gap: 8px;">
+                    <label style="cursor: pointer; display: flex; align-items: center;">
+                        <input type="radio" name="copyStrategy" value="append" checked style="margin-right: 8px;"> 
+                        <span><b>仅追加 (Append Only)</b> - 跳过已存在的关联 (推荐)</span>
+                    </label>
+                    <label style="cursor: pointer; display: flex; align-items: center;">
+                        <input type="radio" name="copyStrategy" value="force_sync" style="margin-right: 8px;"> 
+                        <span><b>强制同步 (Force Sync)</b> - 覆盖现有配置，确保完全一致</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer" style="padding: 15px 20px; border-top: 1px solid #eee; display: flex; justify-content: flex-end; gap: 10px;">
+            <button onclick="closeCopyConfigModal()" class="action-btn" style="padding: 8px 20px; cursor: pointer;">取消</button>
+            <button onclick="executeCopyConfig()" class="primary-btn" style="background-color: #9B59B6; border-color: #9B59B6; color: white; padding: 8px 20px; border-radius: 4px; cursor: pointer;">开始追加</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- Feedback Modal -->
+  <div id="feedbackModal" class="modal" style="z-index: 9999;">
+    <div class="modal-content" style="width: 420px; max-width: 92vw;">
+        <div class="modal-header">
+            <h3 id="feedbackTitle" style="margin:0;">提示</h3>
+            <button class="close-modal-btn" onclick="closeFeedbackModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="feedbackMessage" style="white-space: pre-wrap; color: #333; line-height: 1.6;"></div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="closeFeedbackModal()" class="primary-btn">确定</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- Ops Library Modal -->
+  <div id="opsLibraryModal" class="modal" style="z-index: 2300;">
+    <div class="modal-content" style="width: 1000px; max-width: 96vw;">
+      <div class="modal-header">
+        <h3>操作库管理</h3>
+        <button class="close-modal-btn" onclick="closeOpsLibraryModal()">&times;</button>
+      </div>
+      <div class="modal-body" style="padding: 16px;">
+        <div style="display:flex; gap:10px; align-items:center; margin-bottom: 12px; flex-wrap: wrap;">
+          <button type="button" class="tab-btn active" id="opsTabApp" onclick="switchOpsLibraryTab('app')">APP操作库</button>
+          <button type="button" class="tab-btn" id="opsTabProduct" onclick="switchOpsLibraryTab('product')">产品操作库</button>
+          <div style="flex:1 1 auto;"></div>
+          <button type="button" class="primary-btn" onclick="openOpsItemEditor(null)">＋ 新增</button>
+        </div>
+
+        <div class="table-container min-h-200 mb-0">
+          <table class="kb-table" id="opsLibraryTable">
+            <thead>
+              <tr>
+                <th style="width: 70px;">排序</th>
+                <th style="width: 220px;">操作名称</th>
+                <th>操作步骤</th>
+                <th style="width: 220px;">适配型号</th>
+                <th style="width: 160px;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="opsLibraryTbody">
+              <tr><td colspan="5" class="empty-message">暂无数据</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="text-muted" style="margin-top: 10px; font-size: 12px;">
+          说明：适配型号仅用于后台配置与筛选，前端插入时不会展示/插入。
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button onclick="closeOpsLibraryModal()" class="primary-btn">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Ops Item Editor Modal (no prompt dialogs) -->
+  <div id="opsItemModal" class="modal" style="z-index: 2450;">
+    <div class="modal-content" style="width: 760px; max-width: 94vw;">
+      <div class="modal-header">
+        <h3 id="opsItemTitle">操作项</h3>
+        <button class="close-modal-btn" onclick="closeOpsItemModal()">&times;</button>
+      </div>
+      <div class="modal-body" style="padding: 16px;">
+        <div class="form-group">
+          <label class="form-label">操作名称</label>
+          <input id="opsItemName" type="text" class="form-control" placeholder="用于菜单展示" />
+        </div>
+        <div class="form-group" style="margin-top: 12px;">
+          <label class="form-label">操作步骤</label>
+          <textarea id="opsItemSteps" rows="8" class="form-control" placeholder="点击后插入到编辑器的步骤文本"></textarea>
+        </div>
+        <div class="form-group" style="margin-top: 12px;">
+          <label class="form-label">适配型号（后台字段，可留空）</label>
+          <textarea id="opsItemModels" rows="3" class="form-control" placeholder="用于后台筛选，不会插入编辑区"></textarea>
+        </div>
+        <div id="opsItemError" class="inline-error d-none" style="margin-top: 10px;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="action-btn" onclick="closeOpsItemModal()">取消</button>
+        <button class="primary-btn" onclick="submitOpsItemModal()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Ops Picker Modal (3rd level replaced by modal) -->
+  <div id="opsPickerModal" class="modal" style="z-index: 2400;">
+    <div class="modal-content" style="width: 720px; max-width: 94vw;">
+      <div class="modal-header">
+        <h3 id="opsPickerTitle">快捷录入</h3>
+        <div style="display:flex; gap:8px; align-items:center; margin-left:auto; margin-right: 10px; flex-wrap: wrap;">
+          <button type="button" class="primary-btn btn-sm" onclick="try{openOpsItemEditorFromPicker()}catch(e){alert('新增失败: '+(e&&e.message?e.message:e))}">＋ 新增</button>
+          <button type="button" class="action-btn btn-sm" onclick="try{downloadOpsImportTemplate()}catch(e){alert('模板下载失败: '+(e&&e.message?e.message:e))}">模板下载</button>
+          <button type="button" class="action-btn btn-sm" onclick="try{triggerOpsImport()}catch(e){alert('导入失败: '+(e&&e.message?e.message:e))}">批量导入</button>
+          <button type="button" class="action-btn btn-sm" onclick="try{exportOpsExcel()}catch(e){alert('导出失败: '+(e&&e.message?e.message:e))}">批量导出</button>
+        </div>
+        <button class="close-modal-btn" onclick="closeOpsPicker()">&times;</button>
+      </div>
+      <div class="modal-body" style="padding: 16px;">
+        <input id="opsImportInput" type="file" accept=".xlsx" style="display:none;" onchange="handleOpsImportFile(this.files && this.files[0])">
+        <div style="display:flex; gap:10px; align-items:center; margin-bottom: 12px;">
+          <input id="opsPickerSearch" type="text" class="form-control" placeholder="搜索操作名称..." style="flex: 1 1 auto;">
+          <button class="action-btn" onclick="closeOpsPicker()">关闭</button>
+        </div>
+        <div style="max-height: 60vh; overflow:auto; border: 1px solid #eee; border-radius: 10px; background:#fff;">
+          <div id="opsPickerList" style="padding: 8px;"></div>
+        </div>
+        <div class="text-muted" style="margin-top: 10px; font-size: 12px;">
+          点击操作名称后，仅插入“操作步骤”到答案编辑区光标位置，不会覆盖原内容。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manual Tool Modal removed -->
+
+<!-- Narrow Handoff Filter Modal removed -->
+</body>
+</html>

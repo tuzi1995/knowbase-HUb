@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>优化测试页面</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2563eb;
+            margin-bottom: 10px;
+        }
+        h2 {
+            color: #333;
+            font-size: 18px;
+            margin-bottom: 16px;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 8px;
+        }
+        .status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 999px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        .status.success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        .status.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        .test-item {
+            padding: 12px;
+            margin: 8px 0;
+            background: #f9fafb;
+            border-radius: 8px;
+            border-left: 4px solid #e5e7eb;
+        }
+        .test-item.pass {
+            border-left-color: #10b981;
+            background: #f0fdf4;
+        }
+        .test-item.fail {
+            border-left-color: #ef4444;
+            background: #fef2f2;
+        }
+        button {
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #1d4ed8;
+        }
+        .demo-input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 14px;
+            margin: 10px 0;
+        }
+        .counter {
+            font-size: 24px;
+            font-weight: 700;
+            color: #2563eb;
+            margin: 10px 0;
+        }
+        code {
+            background: #f3f4f6;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🚀 K-Matrix 优化测试</h1>
+    <p style="color: #666;">验证CDN本地化和API防抖功能</p>
+
+    <!-- CDN测试 -->
+    <div class="test-card">
+        <h2>1. CDN资源本地化测试</h2>
+        <div id="cdnTests"></div>
+        <button onclick="testCDN()">运行测试</button>
+    </div>
+
+    <!-- 防抖测试 -->
+    <div class="test-card">
+        <h2>2. 防抖功能测试</h2>
+        <p style="color: #666; font-size: 14px;">在下方输入框快速输入，观察调用次数</p>
+        <input type="text" class="demo-input" id="debounceInput" placeholder="快速输入测试...">
+        <div style="margin-top: 10px;">
+            <strong>无防抖调用次数：</strong> <span class="counter" id="normalCount">0</span>
+        </div>
+        <div>
+            <strong>防抖后调用次数：</strong> <span class="counter" id="debounceCount">0</span>
+        </div>
+        <div style="margin-top: 10px; padding: 10px; background: #fef3c7; border-radius: 8px;">
+            <strong>💡 提示：</strong> 快速输入10个字符，防抖版本应该只调用1-2次
+        </div>
+        <button onclick="resetCounters()" style="margin-top: 10px;">重置计数</button>
+    </div>
+
+    <!-- 性能测试 -->
+    <div class="test-card">
+        <h2>3. 性能对比</h2>
+        <div id="perfResults"></div>
+        <button onclick="testPerformance()">测试加载性能</button>
+    </div>
+
+    <script>
+        // CDN测试
+        function testCDN() {
+            const container = document.getElementById('cdnTests');
+            const tests = [
+                { name: 'Font Awesome CSS', url: 'vendor/fontawesome.min.css' },
+                { name: 'Toast UI Editor CSS', url: 'vendor/toastui-editor.min.css' },
+                { name: 'Toast UI Editor JS', url: 'vendor/toastui-editor-all.min.js' },
+                { name: 'Font Awesome 字体 (Solid)', url: 'vendor/webfonts/fa-solid-900.woff2' },
+                { name: 'Font Awesome 字体 (Regular)', url: 'vendor/webfonts/fa-regular-400.woff2' },
+                { name: 'Font Awesome 字体 (Brands)', url: 'vendor/webfonts/fa-brands-400.woff2' }
+            ];
+
+            container.innerHTML = '<p>测试中...</p>';
+            
+            Promise.all(tests.map(test => 
+                fetch(test.url)
+                    .then(res => ({ ...test, status: res.ok ? 'pass' : 'fail', size: res.headers.get('content-length') }))
+                    .catch(() => ({ ...test, status: 'fail' }))
+            )).then(results => {
+                const html = results.map(r => `
+                    <div class="test-item ${r.status}">
+                        ${r.status === 'pass' ? '✅' : '❌'} ${r.name}
+                        ${r.size ? `<span style="float:right; color:#666;">${(r.size/1024).toFixed(1)} KB</span>` : ''}
+                    </div>
+                `).join('');
+                container.innerHTML = html;
+            });
+        }
+
+        // 防抖函数
+        function debounce(func, wait = 300) {
+            let timeout;
+            return function(...args) {
+                clearTimeout(timeout);
+                timeout = setTimeout(() => func.apply(this, args), wait);
+            };
+        }
+
+        // 计数器
+        let normalCount = 0;
+        let debounceCount = 0;
+
+        function incrementNormal() {
+            normalCount++;
+            document.getElementById('normalCount').textContent = normalCount;
+        }
+
+        function incrementDebounce() {
+            debounceCount++;
+            document.getElementById('debounceCount').textContent = debounceCount;
+        }
+
+        const debouncedIncrement = debounce(incrementDebounce, 500);
+
+        // 绑定输入事件
+        document.getElementById('debounceInput').addEventListener('input', () => {
+            incrementNormal();
+            debouncedIncrement();
+        });
+
+        function resetCounters() {
+            normalCount = 0;
+            debounceCount = 0;
+            document.getElementById('normalCount').textContent = '0';
+            document.getElementById('debounceCount').textContent = '0';
+            document.getElementById('debounceInput').value = '';
+        }
+
+        // 性能测试
+        function testPerformance() {
+            const container = document.getElementById('perfResults');
+            container.innerHTML = '<p>测试中...</p>';
+
+            const startTime = performance.now();
+            
+            // 测试资源加载
+            Promise.all([
+                fetch('vendor/fontawesome.min.css'),
+                fetch('vendor/toastui-editor.min.css'),
+                fetch('vendor/toastui-editor-all.min.js')
+            ]).then(() => {
+                const endTime = performance.now();
+                const loadTime = (endTime - startTime).toFixed(2);
+                
+                container.innerHTML = `
+                    <div class="test-item pass">
+                        ✅ 资源加载完成
+                        <span style="float:right; color:#666;">${loadTime} ms</span>
+                    </div>
+                    <div style="margin-top: 10px; padding: 10px; background: #f0fdf4; border-radius: 8px; border-left: 4px solid #10b981;">
+                        <strong>📊 性能评估：</strong><br>
+                        ${loadTime < 200 ? '🚀 优秀 - 加载速度非常快' : 
+                          loadTime < 500 ? '✅ 良好 - 加载速度正常' : 
+                          '⚠️ 一般 - 可能需要进一步优化'}
+                    </div>
+                `;
+            }).catch(err => {
+                container.innerHTML = `
+                    <div class="test-item fail">
+                        ❌ 加载失败: ${err.message}
+                    </div>
+                `;
+            });
+        }
+
+        // 页面加载时自动运行CDN测试
+        window.addEventListener('DOMContentLoaded', () => {
+            testCDN();
+        });
+    </script>
+</body>
+</html>
