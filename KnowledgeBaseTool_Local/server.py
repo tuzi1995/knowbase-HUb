@@ -53,14 +53,25 @@ except ImportError:
 app = Flask(__name__, static_folder='link_viewer', static_url_path='')
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 app.config['SESSION_COOKIE_NAME'] = os.environ.get('KMATRIX_SESSION_COOKIE_NAME', 'kmatrix_8085_session')
-CORS(app, supports_credentials=True, origins=[
-    "http://localhost:8083", 
-    "http://127.0.0.1:8083", 
-    "http://localhost:8082", 
-    "http://127.0.0.1:8082",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173"
-])
+
+def _get_cors_allowed_origins():
+    default_origins = [
+        "http://localhost:8083",
+        "http://127.0.0.1:8083",
+        "http://localhost:8082",
+        "http://127.0.0.1:8082",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://112.126.63.84:8083",
+    ]
+    env_origins = [
+        origin.strip()
+        for origin in os.environ.get('KMATRIX_CORS_ALLOWED_ORIGINS', '').split(',')
+        if origin.strip()
+    ]
+    return list(OrderedDict.fromkeys(default_origins + env_origins))
+
+CORS(app, supports_credentials=True, origins=_get_cors_allowed_origins())
 app.config['SECRET_KEY'] = os.environ.get('KMATRIX_SECRET_KEY', 'dev-only-change-me')
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _DB_PATH = os.path.join(_BASE_DIR, 'instance', 'data.db')
@@ -253,6 +264,79 @@ class OpsLibraryItem(db.Model):
     sort_order = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class QualityTaskPool(db.Model):
+    __tablename__ = 'quality_task_pool'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(200), nullable=False)
+    sources_json = db.Column(db.Text, default='[]')
+    rule_config_json = db.Column(db.Text, default='{}')
+    field_mapping_json = db.Column(db.Text, default='{}')
+    status = db.Column(db.String(20), default='active')
+    created_by = db.Column(db.String(80), default='')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class QualityRawIssue(db.Model):
+    __tablename__ = 'quality_raw_issue'
+    id = db.Column(db.Integer, primary_key=True)
+    pool_id = db.Column(db.Integer, db.ForeignKey('quality_task_pool.id'), nullable=False, index=True)
+    source_type = db.Column(db.String(40), nullable=False, index=True)
+    source_record_key = db.Column(db.String(240), nullable=False)
+    wiki_id = db.Column(db.String(100), nullable=False, index=True)
+    issue_text = db.Column(db.Text, default='')
+    remediation_reference = db.Column(db.Text, default='')
+    snapshot_json = db.Column(db.Text, default='{}')
+    rule_snapshot_json = db.Column(db.Text, default='{}')
+    ignored_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('pool_id', 'source_record_key', name='uq_quality_raw_pool_source_key'),
+    )
+
+
+class QualityTask(db.Model):
+    __tablename__ = 'quality_task'
+    id = db.Column(db.Integer, primary_key=True)
+    wiki_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    priority = db.Column(db.String(10), default='p2', index=True)
+    status = db.Column(db.String(20), default='pending', index=True)
+    latest_kb_update_time = db.Column(db.String(80), default='')
+    completed_at = db.Column(db.DateTime)
+    ignored_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class QualityTaskIssueLink(db.Model):
+    __tablename__ = 'quality_task_issue_link'
+    id = db.Column(db.Integer, primary_key=True)
+    task_id = db.Column(db.Integer, db.ForeignKey('quality_task.id'), nullable=False, index=True)
+    raw_issue_id = db.Column(db.Integer, db.ForeignKey('quality_raw_issue.id'), nullable=False, index=True)
+    pool_id = db.Column(db.Integer, db.ForeignKey('quality_task_pool.id'), nullable=False, index=True)
+    source_type = db.Column(db.String(40), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('task_id', 'raw_issue_id', name='uq_quality_task_raw_issue'),
+    )
+
+
+class QualityImportJob(db.Model):
+    __tablename__ = 'quality_import_job'
+    id = db.Column(db.Integer, primary_key=True)
+    file_name = db.Column(db.String(260), default='')
+    target_pool_id = db.Column(db.Integer, db.ForeignKey('quality_task_pool.id'), index=True)
+    total_count = db.Column(db.Integer, default=0)
+    success_count = db.Column(db.Integer, default=0)
+    failed_count = db.Column(db.Integer, default=0)
+    duplicate_append_count = db.Column(db.Integer, default=0)
+    failed_detail_json = db.Column(db.Text, default='[]')
+    created_by = db.Column(db.String(80), default='')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 # Setup
@@ -1192,7 +1276,7 @@ def normalize_model_list(models, valid_map, valid_set):
     return out
 
 def validate_product_string(product_str, valid_map=None, valid_set=None):
-    if not product_str or pd.isna(product_str):
+    if _is_blank_cell_value(product_str):
         return [], []
         
     if valid_map is None or valid_set is None:
@@ -1595,6 +1679,11 @@ def get_scoring_data():
     page_size_param = request.args.get('pageSize')
     
     try:
+        score_has_product = _supabase_has_column(client, 'kb_scores', 'product_name')
+        include_kb_details = str(
+            request.args.get('include_kb') or request.args.get('includeKb') or ''
+        ).strip().lower() in ('1', 'true', 'yes', 'y')
+
         if page_size_param:
             # Paged Fetch
             page = int(request.args.get('page', 1))
@@ -1620,6 +1709,8 @@ def get_scoring_data():
             # Fetch ALL Data (when no pageSize provided)
             # Optimize columns to reduce data transfer
             scores_cols = 'id,kb_id,question_content,answer_content,status,total_score,remarks,score_data,updated_at'
+            if score_has_product:
+                scores_cols += ',product_name'
             scores_data = client.select_all('kb_scores', columns=scores_cols, order_by='id')
             total = len(scores_data)
             page = 1
@@ -1635,42 +1726,32 @@ def get_scoring_data():
         kb_cols = 'question_wiki_id,question,answer,product_name,update_time,image_urls,video_urls,file_urls,link_type,link_url'
         
         kb_map = {}
-        
-        if not page_size_param:
-             # Snapshot-only full load: only rows that exist in kb_scores (must POST /api/scoring/sync first)
-             if kb_ids:
-                unique_ids = list(set(kb_ids))
-                batch_size = 50
-                for i in range(0, len(unique_ids), batch_size):
-                    batch = unique_ids[i:i+batch_size]
-                    id_filter = "(" + ",".join([f'"{x}"' for x in batch]) + ")"
-                    try:
-                        kb_resp = client.select('knowledge_base_v1', filters={'question_wiki_id': f'in.{id_filter}'}, columns=kb_cols)
-                        if kb_resp.status_code < 400:
-                            for item in kb_resp.json():
-                                kb_map[item['question_wiki_id']] = item
-                    except Exception:
-                        pass
-        else:
-             # PAGINATED STRATEGY (Optimization: Only fetch KB for the scores we found)
-             # Note: This might be incomplete if we want to show unscored items too.
-             # But usually pagination is used for viewing existing scores.
-             # If we want to paginate "All Items", we should paginate KB table, not Scores table.
-             # Assuming current paginated logic is for "Scoring History" view.
-             
-             # Revert to batch fetch for specific IDs found in scores
-             if kb_ids:
-                unique_ids = list(set(kb_ids))
-                batch_size = 50
-                for i in range(0, len(unique_ids), batch_size):
-                    batch = unique_ids[i:i+batch_size]
-                    id_filter = "(" + ",".join([f'"{x}"' for x in batch]) + ")"
-                    try:
-                        kb_resp = client.select('knowledge_base_v1', filters={'question_wiki_id': f'in.{id_filter}'}, columns=kb_cols)
-                        if kb_resp.status_code < 400:
-                            for item in kb_resp.json():
-                                kb_map[item['question_wiki_id']] = item
-                    except: pass
+
+        missing_product_ids = []
+        if score_has_product:
+            missing_product_ids = [
+                s.get('kb_id') for s in scores_data
+                if s.get('kb_id') and not str(s.get('product_name') or '').strip()
+            ]
+        ids_to_enrich = kb_ids if include_kb_details or not score_has_product else missing_product_ids
+
+        if ids_to_enrich:
+            unique_ids = list(set(ids_to_enrich))
+            batch_size = 50
+            for i in range(0, len(unique_ids), batch_size):
+                batch = unique_ids[i:i+batch_size]
+                id_filter = _postgrest_in_str(batch)
+                if not id_filter:
+                    continue
+                try:
+                    kb_resp = client.select('knowledge_base_v1', filters={'question_wiki_id': id_filter}, columns=kb_cols)
+                    if kb_resp.status_code < 400:
+                        for item in kb_resp.json():
+                            kb_map[item['question_wiki_id']] = item
+                    else:
+                        print(f"WARN: failed to enrich scoring KB products: {kb_resp.text}")
+                except Exception as e:
+                    print(f"WARN: scoring KB enrichment failed: {e}")
         
         def parse_score_fields(score_item):
             """Helper to parse score_data and extract flattened fields"""
@@ -1712,7 +1793,7 @@ def get_scoring_data():
                     'kb_id': kb_id,
                     'question_content': score_item.get('question_content'),
                     'answer_content': score_item.get('answer_content'),
-                    'product_name': kb_item.get('product_name'),
+                    'product_name': score_item.get('product_name') or kb_item.get('product_name'),
                     'update_time': score_item.get('updated_at') or kb_item.get('update_time'),
                     'image_urls': kb_item.get('image_urls'),
                     'video_urls': kb_item.get('video_urls'),
@@ -1743,7 +1824,7 @@ def get_scoring_data():
                     'kb_id': kb_id,
                     'question_content': score_item.get('question_content') or kb_item.get('question'),
                     'answer_content': score_item.get('answer_content') or kb_item.get('answer'),
-                    'product_name': kb_item.get('product_name'),
+                    'product_name': score_item.get('product_name') or kb_item.get('product_name'),
                     'update_time': kb_item.get('update_time'),
                     'image_urls': kb_item.get('image_urls'),
                     'video_urls': kb_item.get('video_urls'),
@@ -1869,6 +1950,7 @@ def _run_scoring_sync():
         if not kb_resp:
             return {'success': True, 'message': 'No KB items to sync', 'count': 0, 'added': 0, 'updated': 0, 'deleted': 0}
 
+        score_has_product = _supabase_has_column(client, 'kb_scores', 'product_name')
         scores_resp = client.select_all('kb_scores')
         scores_map = {s['kb_id']: s for s in scores_resp if s.get('kb_id')}
         kb_map = {item['question_wiki_id']: item for item in kb_resp if item.get('question_wiki_id')}
@@ -1882,6 +1964,7 @@ def _run_scoring_sync():
 
         added_count = 0
         updated_count = 0
+        product_updated_count = 0
         
         # 根据客户端类型使用不同的时间格式
         if isinstance(client, LocalPostgreSQLClient):
@@ -1892,27 +1975,39 @@ def _run_scoring_sync():
         for kbid, kb_item in kb_map.items():
             q = kb_item.get('question', '')
             a = kb_item.get('answer', '')
+            p = kb_item.get('product_name', '')
 
             if kbid not in scores_map:
-                to_upsert.append({
+                rec = {
                     'kb_id': kbid,
                     'question_content': q,
                     'answer_content': a,
                     'status': 'unscored',
                     'updated_at': current_time
-                })
+                }
+                if score_has_product:
+                    rec['product_name'] = p
+                to_upsert.append(rec)
                 added_count += 1
             else:
                 s_item = scores_map[kbid]
                 old_q = s_item.get('question_content', '')
                 old_a = s_item.get('answer_content', '')
-                if q != old_q or a != old_a:
+                old_p = s_item.get('product_name', '')
+                qa_changed = q != old_q or a != old_a
+                product_changed = score_has_product and p != old_p
+                if qa_changed or product_changed:
                     s_item['question_content'] = q
                     s_item['answer_content'] = a
-                    s_item['status'] = 'outdated'
+                    if score_has_product:
+                        s_item['product_name'] = p
+                    if qa_changed:
+                        s_item['status'] = 'outdated'
                     s_item['updated_at'] = current_time
                     to_upsert.append(s_item)
                     updated_count += 1
+                    if product_changed:
+                        product_updated_count += 1
 
         if to_delete_ids:
             print(f"Deleting {len(to_delete_ids)} items...")
@@ -1941,8 +2036,9 @@ def _run_scoring_sync():
             'success': True,
             'added': added_count,
             'updated': updated_count,
+            'product_updated': product_updated_count,
             'deleted': len(to_delete_ids),
-            'message': f'同步完成: 新增 {added_count}, 更新 {updated_count}, 删除 {len(to_delete_ids)}'
+            'message': f'同步完成: 新增 {added_count}, 更新 {updated_count}, 产品回填 {product_updated_count}, 删除 {len(to_delete_ids)}'
         }
     except Exception as e:
         print(f"Sync Error: {e}")
@@ -2301,6 +2397,35 @@ def _ai_extract_json(text):
     except Exception:
         return None
 
+def _ai_cjkish_count(text):
+    return len(re.findall(r"[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]", str(text or "")))
+
+def _ai_maybe_repair_mojibake_text(value):
+    if not isinstance(value, str) or not value:
+        return value
+    # Typical symptom: UTF-8 Chinese bytes were decoded as Latin-1.
+    if not re.search(r"[ÃÂãäåæçèéêëìíîïðñòóôõöøùúûü][\x80-\xff]", value):
+        return value
+    try:
+        repaired = value.encode('latin-1').decode('utf-8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+    if repaired != value and _ai_cjkish_count(repaired) > _ai_cjkish_count(value):
+        return repaired
+    return value
+
+def _ai_repair_mojibake_value(value):
+    if isinstance(value, str):
+        return _ai_maybe_repair_mojibake_text(value)
+    if isinstance(value, list):
+        return [_ai_repair_mojibake_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _ai_repair_mojibake_value(v) for k, v in value.items()}
+    return value
+
+def _ai_ndjson(value):
+    return json.dumps(value, ensure_ascii=False) + "\n"
+
 def _ai_is_cjk(text):
     if not text:
         return False
@@ -2411,6 +2536,7 @@ def _ai_call_llm(config, system_prompt, user_prompt, temperature=0.2):
         "temperature": float(temperature or 0.2),
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=120)
+    resp.encoding = 'utf-8'
     if resp.status_code >= 400:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
     data = resp.json() or {}
@@ -2449,13 +2575,16 @@ def _ai_call_llm_stream(config, system_prompt, user_prompt, temperature=0.2):
     }
 
     resp = requests.post(url, headers=headers, json=payload, timeout=120, stream=True)
+    resp.encoding = 'utf-8'
     if resp.status_code >= 400:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
 
     full = []
-    for raw_line in resp.iter_lines(decode_unicode=True):
+    for raw_line in resp.iter_lines(decode_unicode=False):
         if not raw_line:
             continue
+        if isinstance(raw_line, bytes):
+            raw_line = raw_line.decode('utf-8', errors='replace')
         line = raw_line.strip()
         if not line.startswith("data:"):
             continue
@@ -2515,7 +2644,7 @@ def ai_optimize_stream():
                 urls = [u for u in merged if isinstance(u, str) and u.strip()]
 
             if area not in ('question', 'answer', 'similar', 'question_type'):
-                yield json.dumps({"type": "error", "message": "Invalid area"}) + "\n"
+                yield _ai_ndjson({"type": "error", "message": "Invalid area"})
                 return
 
             cfg = load_ai_config() or {}
@@ -2545,12 +2674,13 @@ def ai_optimize_stream():
             for chunk in _ai_call_llm_stream(cfg, system_prompt, user_prompt, temperature=0.2):
                 if isinstance(chunk, str) and chunk:
                     full_text_parts.append(chunk)
-                    yield json.dumps({"type": "delta", "text": chunk}) + "\n"
+                    yield _ai_ndjson({"type": "delta", "text": chunk})
 
             full_text = "".join(full_text_parts).strip()
             obj = _ai_extract_json(full_text)
+            obj = _ai_repair_mojibake_value(obj)
             if not isinstance(obj, dict):
-                yield json.dumps({"type": "error", "message": "AI 输出解析失败", "raw": full_text}) + "\n"
+                yield _ai_ndjson({"type": "error", "message": "AI 输出解析失败", "raw": full_text})
                 return
 
             # Minimal validation aligned with /ai/optimize
@@ -2577,7 +2707,7 @@ def ai_optimize_stream():
                     ok = False
 
             if not ok:
-                yield json.dumps({"type": "error", "message": "AI 输出字段不符合要求", "raw": full_text}) + "\n"
+                yield _ai_ndjson({"type": "error", "message": "AI 输出字段不符合要求", "raw": full_text})
                 return
 
             # 答案类任务：统一输出 original_answer / refined_answer / notes / answer
@@ -2600,11 +2730,11 @@ def ai_optimize_stream():
                     "urls": obj.get("urls") if isinstance(obj, dict) else None,
                 }
 
-            yield json.dumps({"type": "final", "result": {"success": True, "data": obj, "metrics": {}}}) + "\n"
+            yield _ai_ndjson({"type": "final", "result": {"success": True, "data": obj, "metrics": {}}})
         except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+            yield _ai_ndjson({"type": "error", "message": str(e)})
 
-    return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
+    return Response(stream_with_context(generate()), content_type='application/x-ndjson; charset=utf-8')
 
 def _ai_parse_list(v):
     """
@@ -2766,6 +2896,7 @@ def ai_optimize():
         for i in range(max_tries):
             raw = _ai_call_llm(cfg, system_prompt, user_prompt, temperature=0.2)
             obj = _ai_extract_json(raw)
+            obj = _ai_repair_mojibake_value(obj)
             last_obj = obj
             last_raw = raw
             if not isinstance(obj, dict):
@@ -3833,6 +3964,193 @@ def _postgrest_in_str(values):
     inner = ",".join([json.dumps(v, ensure_ascii=False) for v in cleaned])
     return f"in.({inner})"
 
+def _is_blank_cell_value(value):
+    if value is None:
+        return True
+    if isinstance(value, str):
+        s = value.strip()
+        return not s or s.lower() in ('nan', 'null', 'none')
+    if isinstance(value, (list, tuple, set, dict)):
+        return False
+    try:
+        blank = pd.isna(value)
+        if hasattr(blank, 'all') and not isinstance(blank, bool):
+            return bool(blank.all())
+        return bool(blank)
+    except (TypeError, ValueError):
+        return False
+
+def _normalize_kb_import_id(raw):
+    if isinstance(raw, (list, tuple, set, dict)):
+        return ''
+    if _is_blank_cell_value(raw):
+        return ''
+    s = str(raw).strip()
+    if not s or s.lower() in ('nan', 'null', 'none'):
+        return ''
+    if s.endswith('.0'):
+        s = s[:-2]
+    return s.strip()
+
+def _get_v1_ids_missing_from_file(client, file_ids):
+    file_set = {str(x or '').strip() for x in (file_ids or []) if str(x or '').strip()}
+    if not file_set:
+        return []
+    rows = client.select_all(
+        'knowledge_base_v1',
+        columns='question_wiki_id',
+        order_by='question_wiki_id',
+        page_size=1000
+    ) or []
+    missing = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        wiki_id = _normalize_kb_import_id(row.get('question_wiki_id'))
+        if not wiki_id or wiki_id in file_set:
+            continue
+        missing.append(wiki_id)
+    return sorted(list(dict.fromkeys(missing)))
+
+def _delete_link_previews_for_kb_ids(client, ids):
+    id_set = {_normalize_kb_import_id(x) for x in (ids or []) if _normalize_kb_import_id(x)}
+    result = {'deleted': 0, 'updated': 0, 'warnings': []}
+    if not id_set:
+        return result
+
+    try:
+        rows = client.select_all('link_previews', columns='id,kb_id', order_by='id', page_size=1000) or []
+    except Exception as e:
+        result['warnings'].append(f'清理 link_previews 失败: {e}')
+        return result
+
+    link_ids_to_delete = []
+    links_to_update = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        link_id = str(row.get('id') or '').strip()
+        kb_id_raw = str(row.get('kb_id') or '').strip()
+        if not link_id or not kb_id_raw:
+            continue
+        kb_ids = [_normalize_kb_import_id(x) for x in kb_id_raw.split(',')]
+        kb_ids = [x for x in kb_ids if x]
+        if not kb_ids:
+            continue
+        remaining = [x for x in kb_ids if x not in id_set]
+        if len(remaining) == len(kb_ids):
+            continue
+        if remaining:
+            links_to_update.append((link_id, ','.join(dict.fromkeys(remaining))))
+        else:
+            link_ids_to_delete.append(link_id)
+
+    batch_size = 100
+    for i in range(0, len(link_ids_to_delete), batch_size):
+        batch_ids = link_ids_to_delete[i:i + batch_size]
+        id_filter = _postgrest_in_str(batch_ids)
+        if not id_filter:
+            continue
+        resp = client.delete('link_previews', {'id': id_filter})
+        if resp is None or getattr(resp, 'status_code', 500) >= 400:
+            result['warnings'].append(getattr(resp, 'text', '') or '删除 link_previews 失败')
+            continue
+        result['deleted'] += len(batch_ids)
+
+    for link_id, new_kb_id in links_to_update:
+        resp = client.update('link_previews', {'kb_id': new_kb_id}, {'id': link_id})
+        if resp is None or getattr(resp, 'status_code', 500) >= 400:
+            result['warnings'].append(getattr(resp, 'text', '') or f'更新 link_previews({link_id}) 失败')
+            continue
+        result['updated'] += 1
+
+    return result
+
+def _delete_kb_items_physical(client, ids):
+    ids = [_normalize_kb_import_id(x) for x in (ids or []) if _normalize_kb_import_id(x)]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        return {'success': True, 'count': 0, 'ids': []}
+
+    deleted_ids = []
+    related = {'kb_scores': 0, 'kb_item_tags': 0, 'link_previews_deleted': 0, 'link_previews_updated': 0}
+    warnings = []
+    batch_size = 100
+    for i in range(0, len(ids), batch_size):
+        batch_ids = ids[i:i + batch_size]
+        id_filter = _postgrest_in_str(batch_ids)
+        if not id_filter:
+            continue
+
+        for table, column, label in (
+            ('kb_scores', 'kb_id', '评分缓存'),
+            ('kb_item_tags', 'question_wiki_id', '当前标签映射'),
+        ):
+            filters = {column: id_filter}
+            if table == 'kb_item_tags':
+                filters['library_type'] = 'eq.current'
+            resp = client.delete(table, filters)
+            if resp is None or getattr(resp, 'status_code', 500) >= 400:
+                return {
+                    'success': False,
+                    'count': len(deleted_ids),
+                    'ids': deleted_ids,
+                    'message': getattr(resp, 'text', '') or f'物理删除前清理{label}失败'
+                }
+            related[table] += len(batch_ids)
+
+        delete_resp = client.delete('knowledge_base_v1', {'question_wiki_id': id_filter})
+        if delete_resp is None or getattr(delete_resp, 'status_code', 500) >= 400:
+            return {
+                'success': False,
+                'count': len(deleted_ids),
+                'ids': deleted_ids,
+                'message': getattr(delete_resp, 'text', '') or '物理删除失败'
+            }
+
+        verify_resp = client.select(
+            'knowledge_base_v1',
+            page=1,
+            page_size=len(batch_ids),
+            filters={'question_wiki_id': id_filter},
+            columns='question_wiki_id'
+        )
+        if verify_resp is None or getattr(verify_resp, 'status_code', 500) >= 400:
+            return {
+                'success': False,
+                'count': len(deleted_ids),
+                'ids': deleted_ids,
+                'message': getattr(verify_resp, 'text', '') or '物理删除后校验失败'
+            }
+        remaining_rows = verify_resp.json() or []
+        remaining_ids = [
+            _normalize_kb_import_id(r.get('question_wiki_id'))
+            for r in remaining_rows
+            if isinstance(r, dict) and _normalize_kb_import_id(r.get('question_wiki_id'))
+        ]
+        if remaining_ids:
+            return {
+                'success': False,
+                'count': len(deleted_ids),
+                'ids': deleted_ids,
+                'message': f'物理删除未完成，仍有 {len(remaining_ids)} 条记录存在: {", ".join(remaining_ids[:10])}'
+            }
+
+        deleted_ids.extend(batch_ids)
+
+    link_cleanup = _delete_link_previews_for_kb_ids(client, deleted_ids)
+    related['link_previews_deleted'] = link_cleanup.get('deleted', 0)
+    related['link_previews_updated'] = link_cleanup.get('updated', 0)
+    warnings.extend(link_cleanup.get('warnings') or [])
+
+    return {
+        'success': True,
+        'count': len(deleted_ids),
+        'ids': deleted_ids,
+        'related': related,
+        'warnings': warnings
+    }
+
 def _now_iso_with_tz():
     """
     Return timezone-aware local ISO datetime string.
@@ -3996,7 +4314,10 @@ def _mod_operation_match(op_val, wanted):
 @app.route('/api/kb/update', methods=['POST'])
 @login_required
 def update_kb_item():
-    data = request.json
+    raw_payload = request.get_json(silent=True) or {}
+    base_update_time = str(raw_payload.get('base_update_time') or '').strip()
+    change_source = str(raw_payload.get('change_source') or raw_payload.get('source_module') or '').strip() or '知识库管理'
+    data = raw_payload
     client = get_supabase_client()
     if not client:
         return jsonify({'success': False, 'message': '本地主库未配置'}), 500
@@ -4141,6 +4462,17 @@ def update_kb_item():
                     'message': f'未找到待编辑记录（question_wiki_id={kb_id}），已阻止保存以避免产生无效修改记录。'
                 }), 404
 
+            if base_update_time:
+                current_update_time = str(before_row.get('update_time') or '').strip()
+                if current_update_time != base_update_time:
+                    return jsonify({
+                        'success': False,
+                        'message': '知识库内容已被他人修改，请重新打开任务后再保存。',
+                        'conflict': True,
+                        'current_update_time': current_update_time,
+                        'base_update_time': base_update_time
+                    }), 409
+
         after_row_for_diff = dict(data or {})
 
         before_obj = _snapshot_mod_fields(before_row) if before_row else None
@@ -4166,7 +4498,7 @@ def update_kb_item():
         modification_record['modification_time'] = _now_iso_with_tz()
         modification_record['change_type'] = 'edit' if kb_id else 'create'
         _attach_change_meta(modification_record, {
-            'source': '知识库管理',
+            'source': change_source,
             'before': before_obj,
             'after': after_obj,
             'changed_fields': changed_fields
@@ -4248,11 +4580,20 @@ def update_kb_item():
             print(f"[ERROR] Failed to insert modification record: {e}")
             print(traceback.format_exc())
 
+        quality_task_updated = False
+        quality_task_id = str(raw_payload.get('quality_task_id') or '').strip()
+        if quality_task_id:
+            quality_task_updated = _quality_mark_task_processing(
+                quality_task_id,
+                latest_kb_update_time=data.get('update_time')
+            )
+
         return jsonify({
             'success': True,
             'question_wiki_id': saved_id or data.get('question_wiki_id') or kb_id,
             'mod_log_ok': mod_log_ok,
             'mod_log_error': mod_log_error,
+            'quality_task_updated': quality_task_updated,
             'warning': '修改记录保存失败，但数据已成功保存' if not mod_log_ok else None
         })
 
@@ -6101,6 +6442,7 @@ def evaluate_items():
 
     client = get_supabase_client()
     config = load_scoring_config()
+    score_has_product = _supabase_has_column(client, 'kb_scores', 'product_name') if client else False
     
     if not config.get('api_key'):
         return jsonify({'success': False, 'message': 'LLM API Key not configured'}), 400
@@ -6130,9 +6472,10 @@ def evaluate_items():
                 batch_size = 50
                 for i in range(0, len(ids), batch_size):
                     batch_ids = ids[i:i+batch_size]
-                    b_ids_quoted = [f'"{bid}"' for bid in batch_ids]
-                    id_str = "(" + ",".join(b_ids_quoted) + ")"
-                    resp = client.select('kb_scores', page_size=1000, filters={'kb_id': f'in.{id_str}'})
+                    id_filter = _postgrest_in_str(batch_ids)
+                    if not id_filter:
+                        continue
+                    resp = client.select('kb_scores', page_size=1000, filters={'kb_id': id_filter})
                     if isinstance(resp, list):
                         for item in resp:
                             if isinstance(item, dict) and item.get('kb_id'):
@@ -6147,9 +6490,10 @@ def evaluate_items():
             batch_size = 50 
             for i in range(0, len(ids), batch_size):
                 batch_ids = ids[i:i+batch_size]
-                b_ids_quoted = [f'"{bid}"' for bid in batch_ids]
-                id_str = "(" + ",".join(b_ids_quoted) + ")"
-                resp = client.select('knowledge_base_v1', page_size=1000, filters={'question_wiki_id': f'in.{id_str}'})
+                id_filter = _postgrest_in_str(batch_ids)
+                if not id_filter:
+                    continue
+                resp = client.select('knowledge_base_v1', page_size=1000, filters={'question_wiki_id': id_filter})
                 if isinstance(resp, list):
                     for item in resp:
                         if isinstance(item, dict) and item.get('question_wiki_id'):
@@ -6188,7 +6532,7 @@ def evaluate_items():
                 frontend_result['total_score'] = score_result.get('总分', 0)
                 return frontend_result
 
-            def upsert_score_result(qid, score_result):
+            def upsert_score_result(qid, score_result, item=None):
                 if isinstance(client, LocalPostgreSQLClient):
                     updated_at_value = datetime.now()
                 else:
@@ -6202,6 +6546,8 @@ def evaluate_items():
                     'score_data': json.dumps(score_result, ensure_ascii=False),
                     'updated_at': updated_at_value
                 }
+                if score_has_product and isinstance(item, dict):
+                    update_data['product_name'] = item.get('product_name') or ''
                 upsert_resp = client.upsert('kb_scores', [update_data], on_conflict='kb_id')
                 print(f"DEBUG: Upsert response for {qid}: Status={upsert_resp.status_code}")
                 if getattr(upsert_resp, 'status_code', 500) >= 400:
@@ -6268,7 +6614,8 @@ def evaluate_items():
                         continue
                     
                     if score_result and 'error' not in score_result:
-                        upsert_score_result(qid, score_result)
+                        source_item = kb_items_map.get(qid)
+                        upsert_score_result(qid, score_result, source_item)
                         frontend_result = normalize_score_result(qid, score_result)
                         frontend_result['elapsed_seconds'] = round(elapsed, 2)
                         results.append(frontend_result)
@@ -6384,17 +6731,66 @@ def import_links():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 # Governance APIs
+def _governance_score_detail_fields(score_item):
+    if not score_item:
+        return {
+            'conclusion': '',
+            'analysis': '',
+            'suggestion': '',
+            'remarks': '',
+        }
+    parsed = _quality_json_loads((score_item or {}).get('score_data'), {})
+    if not isinstance(parsed, dict):
+        parsed = {}
+    remarks = _quality_clean_text((score_item or {}).get('remarks'))
+    suggestion = (
+        _quality_clean_text(parsed.get('处理建议'))
+        or _quality_clean_text(parsed.get('修改建议'))
+        or _quality_clean_text(parsed.get('优化建议'))
+        or _quality_clean_text(parsed.get('rewrite_suggestion'))
+        or remarks
+    )
+    analysis = (
+        _quality_clean_text(parsed.get('分析过程'))
+        or _quality_clean_text(parsed.get('扣分分析'))
+        or _quality_clean_text(parsed.get('分析评价'))
+        or _quality_clean_text(parsed.get('analysis'))
+    )
+    conclusion = (
+        _quality_clean_text(parsed.get('结论'))
+        or _quality_clean_text(parsed.get('简要点评'))
+        or _quality_clean_text(parsed.get('评价结论'))
+        or _quality_clean_text(parsed.get('result'))
+    )
+    if not conclusion:
+        if suggestion and analysis:
+            conclusion = f"建议：{suggestion}\n分析：{analysis}"
+        else:
+            conclusion = suggestion or analysis
+    return {
+        'conclusion': conclusion,
+        'analysis': analysis,
+        'suggestion': suggestion,
+        'remarks': remarks,
+    }
+
 def _load_sqlite_governance_reference_maps():
     score_map = {}
     for s in KBScore.query.all():
         kb_id = str(getattr(s, 'kb_id', '') or '').strip()
         if not kb_id:
             continue
-        score_map[kb_id] = {
+        score_item = {
             'kb_id': kb_id,
             'total_score': getattr(s, 'total_score', None),
-            'question_content': getattr(s, 'question_content', None)
+            'question_content': getattr(s, 'question_content', None),
+            'status': getattr(s, 'status', None),
+            'remarks': getattr(s, 'remarks', None),
+            'score_data': getattr(s, 'score_data', None),
+            'updated_at': getattr(s, 'updated_at', None),
         }
+        score_item.update(_governance_score_detail_fields(score_item))
+        score_map[kb_id] = score_item
 
     v1_map = {}
     matrix_rows = db.session.query(
@@ -6431,13 +6827,14 @@ def _load_governance_reference_maps():
         client = get_supabase_client()
         if client:
             score_map = {}
-            score_rows = client.select_all('kb_scores', columns='kb_id,total_score,question_content', order_by='kb_id', order_dir='asc', page_size=1000) or []
+            score_rows = client.select_all('kb_scores', columns='kb_id,total_score,question_content,status,remarks,score_data,updated_at', order_by='kb_id', order_dir='asc', page_size=1000) or []
             for s in score_rows:
                 if not isinstance(s, dict):
                     continue
                 kb_id = str(s.get('kb_id') or '').strip()
                 if not kb_id:
                     continue
+                s.update(_governance_score_detail_fields(s))
                 score_map[kb_id] = s
 
             v1_map = {}
@@ -6506,6 +6903,23 @@ def _load_sqlite_governance_recalls(start_month, end_month=None):
     if end_month:
         return KBRecall.query.filter(KBRecall.month >= start_month, KBRecall.month <= end_month).order_by(KBRecall.month).all()
     return KBRecall.query.filter_by(month=start_month).all()
+
+def _delete_sqlite_governance_month(month):
+    if not month:
+        return 0
+    count = KBRecall.query.filter_by(month=month).delete()
+    db.session.flush()
+    return count
+
+def _delete_sqlite_governance_items(ids, months):
+    if not ids or not months:
+        return 0
+    count = KBRecall.query.filter(
+        KBRecall.kb_id.in_(ids),
+        KBRecall.month.in_(months)
+    ).delete(synchronize_session=False)
+    db.session.flush()
+    return count
 
 @app.route('/api/governance/months', methods=['GET'])
 @login_required
@@ -6584,8 +6998,8 @@ def get_governance_data():
             monthly_totals[month]['total_recall'] += recall_count
             monthly_totals[month]['total_valid'] += valid_recall_count
             
-        # 排序月份列表
-        sorted_months = sorted(list(month_set))
+        # 排序月份列表。范围查询时补齐中间月份，保证缺月按 0 参与大盘加权。
+        sorted_months = _quality_month_sequence(start_month, end_month) if end_month else sorted(list(month_set))
         if not sorted_months and start_month:
              # 如果没有数据，至少返回请求的月份
              sorted_months = [start_month]
@@ -6645,6 +7059,7 @@ def get_governance_data():
             # 获取问题内容和AI评分
             question = v1_entry.get('question', "未匹配到问题快照") if v1_entry else (score_entry.get('question_content', "未匹配到问题快照") if score_entry else "未匹配到问题快照")
             ai_score = score_entry.get('total_score') if score_entry else None
+            score_details = _governance_score_detail_fields(score_entry)
             
             result.append({
                 'id': kb_id,
@@ -6653,6 +7068,10 @@ def get_governance_data():
                 'score_question': score_entry.get('question_content') if score_entry else None,
                 'ai_score': ai_score,
                 'status': status,
+                'conclusion': score_details.get('conclusion') or '',
+                'analysis': score_details.get('analysis') or '',
+                'suggestion': score_details.get('suggestion') or '',
+                'remarks': score_details.get('remarks') or '',
                 'monthly_data': id_monthly_data
             })
             
@@ -6724,24 +7143,20 @@ def import_governance_data_route():
         if not id_col:
              return jsonify({'success': False, 'message': f'Missing ID column. Expected one of: {possible_id_cols}'}), 400
              
-        use_supabase = is_supabase_governance_enabled()
+        local_deleted = _delete_sqlite_governance_month(month)
+        use_supabase = False
         client = None
-        if use_supabase:
-            try:
-                client = get_supabase_client()
-                if not client:
+        try:
+            client = get_supabase_client()
+            if client:
+                use_supabase = True
+                del_resp = client.delete('kb_recall', {'month': f"eq.{month}"})
+                if not del_resp or getattr(del_resp, 'status_code', 500) >= 400:
+                    print(f"[Governance] 主库删除失败，回退 sqlite: {getattr(del_resp, 'text', '')}")
                     use_supabase = False
-                else:
-                    del_resp = client.delete('kb_recall', {'month': f"eq.{month}"})
-                    if not del_resp or getattr(del_resp, 'status_code', 500) >= 400:
-                        print(f"[Governance] 主库删除失败，回退 sqlite: {getattr(del_resp, 'text', '')}")
-                        use_supabase = False
-            except Exception as e:
-                print(f"[Governance] 主库删除失败，回退 sqlite: {e}")
-                use_supabase = False
-        if not use_supabase:
-            # 删除该月旧数据 (覆盖导入)
-            KBRecall.query.filter_by(month=month).delete()
+        except Exception as e:
+            print(f"[Governance] 主库删除失败，回退 sqlite: {e}")
+            use_supabase = False
         
         # 插入新数据。按 (kb_id, month) 去重，避免源文件里重复行导致冲突或重复写入。
         payload_by_key = {}
@@ -6794,10 +7209,11 @@ def import_governance_data_route():
                 print(f"[Governance] 主库写入失败，回退 sqlite: {errors}")
                 use_supabase = False
             else:
+                db.session.commit()
                 return jsonify({'success': True, 'count': count})
         if not use_supabase:
             # 远端写入失败时改为落本地，保证本地部署可用。
-            existing_keys = {(r.kb_id, r.month) for r in KBRecall.query.filter_by(month=month).all()}
+            existing_keys = set()
             for item in payload_rows:
                 key = (item['kb_id'], item['month'])
                 if key in existing_keys:
@@ -6809,8 +7225,9 @@ def import_governance_data_route():
                     valid_recall_count=item['valid_recall_count']
                 )
                 db.session.add(recall_obj)
+                existing_keys.add(key)
             db.session.commit()
-            return jsonify({'success': True, 'count': count})
+            return jsonify({'success': True, 'count': count, 'local_deleted': local_deleted})
         
     except Exception as e:
         db.session.rollback()
@@ -6826,20 +7243,38 @@ def delete_governance_data_route():
         return jsonify({'success': False, 'message': 'Month is required'}), 400
         
     try:
-        if is_supabase_governance_enabled():
-            try:
-                client = get_supabase_client()
-                if client:
-                    resp = client.delete('kb_recall', {'month': f"eq.{month}"})
-                    if resp and getattr(resp, 'status_code', 500) < 400:
-                        return jsonify({'success': True, 'deleted': None})
-                    print(f"[Governance] 主库删除月份失败，回退 sqlite: {getattr(resp, 'text', '')}")
-            except Exception as e:
-                print(f"[Governance] 主库删除月份失败，回退 sqlite: {e}")
+        remote_attempted = False
+        remote_ok = False
+        remote_error = ''
+        try:
+            client = get_supabase_client()
+            if client:
+                remote_attempted = True
+                resp = client.delete('kb_recall', {'month': f"eq.{month}"})
+                if resp and getattr(resp, 'status_code', 500) < 400:
+                    remote_ok = True
+                else:
+                    remote_error = getattr(resp, 'text', '') if resp is not None else 'no response'
+                    print(f"[Governance] 主库删除月份失败: {remote_error}")
+        except Exception as e:
+            remote_error = str(e)
+            print(f"[Governance] 主库删除月份失败: {e}")
 
-        count = KBRecall.query.filter_by(month=month).delete()
+        count = _delete_sqlite_governance_month(month)
         db.session.commit()
-        return jsonify({'success': True, 'deleted': count})
+        if remote_attempted and not remote_ok:
+            return jsonify({
+                'success': False,
+                'message': f'主库删除失败，本地已删除 {count} 条。{remote_error}',
+                'deleted': count,
+                'remote_deleted': False
+            }), 502
+        return jsonify({
+            'success': True,
+            'deleted': None if remote_ok else count,
+            'local_deleted': count,
+            'remote_deleted': remote_ok if remote_attempted else None
+        })
     except Exception as e:
         db.session.rollback()
         return jsonify({'success': False, 'message': str(e)}), 500
@@ -6879,6 +7314,14 @@ def export_governance_filtered_route():
             except Exception:
                 return ''
 
+        def _fmt_decimal(value):
+            try:
+                if value is None or value == '':
+                    return ''
+                return round(float(value), 2)
+            except Exception:
+                return ''
+
         export_rows = []
         for item in rows:
             if not isinstance(item, dict):
@@ -6889,6 +7332,15 @@ def export_governance_filtered_route():
                 'AI评分': item.get('ai_score'),
                 '状态': str(item.get('status') or '').strip()
             }
+            weighted_summary = item.get('weighted_summary') or {}
+            if not isinstance(weighted_summary, dict):
+                weighted_summary = {}
+            row['大盘周期加权_平均召回频数'] = _fmt_decimal(weighted_summary.get('weighted_avg_recall'))
+            row['大盘周期加权_平均有效召回频数'] = _fmt_decimal(weighted_summary.get('weighted_avg_valid_recall'))
+            row['大盘周期加权_平均召回占比'] = _fmt_percent(weighted_summary.get('weighted_avg_recall_ratio'))
+            row['大盘周期加权_平均有效召回占比'] = _fmt_percent(weighted_summary.get('weighted_avg_valid_recall_ratio'))
+            row['大盘周期加权_平均有效召回率'] = _fmt_percent(weighted_summary.get('weighted_avg_valid_rate'))
+
             monthly_data = item.get('monthly_data') or {}
             if not isinstance(monthly_data, dict):
                 monthly_data = {}
@@ -6903,6 +7355,13 @@ def export_governance_filtered_route():
             export_rows.append(row)
 
         base_columns = ['WikiID', '问题', 'AI评分', '状态']
+        weighted_columns = [
+            '大盘周期加权_平均召回频数',
+            '大盘周期加权_平均有效召回频数',
+            '大盘周期加权_平均召回占比',
+            '大盘周期加权_平均有效召回占比',
+            '大盘周期加权_平均有效召回率',
+        ]
         month_columns = []
         for month in normalized_months:
             month_columns.extend([
@@ -6912,7 +7371,7 @@ def export_governance_filtered_route():
                 f'{month}_有效召回占比',
                 f'{month}_有效召回率',
             ])
-        all_columns = base_columns + month_columns
+        all_columns = base_columns + weighted_columns + month_columns
 
         df = pd.DataFrame(export_rows)
         if df.empty:
@@ -6953,31 +7412,1742 @@ def delete_governance_items_route():
         return jsonify({'success': False, 'message': 'Months list is required'}), 400
         
     try:
-        if is_supabase_governance_enabled():
-            try:
-                client = get_supabase_client()
-                if client:
-                    ids_in = _postgrest_in_str(ids)
-                    months_in = _postgrest_in_str(months)
-                    if not ids_in or not months_in:
-                        return jsonify({'success': True, 'deleted': 0})
-                    resp = client.delete('kb_recall', {'kb_id': ids_in, 'month': months_in})
-                    if resp and getattr(resp, 'status_code', 500) < 400:
-                        return jsonify({'success': True, 'deleted': None})
-                    print(f"[Governance] 主库删除条目失败，回退 sqlite: {getattr(resp, 'text', '')}")
-            except Exception as e:
-                print(f"[Governance] 主库删除条目失败，回退 sqlite: {e}")
+        remote_attempted = False
+        remote_ok = False
+        remote_error = ''
+        try:
+            client = get_supabase_client()
+            if client:
+                ids_in = _postgrest_in_str(ids)
+                months_in = _postgrest_in_str(months)
+                if not ids_in or not months_in:
+                    return jsonify({'success': True, 'deleted': 0})
+                remote_attempted = True
+                resp = client.delete('kb_recall', {'kb_id': ids_in, 'month': months_in})
+                if resp and getattr(resp, 'status_code', 500) < 400:
+                    remote_ok = True
+                else:
+                    remote_error = getattr(resp, 'text', '') if resp is not None else 'no response'
+                    print(f"[Governance] 主库删除条目失败: {remote_error}")
+        except Exception as e:
+            remote_error = str(e)
+            print(f"[Governance] 主库删除条目失败: {e}")
 
-        # Delete records for specified IDs in specified months
-        count = KBRecall.query.filter(
-            KBRecall.kb_id.in_(ids),
-            KBRecall.month.in_(months)
-        ).delete(synchronize_session=False)
-        
+        count = _delete_sqlite_governance_items(ids, months)
         db.session.commit()
-        return jsonify({'success': True, 'deleted': count})
+        if remote_attempted and not remote_ok:
+            return jsonify({
+                'success': False,
+                'message': f'主库删除失败，本地已删除 {count} 条。{remote_error}',
+                'deleted': count,
+                'remote_deleted': False
+            }), 502
+        return jsonify({
+            'success': True,
+            'deleted': None if remote_ok else count,
+            'local_deleted': count,
+            'remote_deleted': remote_ok if remote_attempted else None
+        })
     except Exception as e:
         db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# Quality Control Center APIs
+QUALITY_SOURCE_LABELS = {
+    'scoring': '知识库评分',
+    'governance': '知识库治理',
+    'external': '外部检测报告',
+}
+
+QUALITY_STATUS_LABELS = {
+    'pending': '待处理',
+    'processing': '处理中',
+    'completed': '已完成',
+    'ignored': '已忽略',
+}
+
+QUALITY_PRIORITY_LABELS = {
+    'p0': 'P0',
+    'p1': 'P1',
+    'p2': 'P2',
+    'p3': 'P3',
+}
+
+QUALITY_GOVERNANCE_AGGREGATE_FIELDS = {
+    'avg_recall_count',
+    'avg_valid_recall_count',
+    'avg_valid_rate',
+    'weighted_avg_recall',
+    'weighted_avg_valid_recall',
+    'weighted_avg_recall_ratio',
+    'weighted_avg_valid_recall_ratio',
+    'weighted_avg_valid_rate',
+}
+
+def _quality_json_loads(value, default=None):
+    if default is None:
+        default = {}
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        parsed = json.loads(str(value or '').strip() or 'null')
+        return default if parsed is None else parsed
+    except Exception:
+        return default
+
+def _quality_jsonable(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(k): _quality_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_quality_jsonable(v) for v in value]
+    if isinstance(value, datetime):
+        return _dt_to_iso(value)
+    try:
+        from datetime import date as _date
+        if isinstance(value, _date):
+            return value.isoformat()
+    except Exception:
+        pass
+    try:
+        import decimal
+        if isinstance(value, decimal.Decimal):
+            return float(value)
+    except Exception:
+        pass
+    if isinstance(value, float):
+        try:
+            if math.isnan(value) or math.isinf(value):
+                return None
+        except Exception:
+            pass
+        return value
+    if isinstance(value, (str, int, bool)):
+        return value
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    try:
+        item = value.item()
+        if item is not value:
+            return _quality_jsonable(item)
+    except Exception:
+        pass
+    return str(value)
+
+def _quality_json_dumps(value):
+    return json.dumps(_quality_jsonable(value if value is not None else {}), ensure_ascii=False)
+
+def _quality_current_user():
+    try:
+        return current_user.username if current_user.is_authenticated else ''
+    except Exception:
+        return ''
+
+def _quality_norm_source(value):
+    s = str(value or '').strip().lower()
+    aliases = {
+        'score': 'scoring',
+        'scoring': 'scoring',
+        'kb_score': 'scoring',
+        'kb_scores': 'scoring',
+        '知识库评分': 'scoring',
+        '评分': 'scoring',
+        'governance': 'governance',
+        'kb_recall': 'governance',
+        'recall': 'governance',
+        '知识库治理': 'governance',
+        '治理': 'governance',
+        'external': 'external',
+        'external_report': 'external',
+        '外部检测': 'external',
+        '外部检测报告': 'external',
+        '导入': 'external',
+    }
+    return aliases.get(s, s if s in QUALITY_SOURCE_LABELS else '')
+
+def _quality_normalize_sources(values):
+    if isinstance(values, str):
+        try:
+            loaded = json.loads(values)
+            values = loaded if isinstance(loaded, list) else [values]
+        except Exception:
+            values = re.split(r'[,，\n]', values)
+    if not isinstance(values, list):
+        values = []
+    out = []
+    for item in values:
+        key = _quality_norm_source(item)
+        if key and key not in out:
+            out.append(key)
+    return out or ['scoring', 'governance']
+
+def _quality_rule_summary(rule):
+    rule = rule if isinstance(rule, dict) else {}
+    conditions = rule.get('conditions')
+    if isinstance(conditions, list) and conditions:
+        parts = []
+        for c in conditions[:4]:
+            if not isinstance(c, dict):
+                continue
+            field = str(c.get('field_label') or c.get('field') or '').strip()
+            op = str(c.get('operator_label') or c.get('operator') or '').strip()
+            value = c.get('value')
+            value2 = c.get('value2')
+            if isinstance(value, list):
+                value_text = '、'.join([str(x) for x in value if str(x).strip()])
+            elif value2 not in (None, ''):
+                value_text = f"{value} ~ {value2}"
+            else:
+                value_text = str(value or '')
+            parts.append(' '.join([x for x in [field, op, value_text] if x]).strip())
+        extra = len(conditions) - len(parts)
+        suffix = f" 等 {len(conditions)} 条" if extra > 0 else ''
+        summary = '；'.join(parts) + suffix if parts else '自定义字段规则'
+        start, end = _quality_get_governance_rule_range(rule)
+        if start or end:
+            summary += f"；治理周期 {start or '-'} 至 {end or start or '-'}"
+        return summary
+    legacy = []
+    if rule.get('keyword'):
+        legacy.append(f"关键词包含 {rule.get('keyword')}")
+    if rule.get('min_score') not in (None, ''):
+        legacy.append(f"评分 >= {rule.get('min_score')}")
+    if rule.get('max_score') not in (None, ''):
+        legacy.append(f"评分 <= {rule.get('max_score')}")
+    if rule.get('month_start') or rule.get('month_end'):
+        legacy.append(f"月份 {rule.get('month_start') or '-'} 至 {rule.get('month_end') or '-'}")
+    if rule.get('min_recall') not in (None, ''):
+        legacy.append(f"召回 >= {rule.get('min_recall')}")
+    if rule.get('max_valid_rate') not in (None, ''):
+        legacy.append(f"有效率 <= {rule.get('max_valid_rate')}")
+    return '；'.join(legacy) if legacy else '未设置筛选条件'
+
+def _quality_pool_to_dict(pool):
+    raw_count = QualityRawIssue.query.filter_by(pool_id=pool.id).count()
+    task_ids = [
+        r[0] for r in db.session.query(QualityTaskIssueLink.task_id)
+        .filter_by(pool_id=pool.id)
+        .distinct()
+        .all()
+    ]
+    task_count = len(task_ids)
+    status_counts = {'pending': 0, 'processing': 0, 'completed': 0, 'ignored': 0}
+    if task_ids:
+        rows = db.session.query(QualityTask.status, func.count(QualityTask.id)).filter(
+            QualityTask.id.in_(task_ids)
+        ).group_by(QualityTask.status).all()
+        for status, count in rows:
+            status_counts[str(status or '')] = int(count or 0)
+    sources = _quality_normalize_sources(_quality_json_loads(pool.sources_json, []))
+    rule_config = _quality_json_loads(pool.rule_config_json, {})
+    return {
+        'id': pool.id,
+        'name': pool.name,
+        'sources': sources,
+        'source_labels': [QUALITY_SOURCE_LABELS.get(s, s) for s in sources],
+        'rule_config': rule_config,
+        'rule_summary': _quality_rule_summary(rule_config),
+        'field_mapping': _quality_json_loads(pool.field_mapping_json, {}),
+        'status': pool.status,
+        'raw_count': raw_count,
+        'task_count': task_count,
+        'aggregated_count': task_count,
+        'pending_count': status_counts.get('pending', 0),
+        'processing_count': status_counts.get('processing', 0),
+        'completed_count': status_counts.get('completed', 0),
+        'ignored_count': status_counts.get('ignored', 0),
+        'status_counts': status_counts,
+        'created_by': pool.created_by or '',
+        'created_at': _dt_to_iso(pool.created_at),
+        'updated_at': _dt_to_iso(pool.updated_at),
+    }
+
+def _quality_raw_to_dict(raw, linked_task_id=None, pool_name=None):
+    snapshot = _quality_json_loads(raw.snapshot_json, {})
+    rule_snapshot = _quality_json_loads(raw.rule_snapshot_json, {})
+    return {
+        'id': raw.id,
+        'pool_id': raw.pool_id,
+        'pool_name': pool_name,
+        'source_type': raw.source_type,
+        'source_label': QUALITY_SOURCE_LABELS.get(raw.source_type, raw.source_type),
+        'source_record_key': raw.source_record_key,
+        'wiki_id': raw.wiki_id,
+        'issue_text': raw.issue_text or '',
+        'remediation_reference': raw.remediation_reference or '',
+        'snapshot': snapshot,
+        'rule_snapshot': rule_snapshot,
+        'question': snapshot.get('question') or snapshot.get('question_content') or '',
+        'answer': snapshot.get('answer') or snapshot.get('answer_content') or '',
+        'product_name': snapshot.get('product_name') or '',
+        'score': snapshot.get('total_score'),
+        'month': snapshot.get('month') or '',
+        'linked_task_id': linked_task_id,
+        'ignored': bool(raw.ignored_at),
+        'ignored_at': _dt_to_iso(raw.ignored_at),
+        'created_at': _dt_to_iso(raw.created_at),
+    }
+
+def _quality_raw_summary(pool_id, only_unlinked=True):
+    raws = QualityRawIssue.query.filter_by(pool_id=pool_id).all()
+    raw_ids = [r.id for r in raws]
+    links = QualityTaskIssueLink.query.filter(QualityTaskIssueLink.raw_issue_id.in_(raw_ids)).all() if raw_ids else []
+    linked_ids = {l.raw_issue_id for l in links}
+    rows = [r for r in raws if not r.ignored_at]
+    if only_unlinked:
+        rows = [r for r in rows if r.id not in linked_ids]
+    source_counts = {'scoring': 0, 'governance': 0, 'external': 0}
+    wiki_ids = set()
+    multi_source_by_wiki = {}
+    for raw in rows:
+        source = _quality_norm_source(raw.source_type) or raw.source_type
+        source_counts[source] = source_counts.get(source, 0) + 1
+        wiki_id = str(raw.wiki_id or '').strip()
+        if wiki_id:
+            wiki_ids.add(wiki_id)
+            multi_source_by_wiki.setdefault(wiki_id, set()).add(source)
+    return {
+        'raw_count': len(rows),
+        'wiki_count': len(wiki_ids),
+        'multi_source_wiki_count': sum(1 for sources in multi_source_by_wiki.values() if len(sources) > 1),
+        'source_counts': source_counts,
+    }
+
+def _quality_parse_float(value):
+    if value is None or value == '':
+        return None
+    try:
+        if isinstance(value, str):
+            text_value = value.strip()
+            if text_value.lower() in ('nan', 'none', 'null'):
+                return None
+            is_percent = text_value.endswith('%')
+            text_value = text_value[:-1] if is_percent else text_value
+            parsed = float(text_value.replace(',', '').strip())
+            return parsed / 100 if is_percent else parsed
+        return float(value)
+    except Exception:
+        return None
+
+def _quality_normalize_month(value):
+    month = str(value or '').strip()
+    return month if re.match(r'^\d{4}-\d{2}$', month) else ''
+
+def _quality_month_sequence(start_month, end_month=None):
+    start = _quality_normalize_month(start_month)
+    end = _quality_normalize_month(end_month) or start
+    if not start:
+        return []
+    if start > end:
+        start, end = end, start
+    try:
+        year, month = [int(x) for x in start.split('-')]
+        end_year, end_month_num = [int(x) for x in end.split('-')]
+    except Exception:
+        return [start]
+    months = []
+    for _ in range(240):
+        current = f"{year:04d}-{month:02d}"
+        months.append(current)
+        if year == end_year and month == end_month_num:
+            break
+        month += 1
+        if month > 12:
+            year += 1
+            month = 1
+    return months
+
+def _quality_get_governance_rule_range(rule):
+    rule = rule if isinstance(rule, dict) else {}
+    start = _quality_normalize_month(
+        rule.get('governance_month_start')
+        or rule.get('dashboard_start_month')
+        or rule.get('month_start')
+    )
+    end = _quality_normalize_month(
+        rule.get('governance_month_end')
+        or rule.get('dashboard_end_month')
+        or rule.get('month_end')
+    )
+    if start and end and start > end:
+        start, end = end, start
+    return start, end
+
+def _quality_apply_governance_range_override(rule, payload):
+    rule = dict(rule or {})
+    payload = payload if isinstance(payload, dict) else {}
+    if 'governance_month_start' in payload or 'governance_month_end' in payload:
+        start = _quality_normalize_month(payload.get('governance_month_start'))
+        end = _quality_normalize_month(payload.get('governance_month_end'))
+        if start and end and start > end:
+            start, end = end, start
+        if start:
+            rule['governance_month_start'] = start
+        else:
+            rule.pop('governance_month_start', None)
+        if end:
+            rule['governance_month_end'] = end
+        else:
+            rule.pop('governance_month_end', None)
+    return rule
+
+def _quality_governance_month_weight(wiki_id, month):
+    match = re.match(r'^ICWIKI(\d{4})(\d{2})(\d{2})', str(wiki_id or '').strip(), re.I)
+    if not match:
+        return 1
+    try:
+        year = int(match.group(1))
+        mon = int(match.group(2))
+        day = int(match.group(3))
+        datetime(year, mon, day)
+    except Exception:
+        return 1
+    effective_month = f"{match.group(1)}-{match.group(2)}"
+    stat_month = str(month or '').strip()
+    return 1 if stat_month and effective_month <= stat_month else 0
+
+def _quality_get_field_value(row, field):
+    cur = row or {}
+    for part in str(field or '').split('.'):
+        part = part.strip()
+        if not part:
+            continue
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            return None
+    return cur
+
+def _quality_field_mapping_for_source(mapping, source_type):
+    mapping = mapping if isinstance(mapping, dict) else {}
+    source = _quality_norm_source(source_type)
+    by_source = (
+        mapping.get('by_source')
+        or mapping.get('bySource')
+        or mapping.get('source_mappings')
+        or {}
+    )
+    if isinstance(by_source, dict) and source:
+        source_mapping = by_source.get(source) or by_source.get(str(source_type or '').strip())
+        if isinstance(source_mapping, dict):
+            return source_mapping
+        for key, value in by_source.items():
+            if _quality_norm_source(key) == source and isinstance(value, dict):
+                return value
+    return mapping
+
+def _quality_pool_field_mapping(pool, source_type):
+    mapping = _quality_json_loads(getattr(pool, 'field_mapping_json', '{}'), {}) if pool else {}
+    return _quality_field_mapping_for_source(mapping, source_type)
+
+def _quality_clean_text(value):
+    if value is None:
+        return ''
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    text = str(value).strip()
+    return '' if text.lower() in ('nan', 'none', 'null') else text
+
+def _quality_mapped_field_value(row, mapping, key, fallback_fields=()):
+    fields = []
+    configured = str((mapping or {}).get(key) or '').strip()
+    if configured:
+        fields.append(configured)
+    fields.extend([str(f or '').strip() for f in (fallback_fields or []) if str(f or '').strip()])
+    seen = set()
+    for field in fields:
+        if field in seen:
+            continue
+        seen.add(field)
+        value = _quality_get_field_value(row, field)
+        if _quality_clean_text(value) or value == 0:
+            return value
+    return ''
+
+def _quality_normalize_priority(value):
+    text_value = _quality_clean_text(value).lower()
+    if text_value.upper() in ('P0', 'P1', 'P2', 'P3'):
+        text_value = text_value.lower()
+    return text_value if text_value in QUALITY_PRIORITY_LABELS else ''
+
+def _quality_raw_priority(raw):
+    snapshot = _quality_json_loads(getattr(raw, 'snapshot_json', '{}'), {})
+    return _quality_normalize_priority(snapshot.get('priority'))
+
+def _quality_compare_condition(value, operator, expect, expect2=None):
+    op = str(operator or 'contains').strip()
+    if op in ('empty', 'is_empty'):
+        return value in (None, '') or str(value).strip() == ''
+    if op in ('not_empty', 'is_not_empty'):
+        return not _quality_compare_condition(value, 'empty', expect, expect2)
+    if op in ('contains', 'not_contains'):
+        hit = str(expect or '').lower() in str(value or '').lower()
+        return not hit if op == 'not_contains' else hit
+    if op in ('eq', 'equals', '='):
+        num = _quality_parse_float(value)
+        exp = _quality_parse_float(expect)
+        if num is not None and exp is not None:
+            return math.isclose(num, exp, rel_tol=1e-9, abs_tol=1e-9)
+        return str(value if value is not None else '').strip() == str(expect if expect is not None else '').strip()
+    if op in ('neq', 'not_equals', '!='):
+        num = _quality_parse_float(value)
+        exp = _quality_parse_float(expect)
+        if num is not None and exp is not None:
+            return not math.isclose(num, exp, rel_tol=1e-9, abs_tol=1e-9)
+        return str(value if value is not None else '').strip() != str(expect if expect is not None else '').strip()
+    if op in ('in', 'not_in'):
+        vals = expect if isinstance(expect, list) else re.split(r'[,，\n]', str(expect or ''))
+        vals = [str(v).strip() for v in vals if str(v).strip()]
+        hit = str(value if value is not None else '').strip() in vals
+        return not hit if op == 'not_in' else hit
+    num = _quality_parse_float(value)
+    exp = _quality_parse_float(expect)
+    exp2 = _quality_parse_float(expect2)
+    if op == 'between':
+        if num is None and (expect not in (None, '') or expect2 not in (None, '')):
+            s_val = str(value or '').strip()
+            if not s_val:
+                return False
+            if expect not in (None, '') and s_val < str(expect).strip():
+                return False
+            if expect2 not in (None, '') and s_val > str(expect2).strip():
+                return False
+            return True
+        if num is None:
+            return False
+        if exp is not None and num < exp:
+            return False
+        if exp2 is not None and num > exp2:
+            return False
+        return True
+    if num is None or exp is None:
+        s_val = str(value or '').strip()
+        s_exp = str(expect or '').strip()
+        if not s_val or not s_exp:
+            return False
+        if op in ('gt', '>'):
+            return s_val > s_exp
+        if op in ('gte', '>='):
+            return s_val >= s_exp
+        if op in ('lt', '<'):
+            return s_val < s_exp
+        if op in ('lte', '<='):
+            return s_val <= s_exp
+        return False
+    if op in ('gt', '>'):
+        return num > exp
+    if op in ('gte', '>='):
+        return num >= exp
+    if op in ('lt', '<'):
+        return num < exp
+    if op in ('lte', '<='):
+        return num <= exp
+    return True
+
+def _quality_conditions_match(row, rule, source_type):
+    conditions = (rule or {}).get('conditions')
+    if not isinstance(conditions, list) or not conditions:
+        return None
+    relevant = []
+    for c in conditions:
+        if not isinstance(c, dict):
+            continue
+        cond_source = _quality_norm_source(c.get('source'))
+        if cond_source and cond_source != source_type:
+            continue
+        if not str(c.get('field') or '').strip():
+            continue
+        relevant.append(c)
+    if not relevant:
+        return True
+    logic = str((rule or {}).get('logic') or 'AND').upper()
+    results = []
+    for c in relevant:
+        results.append(_quality_compare_condition(
+            _quality_get_field_value(row, c.get('field')),
+            c.get('operator'),
+            c.get('value'),
+            c.get('value2')
+        ))
+    return any(results) if logic == 'OR' else all(results)
+
+def _quality_text_match(rule, *parts):
+    keyword = str((rule or {}).get('keyword') or '').strip().lower()
+    if not keyword:
+        return True
+    text = ' '.join(str(p or '') for p in parts).lower()
+    return keyword in text
+
+def _quality_fetch_kb_items(wiki_ids, columns=None):
+    ids = []
+    seen = set()
+    for item in (wiki_ids or []):
+        s = str(item or '').strip()
+        if s and s not in seen:
+            seen.add(s)
+            ids.append(s)
+    if not ids:
+        return {}
+    columns = columns or (
+        'question_wiki_id,question,answer,product_name,product_category_name,question_type,answer_type,'
+        'if_bm25,similar_questions,error_list,keyword_list,image_urls,video_urls,file_urls,link_type,link_url,'
+        'update_time,review_status'
+    )
+    client = get_supabase_client()
+    if not client:
+        return {}
+    out = {}
+    for i in range(0, len(ids), 80):
+        batch = ids[i:i + 80]
+        try:
+            resp = client.select(
+                'knowledge_base_v1',
+                page=1,
+                page_size=len(batch),
+                filters={'question_wiki_id': _postgrest_in_str(batch)},
+                columns=columns,
+            )
+            if resp and getattr(resp, 'status_code', 500) < 400:
+                for row in resp.json() or []:
+                    if isinstance(row, dict):
+                        wid = str(row.get('question_wiki_id') or '').strip()
+                        if wid:
+                            out[wid] = row
+        except Exception as e:
+            print(f"[Quality] 批量读取知识库失败: {e}")
+    return out
+
+def _quality_score_issue_text(row):
+    score = (row or {}).get('total_score')
+    if score not in (None, ''):
+        return f"AI评分 {score}，建议复核内容质量。"
+    status = str((row or {}).get('status') or '').strip()
+    if status:
+        return f"评分状态 {status} 命中任务池规则。"
+    return "评分数据命中任务池规则，建议复核。"
+
+def _quality_is_numeric_metric_text(value):
+    text = str(value or '').strip()
+    return bool(text and re.fullmatch(r'[-+]?\d+(?:\.\d+)?%?', text))
+
+def _quality_score_matches(row, rule):
+    condition_match = _quality_conditions_match(row, rule, 'scoring')
+    if condition_match is not None:
+        return condition_match
+    score = _quality_parse_float((row or {}).get('total_score'))
+    min_score = _quality_parse_float((rule or {}).get('min_score'))
+    max_score = _quality_parse_float((rule or {}).get('max_score'))
+    if min_score is not None and (score is None or score < min_score):
+        return False
+    if max_score is not None and (score is None or score > max_score):
+        return False
+    wanted_status = str((rule or {}).get('score_status') or '').strip()
+    if wanted_status and str((row or {}).get('status') or '').strip() != wanted_status:
+        return False
+    return _quality_text_match(
+        rule,
+        (row or {}).get('kb_id'),
+        (row or {}).get('question_content'),
+        (row or {}).get('answer_content'),
+        (row or {}).get('remarks'),
+        (row or {}).get('score_data'),
+    )
+
+def _quality_governance_matches(row, rule):
+    condition_match = _quality_conditions_match(row, rule, 'governance')
+    if condition_match is not None:
+        return condition_match
+    month = str((row or {}).get('month') or '').strip()
+    start = str((rule or {}).get('month_start') or '').strip()
+    end = str((rule or {}).get('month_end') or '').strip()
+    if start and month and month < start:
+        return False
+    if end and month and month > end:
+        return False
+    recall = _quality_parse_float((row or {}).get('recall_count')) or 0
+    valid = _quality_parse_float((row or {}).get('valid_recall_count')) or 0
+    min_recall = _quality_parse_float((rule or {}).get('min_recall'))
+    max_valid_rate = _quality_parse_float((rule or {}).get('max_valid_rate'))
+    if min_recall is not None and recall < min_recall:
+        return False
+    if max_valid_rate is not None:
+        rate = valid / recall if recall > 0 else 0
+        if rate > max_valid_rate:
+            return False
+    return _quality_text_match(rule, (row or {}).get('kb_id'), month)
+
+def _quality_load_scoring_raw_candidates(rule, field_mapping=None):
+    client = get_supabase_client()
+    if not client:
+        return []
+    mapping = _quality_field_mapping_for_source(field_mapping or {}, 'scoring')
+    rows = []
+    try:
+        cols = 'id,kb_id,question_content,answer_content,status,total_score,remarks,score_data,updated_at'
+        rows = client.select_all('kb_scores', columns=cols, order_by='id', page_size=1000) or []
+    except Exception as e:
+        print(f"[Quality] 评分来源读取失败: {e}")
+        rows = []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict) or not _quality_score_matches(row, rule):
+            continue
+        wiki_id = _quality_clean_text(_quality_mapped_field_value(row, mapping, 'wiki_id', ('kb_id',)))
+        if not wiki_id:
+            continue
+        source_id = str(row.get('id') or wiki_id).strip()
+        issue_text = _quality_clean_text(_quality_mapped_field_value(row, mapping, 'issue')) or _quality_score_issue_text(row)
+        remediation_reference = _quality_clean_text(_quality_mapped_field_value(row, mapping, 'action', ('remarks',)))
+        snapshot = dict(row)
+        priority = _quality_normalize_priority(_quality_mapped_field_value(row, mapping, 'priority'))
+        if priority:
+            snapshot['priority'] = priority
+        out.append({
+            'source_type': 'scoring',
+            'source_record_key': f"scoring:{source_id}:{wiki_id}",
+            'wiki_id': wiki_id,
+            'issue_text': issue_text,
+            'remediation_reference': remediation_reference,
+            'snapshot': snapshot,
+        })
+    return out
+
+def _quality_governance_rule_uses_aggregate(rule):
+    conditions = (rule or {}).get('conditions')
+    if not isinstance(conditions, list):
+        return False
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            continue
+        if _quality_norm_source(condition.get('source')) not in ('', 'governance'):
+            continue
+        field = str(condition.get('field') or '').strip()
+        if field in QUALITY_GOVERNANCE_AGGREGATE_FIELDS:
+            return True
+    return False
+
+def _quality_load_governance_raw_candidates(rule, field_mapping=None):
+    mapping = _quality_field_mapping_for_source(field_mapping or {}, 'governance')
+    rows_by_key = {}
+    start_month, end_month = _quality_get_governance_rule_range(rule)
+    try:
+        client = get_supabase_client()
+        if client:
+            if start_month:
+                remote_rows = _load_remote_governance_recalls(start_month, end_month) or []
+            else:
+                remote_rows = client.select_all(
+                    'kb_recall',
+                    columns='kb_id,month,recall_count,valid_recall_count',
+                    order_by='month',
+                    order_dir='desc',
+                    page_size=1000
+                ) or []
+            for row in remote_rows:
+                if isinstance(row, dict):
+                    key = (str(row.get('kb_id') or '').strip(), str(row.get('month') or '').strip())
+                    if key[0] and key[1]:
+                        rows_by_key[key] = row
+    except Exception as e:
+        print(f"[Quality] 远端治理来源读取失败: {e}")
+    try:
+        local_rows = _load_sqlite_governance_recalls(start_month, end_month) if start_month else KBRecall.query.all()
+        for r in local_rows:
+            key = (str(r.kb_id or '').strip(), str(r.month or '').strip())
+            if key[0] and key[1]:
+                rows_by_key[key] = {
+                    'kb_id': key[0],
+                    'month': key[1],
+                    'recall_count': r.recall_count or 0,
+                    'valid_recall_count': r.valid_recall_count or 0,
+                }
+    except Exception as e:
+        print(f"[Quality] 本地治理来源读取失败: {e}")
+
+    months = _quality_month_sequence(start_month, end_month) if start_month else sorted({key[1] for key in rows_by_key.keys()})
+    month_set = set(months)
+    monthly_totals = {month: {'total_recall': 0, 'total_valid': 0} for month in months}
+    monthly_map = {}
+    for row in rows_by_key.values():
+        wiki_id = str(row.get('kb_id') or '').strip()
+        month = str(row.get('month') or '').strip()
+        if not wiki_id or not month:
+            continue
+        if month_set and month not in month_set:
+            continue
+        recall = _quality_parse_float(row.get('recall_count')) or 0
+        valid = _quality_parse_float(row.get('valid_recall_count')) or 0
+        clean_row = dict(row)
+        clean_row.update({
+            'kb_id': wiki_id,
+            'month': month,
+            'recall_count': recall,
+            'valid_recall_count': valid,
+        })
+        monthly_map.setdefault(wiki_id, {})[month] = clean_row
+        total = monthly_totals.setdefault(month, {'total_recall': 0, 'total_valid': 0})
+        total['total_recall'] += recall
+        total['total_valid'] += valid
+
+    score_map, v1_map = _load_governance_reference_maps()
+    uses_aggregate_rule = _quality_governance_rule_uses_aggregate(rule)
+    candidate_ids = set(monthly_map.keys())
+    if uses_aggregate_rule:
+        candidate_ids |= set(v1_map.keys())
+
+    def _governance_issue_text(row, default_text):
+        return _quality_clean_text(_quality_mapped_field_value(row, mapping, 'issue', ('question',))) or default_text
+
+    def _governance_action_text(row, default_text):
+        mapped = _quality_clean_text(_quality_mapped_field_value(row, mapping, 'action', ('suggestion', 'remarks', 'conclusion', 'analysis')))
+        if not mapped or _quality_is_numeric_metric_text(mapped):
+            return default_text
+        return mapped
+
+    def _governance_snapshot(row):
+        snap = dict(row or {})
+        priority = _quality_normalize_priority(_quality_mapped_field_value(row, mapping, 'priority'))
+        if priority:
+            snap['priority'] = priority
+        return snap
+
+    def _build_governance_aggregate_row(wiki_id):
+        rows = []
+        monthly_data = {}
+        v1_entry = v1_map.get(wiki_id) or {}
+        score_entry = score_map.get(wiki_id) or {}
+        status = '使用中' if v1_entry else '主库不存在'
+        question = v1_entry.get('question') or score_entry.get('question_content') or ''
+        answer = v1_entry.get('answer') or score_entry.get('answer_content') or ''
+        product_name = v1_entry.get('product_name') or ''
+        score_details = _governance_score_detail_fields(score_entry)
+        for month in months:
+            base = monthly_map.get(wiki_id, {}).get(month) or {
+                'kb_id': wiki_id,
+                'month': month,
+                'recall_count': 0,
+                'valid_recall_count': 0,
+            }
+            recall = _quality_parse_float(base.get('recall_count')) or 0
+            valid = _quality_parse_float(base.get('valid_recall_count')) or 0
+            totals = monthly_totals.get(month, {})
+            month_total_recall = _quality_parse_float(totals.get('total_recall')) or 0
+            month_total_valid = _quality_parse_float(totals.get('total_valid')) or 0
+            row = dict(base)
+            row.update({
+                'question': question,
+                'answer': answer,
+                'product_name': product_name,
+                'status': status,
+                'conclusion': score_details.get('conclusion') or '',
+                'analysis': score_details.get('analysis') or '',
+                'suggestion': score_details.get('suggestion') or '',
+                'remarks': score_details.get('remarks') or '',
+                'valid_rate': (valid / recall) if recall else 0,
+                'recall_ratio': (recall / month_total_recall) if month_total_recall else 0,
+                'valid_recall_ratio': (valid / month_total_valid) if month_total_valid else 0,
+            })
+            rows.append(row)
+            monthly_data[month] = {
+                'recall_count': recall,
+                'valid_recall_count': valid,
+                'recall_ratio': row['recall_ratio'],
+                'valid_recall_ratio': row['valid_recall_ratio'],
+                'valid_rate': row['valid_rate'],
+            }
+
+        total_recall = sum((_quality_parse_float(r.get('recall_count')) or 0) for r in rows)
+        total_valid = sum((_quality_parse_float(r.get('valid_recall_count')) or 0) for r in rows)
+        row_count = max(1, len(rows))
+        total_weight = 0
+        weighted_recall_ratio_sum = 0
+        weighted_valid_recall_ratio_sum = 0
+        weighted_valid_rate_sum = 0
+        for row in rows:
+            month = str(row.get('month') or '').strip()
+            weight = _quality_governance_month_weight(wiki_id, month)
+            if weight <= 0:
+                continue
+            total_weight += weight
+            weighted_recall_ratio_sum += (_quality_parse_float(row.get('recall_ratio')) or 0) * weight
+            weighted_valid_recall_ratio_sum += (_quality_parse_float(row.get('valid_recall_ratio')) or 0) * weight
+            weighted_valid_rate_sum += (_quality_parse_float(row.get('valid_rate')) or 0) * weight
+        range_label = f"{months[0]} 至 {months[-1]}" if len(months) > 1 else (months[0] if months else '全部周期')
+        return {
+            'kb_id': wiki_id,
+            'question': question,
+            'answer': answer,
+            'product_name': product_name,
+            'status': status,
+            'conclusion': score_details.get('conclusion') or '',
+            'analysis': score_details.get('analysis') or '',
+            'suggestion': score_details.get('suggestion') or '',
+            'remarks': score_details.get('remarks') or '',
+            'month': range_label,
+            'month_start': months[0] if months else '',
+            'month_end': months[-1] if months else '',
+            'months': months,
+            'monthly_data': monthly_data,
+            'recall_count': total_recall,
+            'valid_recall_count': total_valid,
+            'valid_rate': (total_valid / total_recall) if total_recall else 0,
+            'avg_recall_count': total_recall / row_count,
+            'avg_valid_recall_count': total_valid / row_count,
+            'avg_valid_rate': (total_valid / total_recall) if total_recall else 0,
+            'total_weight': total_weight,
+            'weighted_avg_recall': (total_recall / total_weight) if total_weight else None,
+            'weighted_avg_valid_recall': (total_valid / total_weight) if total_weight else None,
+            'weighted_avg_recall_ratio': (weighted_recall_ratio_sum / total_weight) if total_weight else None,
+            'weighted_avg_valid_recall_ratio': (weighted_valid_recall_ratio_sum / total_weight) if total_weight else None,
+            'weighted_avg_valid_rate': (weighted_valid_rate_sum / total_weight) if total_weight else None,
+        }
+
+    out = []
+    if uses_aggregate_rule:
+        for wiki_id in sorted(candidate_ids):
+            row = _build_governance_aggregate_row(wiki_id)
+            if not _quality_governance_matches(row, rule):
+                continue
+            weighted_avg = _quality_parse_float(row.get('weighted_avg_recall'))
+            weighted_text = '-' if weighted_avg is None else f"{weighted_avg:.2f}"
+            range_key = f"{row.get('month_start') or 'all'}_{row.get('month_end') or 'all'}"
+            default_issue = f"{row.get('month')} 大盘周期加权平均召回频数 {weighted_text}，总召回 {int(row.get('recall_count') or 0)}。"
+            default_action = '治理大盘加权数据命中任务池规则'
+            mapped_wiki_id = _quality_clean_text(_quality_mapped_field_value(row, mapping, 'wiki_id', ('kb_id',))) or wiki_id
+            out.append({
+                'source_type': 'governance',
+                'source_record_key': f"governance:weighted:{mapped_wiki_id}:{range_key}",
+                'wiki_id': mapped_wiki_id,
+                'issue_text': _governance_issue_text(row, default_issue),
+                'remediation_reference': _governance_action_text(row, default_action),
+                'snapshot': _governance_snapshot(row),
+            })
+        return out
+
+    for wiki_id in sorted(candidate_ids):
+        aggregate_row = _build_governance_aggregate_row(wiki_id)
+        for month, row in sorted((monthly_map.get(wiki_id) or {}).items()):
+            row.update({
+                'question': aggregate_row.get('question') or '',
+                'answer': aggregate_row.get('answer') or '',
+                'product_name': aggregate_row.get('product_name') or '',
+                'status': aggregate_row.get('status') or '',
+                'conclusion': aggregate_row.get('conclusion') or '',
+                'analysis': aggregate_row.get('analysis') or '',
+                'suggestion': aggregate_row.get('suggestion') or '',
+                'remarks': aggregate_row.get('remarks') or '',
+                'avg_recall_count': aggregate_row.get('avg_recall_count'),
+                'avg_valid_recall_count': aggregate_row.get('avg_valid_recall_count'),
+                'avg_valid_rate': aggregate_row.get('avg_valid_rate'),
+                'weighted_avg_recall': aggregate_row.get('weighted_avg_recall'),
+                'weighted_avg_valid_recall': aggregate_row.get('weighted_avg_valid_recall'),
+                'weighted_avg_recall_ratio': aggregate_row.get('weighted_avg_recall_ratio'),
+                'weighted_avg_valid_recall_ratio': aggregate_row.get('weighted_avg_valid_recall_ratio'),
+                'weighted_avg_valid_rate': aggregate_row.get('weighted_avg_valid_rate'),
+            })
+            if not _quality_governance_matches(row, rule):
+                continue
+            recall = int(_quality_parse_float(row.get('recall_count')) or 0)
+            valid = int(_quality_parse_float(row.get('valid_recall_count')) or 0)
+            valid_rate = (valid / recall) if recall else 0
+            default_issue = f"{month} 召回 {recall}，有效召回 {valid}，有效召回率 {valid_rate:.2%}。"
+            default_action = '治理召回数据命中任务池规则'
+            mapped_wiki_id = _quality_clean_text(_quality_mapped_field_value(row, mapping, 'wiki_id', ('kb_id',))) or wiki_id
+            out.append({
+                'source_type': 'governance',
+                'source_record_key': f"governance:{mapped_wiki_id}:{month}",
+                'wiki_id': mapped_wiki_id,
+                'issue_text': _governance_issue_text(row, default_issue),
+                'remediation_reference': _governance_action_text(row, default_action),
+                'snapshot': _governance_snapshot(row),
+            })
+    return out
+
+def _quality_upsert_raw_issue(pool, candidate, rule_snapshot=None):
+    wiki_id = str((candidate or {}).get('wiki_id') or '').strip()
+    source_type = _quality_norm_source((candidate or {}).get('source_type'))
+    source_record_key = str((candidate or {}).get('source_record_key') or '').strip()
+    if not pool or not wiki_id or not source_type or not source_record_key:
+        return None, False
+    raw = QualityRawIssue.query.filter_by(
+        pool_id=pool.id,
+        source_record_key=source_record_key
+    ).first()
+    created = False
+    if not raw:
+        raw = QualityRawIssue(
+            pool_id=pool.id,
+            source_type=source_type,
+            source_record_key=source_record_key,
+            wiki_id=wiki_id,
+        )
+        db.session.add(raw)
+        created = True
+    raw.source_type = source_type
+    raw.wiki_id = wiki_id
+    raw.issue_text = str((candidate or {}).get('issue_text') or '').strip()
+    raw.remediation_reference = str((candidate or {}).get('remediation_reference') or '').strip()
+    raw.snapshot_json = _quality_json_dumps((candidate or {}).get('snapshot') or {})
+    raw.rule_snapshot_json = _quality_json_dumps(rule_snapshot or {})
+    return raw, created
+
+def _quality_prune_stale_raw_issues(pool_id, keep_source_keys, source_types):
+    source_types = [_quality_norm_source(s) for s in (source_types or [])]
+    source_types = [s for s in source_types if s and s != 'external']
+    if not source_types:
+        return {'removed_raw_count': 0, 'removed_link_count': 0, 'removed_task_count': 0}
+    keep_source_keys = set(str(k or '').strip() for k in (keep_source_keys or []) if str(k or '').strip())
+    stale_query = QualityRawIssue.query.filter(
+        QualityRawIssue.pool_id == pool_id,
+        QualityRawIssue.source_type.in_(source_types)
+    )
+    stale_raws = [raw for raw in stale_query.all() if str(raw.source_record_key or '').strip() not in keep_source_keys]
+    if not stale_raws:
+        return {'removed_raw_count': 0, 'removed_link_count': 0, 'removed_task_count': 0}
+
+    stale_raw_ids = [raw.id for raw in stale_raws]
+    links = QualityTaskIssueLink.query.filter(QualityTaskIssueLink.raw_issue_id.in_(stale_raw_ids)).all()
+    affected_task_ids = {link.task_id for link in links}
+    removed_link_count = len(links)
+    for link in links:
+        db.session.delete(link)
+    for raw in stale_raws:
+        db.session.delete(raw)
+    db.session.flush()
+
+    removed_task_count = 0
+    for task_id in affected_task_ids:
+        remains = QualityTaskIssueLink.query.filter_by(task_id=task_id).count()
+        if remains == 0:
+            task = QualityTask.query.get(task_id)
+            if task:
+                db.session.delete(task)
+                removed_task_count += 1
+    return {
+        'removed_raw_count': len(stale_raws),
+        'removed_link_count': removed_link_count,
+        'removed_task_count': removed_task_count,
+    }
+
+def _quality_create_or_link_task(raw, priority='p2'):
+    if not raw or raw.ignored_at:
+        return None, False
+    priority = str(priority or 'p2').strip().lower()
+    if priority not in QUALITY_PRIORITY_LABELS:
+        priority = 'p2'
+    task = QualityTask.query.filter_by(wiki_id=raw.wiki_id).first()
+    created = False
+    if not task:
+        task = QualityTask(wiki_id=raw.wiki_id, priority=priority, status='pending')
+        db.session.add(task)
+        db.session.flush()
+        created = True
+    elif task.status == 'ignored':
+        task.status = 'pending'
+        task.ignored_at = None
+    if priority:
+        task.priority = priority
+    link = QualityTaskIssueLink.query.filter_by(task_id=task.id, raw_issue_id=raw.id).first()
+    if not link:
+        db.session.add(QualityTaskIssueLink(
+            task_id=task.id,
+            raw_issue_id=raw.id,
+            pool_id=raw.pool_id,
+            source_type=raw.source_type,
+        ))
+    return task, created
+
+def _quality_mark_task_processing(task_id, latest_kb_update_time=None):
+    try:
+        task = QualityTask.query.get(int(task_id))
+    except Exception:
+        task = None
+    if not task:
+        return False
+    task.status = 'processing'
+    task.completed_at = None
+    task.ignored_at = None
+    if latest_kb_update_time is not None:
+        task.latest_kb_update_time = str(latest_kb_update_time or '')
+    db.session.commit()
+    return True
+
+def _quality_task_to_dict(task, raw_issues=None, kb_item=None):
+    raw_issues = raw_issues or []
+    kb_item = kb_item or {}
+    source_counts = {}
+    pool_names = []
+    issue_labels = []
+    suggested_actions = []
+    question = str(kb_item.get('question') or '').strip()
+    answer = str(kb_item.get('answer') or '').strip()
+    for raw in raw_issues:
+        source_counts[raw.source_type] = source_counts.get(raw.source_type, 0) + 1
+        pool_name = getattr(raw, '_quality_pool_name', None)
+        if pool_name and pool_name not in pool_names:
+            pool_names.append(pool_name)
+        issue_label = str(raw.issue_text or '').strip()
+        if issue_label and issue_label not in issue_labels:
+            issue_labels.append(issue_label)
+        suggested_action = str(raw.remediation_reference or '').strip()
+        if raw.source_type == 'governance' and _quality_is_numeric_metric_text(suggested_action):
+            suggested_action = ''
+        if suggested_action and suggested_action not in suggested_actions:
+            suggested_actions.append(suggested_action)
+        if not question:
+            snap = _quality_json_loads(raw.snapshot_json, {})
+            question = str(snap.get('question') or snap.get('question_content') or '').strip()
+        if not answer:
+            snap = _quality_json_loads(raw.snapshot_json, {})
+            answer = str(snap.get('answer') or snap.get('answer_content') or '').strip()
+    return {
+        'id': task.id,
+        'wiki_id': task.wiki_id,
+        'priority': task.priority,
+        'priority_label': QUALITY_PRIORITY_LABELS.get(task.priority, task.priority),
+        'status': task.status,
+        'status_label': QUALITY_STATUS_LABELS.get(task.status, task.status),
+        'question': question,
+        'answer': answer,
+        'product_name': kb_item.get('product_name') or '',
+        'kb_update_time': kb_item.get('update_time') or '',
+        'latest_kb_update_time': task.latest_kb_update_time or '',
+        'issue_count': len(raw_issues),
+        'source_tags': [
+            {'source_type': k, 'source_label': QUALITY_SOURCE_LABELS.get(k, k), 'count': v}
+            for k, v in sorted(source_counts.items())
+        ],
+        'pool_names': pool_names,
+        'issue_labels': issue_labels,
+        'issue_label_text': '；'.join(issue_labels),
+        'issue_tag_text': f"共 {len(raw_issues)} 条问题 ｜ {('、'.join(pool_names) or '未关联任务池')}",
+        'suggested_actions': suggested_actions,
+        'suggested_action_text': '；'.join(suggested_actions),
+        'created_at': _dt_to_iso(task.created_at),
+        'updated_at': _dt_to_iso(task.updated_at),
+        'completed_at': _dt_to_iso(task.completed_at),
+        'ignored_at': _dt_to_iso(task.ignored_at),
+    }
+
+def _quality_load_task_raw_map(tasks):
+    task_ids = [t.id for t in (tasks or [])]
+    if not task_ids:
+        return {}
+    links = QualityTaskIssueLink.query.filter(QualityTaskIssueLink.task_id.in_(task_ids)).all()
+    raw_ids = [l.raw_issue_id for l in links]
+    raws = QualityRawIssue.query.filter(QualityRawIssue.id.in_(raw_ids)).all() if raw_ids else []
+    pools = {p.id: p.name for p in QualityTaskPool.query.all()}
+    raw_map = {r.id: r for r in raws}
+    out = {tid: [] for tid in task_ids}
+    for link in links:
+        raw = raw_map.get(link.raw_issue_id)
+        if raw:
+            setattr(raw, '_quality_pool_name', pools.get(raw.pool_id, ''))
+            out.setdefault(link.task_id, []).append(raw)
+    return out
+
+@app.route('/api/quality/pools', methods=['GET', 'POST'])
+@login_required
+def quality_pools_route():
+    if request.method == 'GET':
+        pools = QualityTaskPool.query.order_by(QualityTaskPool.updated_at.desc(), QualityTaskPool.id.desc()).all()
+        return jsonify({'success': True, 'pools': [_quality_pool_to_dict(p) for p in pools]})
+
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get('name') or '').strip()
+    if not name:
+        return jsonify({'success': False, 'message': '任务池名称不能为空'}), 400
+    sources = _quality_normalize_sources(payload.get('sources') or [])
+    pool = QualityTaskPool(
+        name=name,
+        sources_json=_quality_json_dumps(sources),
+        rule_config_json=_quality_json_dumps(payload.get('rule_config') or {}),
+        field_mapping_json=_quality_json_dumps(payload.get('field_mapping') or {}),
+        status='active',
+        created_by=_quality_current_user(),
+    )
+    db.session.add(pool)
+    db.session.commit()
+    return jsonify({'success': True, 'pool': _quality_pool_to_dict(pool)})
+
+@app.route('/api/quality/pools/<int:pool_id>', methods=['PATCH', 'DELETE'])
+@login_required
+def quality_pool_detail_route(pool_id):
+    pool = QualityTaskPool.query.get(pool_id)
+    if not pool:
+        return jsonify({'success': False, 'message': '任务池不存在'}), 404
+    if request.method == 'PATCH':
+        payload = request.get_json(silent=True) or {}
+        if 'name' in payload:
+            name = str(payload.get('name') or '').strip()
+            if not name:
+                return jsonify({'success': False, 'message': '任务池名称不能为空'}), 400
+            pool.name = name
+        if 'sources' in payload:
+            pool.sources_json = _quality_json_dumps(_quality_normalize_sources(payload.get('sources')))
+        if 'rule_config' in payload:
+            pool.rule_config_json = _quality_json_dumps(payload.get('rule_config') or {})
+        if 'field_mapping' in payload:
+            pool.field_mapping_json = _quality_json_dumps(payload.get('field_mapping') or {})
+        pool.updated_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({'success': True, 'pool': _quality_pool_to_dict(pool)})
+
+    links = QualityTaskIssueLink.query.filter_by(pool_id=pool.id).all()
+    affected_task_ids = list({l.task_id for l in links})
+    QualityTaskIssueLink.query.filter_by(pool_id=pool.id).delete()
+    QualityRawIssue.query.filter_by(pool_id=pool.id).delete()
+    db.session.delete(pool)
+    for task_id in affected_task_ids:
+        remains = QualityTaskIssueLink.query.filter_by(task_id=task_id).count()
+        if remains == 0:
+            task = QualityTask.query.get(task_id)
+            if task:
+                db.session.delete(task)
+    db.session.commit()
+    return jsonify({'success': True, 'deleted_pool_id': pool_id})
+
+@app.route('/api/quality/pools/<int:pool_id>/scan', methods=['POST'])
+@login_required
+def quality_scan_pool_route(pool_id):
+    pool = QualityTaskPool.query.get(pool_id)
+    if not pool:
+        return jsonify({'success': False, 'message': '任务池不存在'}), 404
+    try:
+        payload = request.get_json(silent=True) or {}
+        rule = _quality_apply_governance_range_override(_quality_json_loads(pool.rule_config_json, {}), payload)
+        sources = _quality_normalize_sources(_quality_json_loads(pool.sources_json, []))
+        field_mapping = _quality_json_loads(pool.field_mapping_json, {})
+        candidates = []
+        scanned_sources = []
+        if 'scoring' in sources:
+            candidates.extend(_quality_load_scoring_raw_candidates(rule, field_mapping))
+            scanned_sources.append('scoring')
+        if 'governance' in sources:
+            candidates.extend(_quality_load_governance_raw_candidates(rule, field_mapping))
+            scanned_sources.append('governance')
+        if candidates:
+            kb_map = _quality_fetch_kb_items([c.get('wiki_id') for c in candidates], columns='question_wiki_id,question,answer,product_name,update_time')
+            for c in candidates:
+                kb_item = kb_map.get(str(c.get('wiki_id') or '').strip()) or {}
+                if kb_item:
+                    snap = dict(c.get('snapshot') or {})
+                    snap.update({
+                        'question': kb_item.get('question') or snap.get('question'),
+                        'answer': kb_item.get('answer') or snap.get('answer'),
+                        'product_name': kb_item.get('product_name') or snap.get('product_name'),
+                        'kb_update_time': kb_item.get('update_time') or '',
+                    })
+                    c['snapshot'] = snap
+        created_count = 0
+        updated_count = 0
+        matched_source_keys = set()
+        for c in candidates:
+            raw, created = _quality_upsert_raw_issue(pool, c, rule)
+            if raw:
+                matched_source_keys.add(str(raw.source_record_key or '').strip())
+            if created:
+                created_count += 1
+            else:
+                updated_count += 1
+        cleanup_result = _quality_prune_stale_raw_issues(pool.id, matched_source_keys, scanned_sources)
+        pool.updated_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'pool': _quality_pool_to_dict(pool),
+            'matched_count': len(candidates),
+            'created_count': created_count,
+            'updated_count': updated_count,
+            **cleanup_result,
+            'raw_summary': _quality_raw_summary(pool.id, only_unlinked=True),
+        })
+    except Exception as e:
+        db.session.rollback()
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': f'扫描失败: {str(e)}'}), 500
+
+@app.route('/api/quality/pools/<int:pool_id>/raw_issues', methods=['GET'])
+@login_required
+def quality_pool_raw_issues_route(pool_id):
+    pool = QualityTaskPool.query.get(pool_id)
+    if not pool:
+        return jsonify({'success': False, 'message': '任务池不存在'}), 404
+    page = max(1, int(request.args.get('page', 1) or 1))
+    page_size = max(1, min(200, int(request.args.get('pageSize', 50) or 50)))
+    source = _quality_norm_source(request.args.get('source'))
+    keyword = str(request.args.get('keyword') or '').strip().lower()
+    only_unlinked = str(request.args.get('only_unlinked') or '').lower() in ('1', 'true', 'yes')
+    status = str(request.args.get('status') or '').strip()
+    query = QualityRawIssue.query.filter_by(pool_id=pool.id)
+    if source:
+        query = query.filter_by(source_type=source)
+    if status == 'ignored':
+        query = query.filter(QualityRawIssue.ignored_at.isnot(None))
+    elif status == 'active':
+        query = query.filter(QualityRawIssue.ignored_at.is_(None))
+    raws = query.order_by(QualityRawIssue.id.desc()).all()
+    raw_ids = [r.id for r in raws]
+    links = QualityTaskIssueLink.query.filter(QualityTaskIssueLink.raw_issue_id.in_(raw_ids)).all() if raw_ids else []
+    linked_map = {l.raw_issue_id: l.task_id for l in links}
+    filtered = []
+    for raw in raws:
+        if only_unlinked and raw.id in linked_map:
+            continue
+        if keyword:
+            hay = ' '.join([
+                raw.wiki_id or '',
+                raw.issue_text or '',
+                raw.remediation_reference or '',
+                raw.snapshot_json or '',
+            ]).lower()
+            if keyword not in hay:
+                continue
+        filtered.append(raw)
+    total = len(filtered)
+    start = (page - 1) * page_size
+    page_rows = filtered[start:start + page_size]
+    return jsonify({
+        'success': True,
+        'raw_issues': [_quality_raw_to_dict(r, linked_map.get(r.id), pool.name) for r in page_rows],
+        'total': total,
+        'page': page,
+        'pageSize': page_size,
+    })
+
+@app.route('/api/quality/pools/<int:pool_id>/aggregate', methods=['POST'])
+@login_required
+def quality_aggregate_pool_route(pool_id):
+    pool = QualityTaskPool.query.get(pool_id)
+    if not pool:
+        return jsonify({'success': False, 'message': '任务池不存在'}), 404
+    payload = request.get_json(silent=True) or {}
+    ids = payload.get('raw_issue_ids') or []
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'success': False, 'message': '请选择要聚合的原始问题'}), 400
+    priority = str(payload.get('priority') or 'p2').lower()
+    raws = QualityRawIssue.query.filter(
+        QualityRawIssue.pool_id == pool.id,
+        QualityRawIssue.id.in_([int(x) for x in ids if str(x).isdigit()]),
+        QualityRawIssue.ignored_at.is_(None)
+    ).all()
+    created_task_count = 0
+    linked_count = 0
+    task_ids = set()
+    for raw in raws:
+        before = QualityTask.query.filter_by(wiki_id=raw.wiki_id).first()
+        task, created = _quality_create_or_link_task(raw, _quality_raw_priority(raw) or priority)
+        if task:
+            task_ids.add(task.id)
+            if created or before is None:
+                created_task_count += 1
+            linked_count += 1
+    pool.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({
+        'success': True,
+        'created_task_count': created_task_count,
+        'linked_count': linked_count,
+        'task_ids': sorted(task_ids),
+        'raw_summary': _quality_raw_summary(pool.id, only_unlinked=True),
+    })
+
+@app.route('/api/quality/pools/<int:pool_id>/aggregate_all', methods=['POST'])
+@login_required
+def quality_aggregate_all_pool_route(pool_id):
+    pool = QualityTaskPool.query.get(pool_id)
+    if not pool:
+        return jsonify({'success': False, 'message': '任务池不存在'}), 404
+    payload = request.get_json(silent=True) or {}
+    priority = str(payload.get('priority') or 'p2').lower()
+    only_unlinked = bool(payload.get('only_unlinked', True))
+    raws = QualityRawIssue.query.filter(
+        QualityRawIssue.pool_id == pool.id,
+        QualityRawIssue.ignored_at.is_(None)
+    ).order_by(QualityRawIssue.id.asc()).all()
+    if only_unlinked and raws:
+        raw_ids = [r.id for r in raws]
+        links = QualityTaskIssueLink.query.filter(QualityTaskIssueLink.raw_issue_id.in_(raw_ids)).all()
+        linked_ids = {l.raw_issue_id for l in links}
+        raws = [r for r in raws if r.id not in linked_ids]
+    if not raws:
+        return jsonify({
+            'success': True,
+            'created_task_count': 0,
+            'linked_count': 0,
+            'wiki_count': 0,
+            'task_ids': [],
+            'raw_summary': _quality_raw_summary(pool.id, only_unlinked=True),
+            'message': '暂无新的待聚合原始问题'
+        })
+    created_task_count = 0
+    linked_count = 0
+    task_ids = set()
+    wiki_ids = set()
+    for raw in raws:
+        wiki_ids.add(raw.wiki_id)
+        before = QualityTask.query.filter_by(wiki_id=raw.wiki_id).first()
+        task, created = _quality_create_or_link_task(raw, _quality_raw_priority(raw) or priority)
+        if task:
+            task_ids.add(task.id)
+            if created or before is None:
+                created_task_count += 1
+            linked_count += 1
+    pool.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({
+        'success': True,
+        'created_task_count': created_task_count,
+        'linked_count': linked_count,
+        'wiki_count': len({w for w in wiki_ids if w}),
+        'task_ids': sorted(task_ids),
+        'raw_summary': _quality_raw_summary(pool.id, only_unlinked=True),
+    })
+
+@app.route('/api/quality/raw_issues/<int:raw_id>/ignore', methods=['POST'])
+@login_required
+def quality_ignore_raw_issue_route(raw_id):
+    raw = QualityRawIssue.query.get(raw_id)
+    if not raw:
+        return jsonify({'success': False, 'message': '原始问题不存在'}), 404
+    raw.ignored_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'success': True, 'raw_issue': _quality_raw_to_dict(raw)})
+
+@app.route('/api/quality/tasks', methods=['GET'])
+@login_required
+def quality_tasks_route():
+    page = max(1, int(request.args.get('page', 1) or 1))
+    page_size = max(1, min(200, int(request.args.get('pageSize', 20) or 20)))
+    status = str(request.args.get('status') or '').strip()
+    priority = str(request.args.get('priority') or '').strip().lower()
+    source = _quality_norm_source(request.args.get('source'))
+    pool_id = request.args.get('pool_id')
+    keyword = str(request.args.get('keyword') or '').strip().lower()
+
+    tasks = QualityTask.query.order_by(
+        case(
+            (QualityTask.priority == 'p0', 0),
+            (QualityTask.priority == 'p1', 1),
+            (QualityTask.priority == 'p2', 2),
+            else_=3
+        ),
+        QualityTask.updated_at.desc(),
+        QualityTask.id.desc()
+    ).all()
+    raw_map = _quality_load_task_raw_map(tasks)
+    kb_map = _quality_fetch_kb_items([t.wiki_id for t in tasks], columns='question_wiki_id,question,answer,product_name,update_time')
+    filtered = []
+    for task in tasks:
+        raws = raw_map.get(task.id, [])
+        if status and task.status != status:
+            continue
+        if priority and task.priority != priority:
+            continue
+        if source and not any(r.source_type == source for r in raws):
+            continue
+        if pool_id and str(pool_id).isdigit() and not any(r.pool_id == int(pool_id) for r in raws):
+            continue
+        if keyword:
+            kb_item = kb_map.get(task.wiki_id) or {}
+            hay = ' '.join([
+                task.wiki_id or '',
+                kb_item.get('question') or '',
+                kb_item.get('answer') or '',
+                kb_item.get('product_name') or '',
+                ' '.join([r.issue_text or '' for r in raws]),
+                ' '.join([r.remediation_reference or '' for r in raws]),
+            ]).lower()
+            if keyword not in hay:
+                continue
+        filtered.append(task)
+    summary = {}
+    for task in filtered:
+        summary[task.status] = summary.get(task.status, 0) + 1
+    total = len(filtered)
+    start = (page - 1) * page_size
+    page_tasks = filtered[start:start + page_size]
+    return jsonify({
+        'success': True,
+        'tasks': [
+            _quality_task_to_dict(t, raw_map.get(t.id, []), kb_map.get(t.wiki_id) or {})
+            for t in page_tasks
+        ],
+        'summary': summary,
+        'total': total,
+        'page': page,
+        'pageSize': page_size,
+    })
+
+@app.route('/api/quality/tasks/<int:task_id>', methods=['GET', 'PATCH'])
+@login_required
+def quality_task_detail_route(task_id):
+    task = QualityTask.query.get(task_id)
+    if not task:
+        return jsonify({'success': False, 'message': '任务不存在'}), 404
+    if request.method == 'PATCH':
+        payload = request.get_json(silent=True) or {}
+        if 'priority' in payload:
+            p = str(payload.get('priority') or '').strip().lower()
+            if p in QUALITY_PRIORITY_LABELS:
+                task.priority = p
+        if 'status' in payload:
+            st = str(payload.get('status') or '').strip()
+            if st in QUALITY_STATUS_LABELS:
+                task.status = st
+                if st == 'completed':
+                    task.completed_at = datetime.utcnow()
+                    task.ignored_at = None
+                elif st == 'ignored':
+                    task.ignored_at = datetime.utcnow()
+                elif st == 'processing':
+                    task.completed_at = None
+                    task.ignored_at = None
+                elif st == 'pending':
+                    task.completed_at = None
+                    task.ignored_at = None
+        db.session.commit()
+    raw_map = _quality_load_task_raw_map([task])
+    kb_map = _quality_fetch_kb_items([task.wiki_id])
+    raws = raw_map.get(task.id, [])
+    return jsonify({
+        'success': True,
+        'task': _quality_task_to_dict(task, raws, kb_map.get(task.wiki_id) or {}),
+        'raw_issues': [
+            _quality_raw_to_dict(r, linked_task_id=task.id, pool_name=getattr(r, '_quality_pool_name', None))
+            for r in raws
+        ],
+        'kb_item': kb_map.get(task.wiki_id),
+    })
+
+@app.route('/api/quality/tasks/batch', methods=['POST'])
+@login_required
+def quality_tasks_batch_route():
+    payload = request.get_json(silent=True) or {}
+    ids = payload.get('task_ids') or []
+    action = str(payload.get('action') or '').strip()
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'success': False, 'message': '请选择任务'}), 400
+    tasks = QualityTask.query.filter(QualityTask.id.in_([int(x) for x in ids if str(x).isdigit()])).all()
+    now = datetime.utcnow()
+    changed = 0
+    for task in tasks:
+        if action == 'complete':
+            task.status = 'completed'
+            task.completed_at = now
+            task.ignored_at = None
+            changed += 1
+        elif action == 'ignore':
+            task.status = 'ignored'
+            task.ignored_at = now
+            changed += 1
+        elif action == 'processing':
+            task.status = 'processing'
+            task.completed_at = None
+            task.ignored_at = None
+            changed += 1
+        elif action == 'pending':
+            task.status = 'pending'
+            task.completed_at = None
+            task.ignored_at = None
+            changed += 1
+    if action not in ('complete', 'ignore', 'processing', 'pending'):
+        return jsonify({'success': False, 'message': '未知批量操作'}), 400
+    db.session.commit()
+    return jsonify({'success': True, 'changed': changed})
+
+@app.route('/api/quality/tasks/export', methods=['POST'])
+@login_required
+def quality_tasks_export_route():
+    try:
+        payload = request.get_json(silent=True) or {}
+        ids = payload.get('task_ids') or []
+        query = QualityTask.query
+        if isinstance(ids, list) and ids:
+            query = query.filter(QualityTask.id.in_([int(x) for x in ids if str(x).isdigit()]))
+        tasks = query.order_by(QualityTask.id.desc()).all()
+        raw_map = _quality_load_task_raw_map(tasks)
+        kb_map = _quality_fetch_kb_items([t.wiki_id for t in tasks], columns='question_wiki_id,question,answer,product_name,update_time')
+        rows = []
+        for task in tasks:
+            raws = raw_map.get(task.id, [])
+            item = _quality_task_to_dict(task, raws, kb_map.get(task.wiki_id) or {})
+            rows.append({
+                '任务ID': task.id,
+                'WikiID': task.wiki_id,
+                '问题': item.get('question') or '',
+                '产品型号': item.get('product_name') or '',
+                '优先级': item.get('priority_label') or '',
+                '状态': item.get('status_label') or '',
+                '来源': '、'.join([x.get('source_label') for x in item.get('source_tags') or []]),
+                '任务池': '、'.join(item.get('pool_names') or []),
+                '问题数量': item.get('issue_count') or 0,
+                '建议操作': item.get('suggested_action_text') or '',
+                '问题标签': item.get('issue_tag_text') or '',
+                '知识库更新时间': item.get('kb_update_time') or '',
+                '任务更新时间': item.get('updated_at') or '',
+            })
+        df = pd.DataFrame(rows)
+        output = io.BytesIO()
+        engine = 'xlsxwriter' if importlib.util.find_spec('xlsxwriter') is not None else 'openpyxl'
+        with pd.ExcelWriter(output, engine=engine) as writer:
+            df.to_excel(writer, index=False, sheet_name='管控中心任务')
+        output.seek(0)
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=f'管控中心任务_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': f'导出失败: {str(e)}'}), 500
+
+@app.route('/api/quality/import', methods=['POST'])
+@login_required
+def quality_import_route():
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'success': False, 'message': '请选择导入文件'}), 400
+    target_pool_id = request.form.get('target_pool_id')
+    pool = QualityTaskPool.query.get(int(target_pool_id)) if target_pool_id and str(target_pool_id).isdigit() else None
+    if not pool:
+        pool = QualityTaskPool(
+            name=f"外部检测导入 {datetime.now().strftime('%Y%m%d %H:%M')}",
+            sources_json=_quality_json_dumps(['external']),
+            rule_config_json='{}',
+            field_mapping_json='{}',
+            created_by=_quality_current_user(),
+        )
+        db.session.add(pool)
+        db.session.flush()
+    try:
+        filename = secure_filename(file.filename or 'quality_import')
+        if filename.lower().endswith('.csv'):
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_excel(file)
+        df.columns = [str(c).strip().replace('\ufeff', '') for c in df.columns]
+
+        def _norm_import_col(value):
+            return re.sub(r'[\s_：:]+', '', str(value or '').strip().replace('\ufeff', '')).lower()
+
+        norm_cols = {_norm_import_col(c): c for c in df.columns}
+        mapping = _quality_pool_field_mapping(pool, 'external') if pool else {}
+
+        def _find_import_col(mapping_key, fallback_keys):
+            configured = str((mapping or {}).get(mapping_key) or '').strip()
+            if configured:
+                if configured in df.columns:
+                    return configured
+                configured_norm = _norm_import_col(configured)
+                if configured_norm in norm_cols:
+                    return norm_cols[configured_norm]
+            for key in fallback_keys:
+                nk = _norm_import_col(key)
+                if nk in norm_cols:
+                    return norm_cols[nk]
+            return None
+
+        wiki_col = _find_import_col('wiki_id', ('wikiid', 'questionwikiid', 'kbid', '知识库id', '知识库编号'))
+        issue_col = _find_import_col('issue', ('问题', 'issue', 'problem', '问题描述', '检测问题'))
+        suggestion_col = _find_import_col('action', ('建议操作', '建议', 'suggestion', 'action', '处理建议'))
+        priority_col = _find_import_col('priority', ('优先级', 'priority', 'p级别', '等级'))
+        if not wiki_col or not issue_col:
+            return jsonify({'success': False, 'message': '导入模板至少需要 WikiID、问题 两列'}), 400
+        wiki_ids = []
+        for _, row in df.iterrows():
+            wiki_id = str(row.get(wiki_col) or '').strip()
+            if wiki_id and wiki_id.lower() != 'nan':
+                wiki_ids.append(wiki_id)
+        kb_map = _quality_fetch_kb_items(wiki_ids, columns='question_wiki_id,question,answer,product_name,update_time')
+        success_count = 0
+        failed = []
+        duplicate_append_count = 0
+        for idx, row in df.iterrows():
+            wiki_id = str(row.get(wiki_col) or '').strip()
+            issue_text = str(row.get(issue_col) or '').strip()
+            suggestion = str(row.get(suggestion_col) or '').strip() if suggestion_col else ''
+            priority = str(row.get(priority_col) or '').strip().lower() if priority_col else ''
+            if priority and priority.upper() in ('P0', 'P1', 'P2', 'P3'):
+                priority = priority.lower()
+            if not wiki_id or wiki_id.lower() == 'nan':
+                failed.append({'row': int(idx) + 2, 'wiki_id': wiki_id, 'reason': 'WikiID 为空'})
+                continue
+            if wiki_id not in kb_map:
+                failed.append({'row': int(idx) + 2, 'wiki_id': wiki_id, 'reason': '知识库不存在'})
+                continue
+            if not issue_text or issue_text.lower() == 'nan':
+                failed.append({'row': int(idx) + 2, 'wiki_id': wiki_id, 'reason': '问题为空'})
+                continue
+            row_obj = {}
+            for col in df.columns:
+                val = row.get(col)
+                if pd.isna(val):
+                    val = ''
+                row_obj[col] = val
+            raw_key_hash = hashlib.md5(f"{wiki_id}|{issue_text}|{suggestion}".encode('utf-8')).hexdigest()[:16]
+            snap = dict(row_obj)
+            snap.update(kb_map.get(wiki_id) or {})
+            if priority in QUALITY_PRIORITY_LABELS:
+                snap['priority'] = priority
+            raw, _created = _quality_upsert_raw_issue(pool, {
+                'source_type': 'external',
+                'source_record_key': f"external:{pool.id}:{wiki_id}:{raw_key_hash}",
+                'wiki_id': wiki_id,
+                'issue_text': issue_text,
+                'remediation_reference': suggestion,
+                'snapshot': snap,
+            }, {'import_file': filename})
+            existing_task = QualityTask.query.filter_by(wiki_id=wiki_id).first()
+            if existing_task and raw:
+                duplicate_append_count += 1
+                QualityTaskIssueLink.query.filter_by(task_id=existing_task.id, raw_issue_id=raw.id).first() or db.session.add(QualityTaskIssueLink(
+                    task_id=existing_task.id,
+                    raw_issue_id=raw.id,
+                    pool_id=raw.pool_id,
+                    source_type='external',
+                ))
+            success_count += 1
+        job = QualityImportJob(
+            file_name=filename,
+            target_pool_id=pool.id,
+            total_count=len(df.index),
+            success_count=success_count,
+            failed_count=len(failed),
+            duplicate_append_count=duplicate_append_count,
+            failed_detail_json=_quality_json_dumps(failed),
+            created_by=_quality_current_user(),
+        )
+        db.session.add(job)
+        pool.updated_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'pool': _quality_pool_to_dict(pool),
+            'job': {
+                'id': job.id,
+                'file_name': job.file_name,
+                'total_count': job.total_count,
+                'success_count': job.success_count,
+                'failed_count': job.failed_count,
+                'duplicate_append_count': job.duplicate_append_count,
+                'failed_detail': failed,
+                'created_at': _dt_to_iso(job.created_at),
+            }
+        })
+    except Exception as e:
+        db.session.rollback()
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 # Supabase Client Helper
@@ -9452,7 +11622,7 @@ def kb_import():
             invalid_rows = []
             
             for idx, row in df.iterrows():
-                p_name = str(row['product_name']) if pd.notna(row['product_name']) else ""
+                p_name = "" if _is_blank_cell_value(row['product_name']) else str(row['product_name'])
                 if p_name.strip():
                     valid, invalid = validate_product_string(p_name, valid_map, valid_set)
                     
@@ -9595,7 +11765,7 @@ def kb_import():
             # 2. if_bm25: 0->False, 1->True, Empty->False
             if 'if_bm25' in record:
                 val = record['if_bm25']
-                if pd.isna(val) or val == "" or str(val).lower() == 'nan':
+                if _is_blank_cell_value(val):
                     record['if_bm25'] = False
                 else:
                     str_val = str(val).strip().lower()
@@ -9612,7 +11782,7 @@ def kb_import():
             if 'update_time' in record:
                 if isinstance(record['update_time'], datetime):
                     record['update_time'] = record['update_time'].isoformat()
-                elif pd.isna(record['update_time']):
+                elif _is_blank_cell_value(record['update_time']):
                      del record['update_time']
             
             if 'link_url' in record:
@@ -9633,7 +11803,7 @@ def kb_import():
             # Recursively clean NaN
             cleaned_record = clean_nan(record)
             if isinstance(cleaned_record, dict):
-                allow = {
+                allow = [
                     'question_wiki_id',
                     'question_type',
                     'question',
@@ -9651,7 +11821,7 @@ def kb_import():
                     'update_time',
                     'product_category_name',
                     'product_name'
-                }
+                ]
                 cleaned_record = {k: cleaned_record.get(k) for k in allow if k in cleaned_record}
             
             # Remove question_wiki_id if it is None/Empty to allow auto-increment (if supported)
@@ -9691,6 +11861,49 @@ def kb_import():
         pre_t1_sync_note = None
         score_backup_path = None
         score_backup_rows = []
+        delete_missing_requested = (
+            mode != 'overwrite'
+            and str(request.form.get('delete_missing') or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        )
+        delete_missing_ids = []
+        delete_missing_result = None
+
+        if delete_missing_requested:
+            if not file_ids_all:
+                return jsonify({
+                    'success': False,
+                    'message': '启用“同步删除缺失 ID”时，导入文件必须包含至少一个有效 ID。'
+                }), 400
+            delete_missing_ids = _get_v1_ids_missing_from_file(client, file_ids_all)
+            expected_delete_missing = request.form.get('expected_delete_missing_count')
+            if expected_delete_missing is not None:
+                try:
+                    if int(expected_delete_missing) != len(delete_missing_ids):
+                        return jsonify({
+                            'success': False,
+                            'requires_confirmation': True,
+                            'confirmation_type': 'delete_missing',
+                            'message': f'缺失 ID 删除数量已变化（确认时 {expected_delete_missing} 条，当前 {len(delete_missing_ids)} 条），请重新确认。',
+                            'preview': {
+                                'delete_missing_count': len(delete_missing_ids),
+                                'delete_missing_sample_ids': delete_missing_ids[:20]
+                            }
+                        }), 409
+                except Exception:
+                    return jsonify({'success': False, 'message': 'expected_delete_missing_count 必须为数字'}), 400
+
+            confirm_delete_missing = str(request.form.get('confirm_delete_missing') or '').strip().lower() in ('1', 'true', 'yes', 'y')
+            if delete_missing_ids and not confirm_delete_missing:
+                return jsonify({
+                    'success': False,
+                    'requires_confirmation': True,
+                    'confirmation_type': 'delete_missing',
+                    'message': '同步删除缺失 ID 会把当前 V1 中存在、但导入文件 ID 列未包含的记录直接物理删除。请确认后继续。',
+                    'preview': {
+                        'delete_missing_count': len(delete_missing_ids),
+                        'delete_missing_sample_ids': delete_missing_ids[:20]
+                    }
+                }), 409
 
         if mode == 'overwrite':
             current_count = _client_count(client, 'knowledge_base_v1')
@@ -9899,8 +12112,8 @@ def kb_import():
         if mode in ['upsert', 'append'] and file_ids:
             for i in range(0, len(file_ids), 50):
                 batch_ids = file_ids[i:i+50]
-                batch_str = ",".join(batch_ids)
-                resp = client.select('knowledge_base_v1', page=1, page_size=len(batch_ids), filters={'question_wiki_id': f"in.({batch_str})"})
+                id_filter = _postgrest_in_str(batch_ids)
+                resp = client.select('knowledge_base_v1', page=1, page_size=len(batch_ids), filters={'question_wiki_id': id_filter})
                 if resp.status_code in (200, 206):
                     data = resp.json()
                     for row in data:
@@ -9924,7 +12137,7 @@ def kb_import():
             elif mode == 'overwrite':
                 resp = client.insert('knowledge_base_v1', batch)
             else:
-                resp = client.upsert('knowledge_base_v1', batch)
+                resp = client.upsert('knowledge_base_v1', batch, on_conflict='question_wiki_id')
                 if resp.status_code < 400:
                     batch_ids = [str(r.get('question_wiki_id')) for r in batch if r.get('question_wiki_id')]
                     added_this_batch = [id for id in batch_ids if id not in existing_ids]
@@ -9949,12 +12162,12 @@ def kb_import():
         if affected_ids:
             for i in range(0, len(affected_ids), 100):
                 batch_ids = affected_ids[i:i+100]
-                id_str = ",".join(batch_ids)
+                id_filter = _postgrest_in_str(batch_ids)
                 try:
                     _ = client.update(
                         'knowledge_base_v1',
                         {'review_status': 'unadjusted'},
-                        {'question_wiki_id': f'in.({id_str})'}
+                        {'question_wiki_id': id_filter}
                     )
                 except Exception as _e:
                     print(f"WARN: failed to reset review_status for ids batch {i//100}: {_e}")
@@ -9977,12 +12190,28 @@ def kb_import():
                 'restore': restore_info,
                 'score_backup_path': score_backup_path
             }), 500
-            
+
+        if delete_missing_ids:
+            delete_missing_result = _delete_kb_items_physical(client, delete_missing_ids)
+            if not delete_missing_result.get('success'):
+                return jsonify({
+                    'success': False,
+                    'message': delete_missing_result.get('message') or '导入已执行，但物理删除缺失 ID 失败。',
+                    'count': total_inserted,
+                    'stats': stats,
+                    'details': details,
+                    'delete_missing': delete_missing_result
+                }), 500
+            stats['deleted'] = delete_missing_result.get('count', 0)
+            details['deleted_ids'] = delete_missing_result.get('ids', [])
+
         out = {'success': True, 'count': total_inserted, 'stats': stats, 'mode': mode, 'details': details}
         if pre_t1_sync_note:
             out['pre_sync_v1_to_t1'] = pre_t1_sync_note
         if score_backup_path:
             out['score_backup_path'] = score_backup_path
+        if delete_missing_result is not None:
+            out['delete_missing'] = delete_missing_result
         return jsonify(out)
 
     except Exception as e:
@@ -10016,12 +12245,10 @@ def kb_import_preview():
         if 'question_wiki_id' in df.columns:
             seen = set()
             for raw in df['question_wiki_id'].tolist():
-                if pd.isna(raw) or str(raw).strip() == '':
+                s = _normalize_kb_import_id(raw)
+                if not s:
                     missing_id_count += 1
                     continue
-                s = str(raw).strip()
-                if s.endswith('.0'):
-                    s = s[:-2]
                 if s in seen:
                     duplicate_id_count += 1
                 seen.add(s)
@@ -10029,11 +12256,21 @@ def kb_import_preview():
         else:
             missing_id_count = total_rows
 
+        delete_missing_requested = str(request.form.get('delete_missing') or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        delete_missing_ids = []
+        delete_missing_blocked = False
+        if delete_missing_requested:
+            if file_ids:
+                delete_missing_ids = _get_v1_ids_missing_from_file(client, file_ids)
+            else:
+                delete_missing_blocked = True
+
         invalid_rows = []
         if 'product_name' in df.columns:
             valid_map, valid_set = get_all_valid_models()
             for idx, row in df.iterrows():
-                p_name = str(row.get('product_name') or '') if pd.notna(row.get('product_name')) else ''
+                product_value = row.get('product_name')
+                p_name = '' if _is_blank_cell_value(product_value) else str(product_value)
                 if p_name.strip():
                     _, invalid = validate_product_string(p_name, valid_map, valid_set)
                     if invalid:
@@ -10056,7 +12293,10 @@ def kb_import_preview():
                 'invalid_model_count': len(invalid_rows),
                 'invalid_rows': invalid_rows[:20],
                 'current_v1_count': current_count,
-                'score_count': score_count
+                'score_count': score_count,
+                'delete_missing_count': len(delete_missing_ids),
+                'delete_missing_sample_ids': delete_missing_ids[:20],
+                'delete_missing_blocked': delete_missing_blocked
             }
         })
     except Exception as e:
@@ -10093,28 +12333,33 @@ def kb_check_duplicates():
         raw_ids = df['question_wiki_id'].dropna().unique().tolist()
         file_ids = []
         for x in raw_ids:
-            s = str(x).strip()
+            s = _normalize_kb_import_id(x)
             if s:
-                # Handle numeric IDs coming as float (e.g. 123.0)
-                if s.endswith('.0'):
-                    s = s[:-2]
                 file_ids.append(s)
         
+        delete_missing_requested = str(request.form.get('delete_missing') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         if not file_ids:
-            return jsonify({'success': True, 'report': [], 'message': '未提取到有效的ID，请检查Excel文件ID列内容'}) # No IDs to check
+            return jsonify({
+                'success': True,
+                'report': [],
+                'message': '未提取到有效的ID，请检查Excel文件ID列内容',
+                'duplicates_count': 0,
+                'new_count': 0,
+                'error_count': 0,
+                'delete_missing_count': 0,
+                'delete_missing_sample_ids': [],
+                'delete_missing_blocked': delete_missing_requested
+            }) # No IDs to check
+
+        delete_missing_ids = _get_v1_ids_missing_from_file(client, file_ids) if delete_missing_requested else []
 
         # Query DB for these IDs
         existing_records = {}
         batch_size = 50 # Smaller batch for string IDs
         for i in range(0, len(file_ids), batch_size):
             batch_ids = file_ids[i:i+batch_size]
-            # Format IDs for Supabase 'in' filter: in.(id1,id2,...)
-            # If IDs are strings, they should be quoted or just comma separated depending on Supabase version
-            # Usually for alphanumeric, simple comma separation works if no internal commas
-            batch_str = ",".join(map(str, batch_ids))
-            
-            # Use manual client select with 'in' filter
-            resp = client.select('knowledge_base_v1', page=1, page_size=len(batch_ids), filters={'question_wiki_id': f"in.({batch_str})"})
+            id_filter = _postgrest_in_str(batch_ids)
+            resp = client.select('knowledge_base_v1', page=1, page_size=len(batch_ids), filters={'question_wiki_id': id_filter})
             
             if resp.status_code in (200, 206):
                 data = resp.json()
@@ -10129,13 +12374,11 @@ def kb_check_duplicates():
         records = df.to_dict(orient='records')
         
         for record in records:
-            if 'question_wiki_id' not in record or pd.isna(record['question_wiki_id']):
+            if 'question_wiki_id' not in record or not _normalize_kb_import_id(record['question_wiki_id']):
                 continue
                 
             # Normalize ID to string for comparison
-            wiki_id = str(record['question_wiki_id']).strip()
-            if wiki_id.endswith('.0'):
-                wiki_id = wiki_id[:-2]
+            wiki_id = _normalize_kb_import_id(record['question_wiki_id'])
             
             if wiki_id not in existing_records:
                 # Check for invalid models even for new records
@@ -10167,11 +12410,19 @@ def kb_check_duplicates():
                 ]
                 
                 def normalize_val(v, field_name=None):
-                    if pd.isna(v) or v is None:
-                        return ""
-                    s = str(v).strip() # Only strip outer whitespace
+                    def is_blank_scalar(value):
+                        if value is None:
+                            return True
+                        if isinstance(value, (list, tuple, set, dict)):
+                            return False
+                        try:
+                            return bool(pd.isna(value))
+                        except (TypeError, ValueError):
+                            return False
 
                     if field_name in ('similar_questions', 'error_list', 'keyword_list', 'image_urls', 'video_urls', 'file_urls'):
+                        if is_blank_scalar(v):
+                            return ""
                         if isinstance(v, list):
                             parts = v
                         else:
@@ -10193,6 +12444,10 @@ def kb_check_duplicates():
                             norm_parts.append(t.lower())
                         norm_parts = sorted(list(dict.fromkeys(norm_parts)))
                         return "|".join(norm_parts)
+
+                    if is_blank_scalar(v):
+                        return ""
+                    s = str(v).strip() # Only strip outer whitespace
 
                     if field_name == 'if_bm25':
                         if isinstance(v, bool):
@@ -10258,7 +12513,9 @@ def kb_check_duplicates():
             'report': report,
             'duplicates_count': duplicates_count,
             'new_count': new_count,
-            'error_count': error_count
+            'error_count': error_count,
+            'delete_missing_count': len(delete_missing_ids),
+            'delete_missing_sample_ids': delete_missing_ids[:20]
         })
 
     except Exception as e:
@@ -10377,7 +12634,7 @@ def kb_item_upsert():
         # Perform Upsert
         # Note: data must contain primary key for upsert to update. 
         # If question_wiki_id is missing, Supabase might insert new if it's auto-generated, or fail.
-        resp = client.upsert('knowledge_base_v1', [data])
+        resp = client.upsert('knowledge_base_v1', [data], on_conflict='question_wiki_id')
         
         if resp.status_code >= 400:
              return jsonify({'success': False, 'message': resp.text}), 500

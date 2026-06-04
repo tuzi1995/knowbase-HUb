@@ -126,6 +126,20 @@ def _summarize(rows):
     return counts
 
 
+def _preview_rows(rows, limit=3):
+    preview = []
+    for row in rows[:limit]:
+        preview.append(
+            {
+                "kb_id": row.get("kb_id"),
+                "status": row.get("status"),
+                "total_score": row.get("total_score"),
+                "updated_at": row.get("updated_at"),
+            }
+        )
+    return preview
+
+
 def _write_remote_importer(path: Path):
     path.write_text(
         textwrap.dedent(
@@ -154,6 +168,7 @@ def _write_remote_importer(path: Path):
                 payload = json.loads(payload_path.read_text(encoding="utf-8"))
                 rows = payload.get("rows") or []
 
+                sys.path.insert(0, str(Path.cwd()))
                 from server import app, get_supabase_client, init_db
 
                 with app.app_context():
@@ -200,6 +215,7 @@ def _write_remote_importer(path: Path):
                     after = client.select_all("kb_scores", columns="kb_id,status", order_by="kb_id", order_dir="asc", page_size=1000)
                     print(f"REMOTE_AFTER={len(after)}")
                     print(f"SYNC_WRITTEN={written}")
+                    print(f"SYNC_TABLE=kb_scores")
                     return 0
 
 
@@ -234,6 +250,7 @@ def main():
     summary = _summarize(rows)
     print(f"LOCAL_KB_SCORES={len(rows)}")
     print(f"LOCAL_STATUS_COUNTS={json.dumps(summary, ensure_ascii=False, sort_keys=True)}")
+    print(f"LOCAL_PREVIEW={json.dumps(_preview_rows(rows), ensure_ascii=False, default=_json_default)}")
 
     if args.dry_run:
         print("DRY_RUN=1")
@@ -287,7 +304,7 @@ def main():
         if not args.keep_remote_files:
             remote_cmd += f"\nrm -f {remote_tmp_cmd}/kb_scores_payload.json {remote_tmp_cmd}/import_kb_scores_payload.py"
 
-        _run(["ssh", *ssh_opts, ssh_target, "bash", "-lc", remote_cmd], label="ssh remote import kb_scores")
+        _run(["ssh", *ssh_opts, ssh_target, f"bash -lc {shlex.quote(remote_cmd)}"], label="ssh remote import kb_scores")
 
     print("SYNC_DONE=1")
     return 0

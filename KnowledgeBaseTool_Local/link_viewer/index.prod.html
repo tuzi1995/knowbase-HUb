@@ -390,6 +390,7 @@
                 <div class="workbench-nav-group-title">质量管控</div>
                 <button onclick="switchTab('scoringView')" class="tab-modern workbench-nav-btn" id="tab-scoringView">知识库评分</button>
                 <button onclick="switchTab('governanceView')" class="tab-modern workbench-nav-btn" id="tab-governanceView">知识库治理</button>
+                <button onclick="switchTab('controlCenterView')" class="tab-modern workbench-nav-btn" id="tab-controlCenterView">管控中心</button>
               </div>
 
               <div class="workbench-nav-group" data-nav-group="工具与映射">
@@ -461,14 +462,20 @@
                     <button onclick="document.getElementById('importKBPanel').classList.add('d-none')" class="btn-ghost" style="padding: 4px; min-height: auto; border: none; background: transparent; cursor: pointer; font-size: 16px;">✖</button>
                 </div>
                 <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">
-                    <div>
-                        <div style="margin-bottom: 8px; font-size: 13px; font-weight: 600;">导入模式:</div>
-                        <div style="display: flex; gap: 16px;">
-                            <label class="radio-label"><input type="radio" name="importMode" value="upsert" checked> 增量更新</label>
-                            <label class="radio-label"><input type="radio" name="importMode" value="append"> 批量新增</label>
-                            <label class="radio-label"><input type="radio" name="importMode" value="overwrite"> <span class="text-danger">全量覆盖</span></label>
-                        </div>
-                    </div>
+	                    <div>
+	                        <div style="margin-bottom: 8px; font-size: 13px; font-weight: 600;">导入模式:</div>
+	                        <div style="display: flex; gap: 16px;">
+	                            <label class="radio-label"><input type="radio" name="importMode" value="upsert" checked> 增量更新</label>
+	                            <label class="radio-label"><input type="radio" name="importMode" value="append"> 批量新增</label>
+	                            <label class="radio-label"><input type="radio" name="importMode" value="overwrite"> <span class="text-danger">全量覆盖</span></label>
+	                        </div>
+	                        <label class="radio-label" style="display: inline-flex; margin-top: 10px;">
+	                            <input type="checkbox" id="deleteMissingIds"> 同步删除缺失 ID
+	                        </label>
+	                        <div class="text-muted" style="font-size: 12px; margin-top: 4px; max-width: 460px;">
+	                            V1 中存在、但导入文件 ID 列未包含的记录，会在二次确认后从 V1 直接物理删除。
+	                        </div>
+	                    </div>
                     <div>
                         <div style="margin-bottom: 8px; font-size: 13px; font-weight: 600;">选择 Excel 文件:</div>
                         <div style="display: flex; gap: 8px; align-items: center;">
@@ -872,64 +879,91 @@
       <div id="scoringView" class="d-none">
           <!-- Modals (Moved to end of file to avoid ID conflicts) -->
           
-          <div class="kb-section">
-            <div class="kb-toolbar scoring-toolbar-row">
-                <div class="flex-center gap-10 scoring-fixed-group">
-                    <button id="syncScoringBtn" onclick="syncScoringData()" class="action-btn btn-secondary-outline" title="从V1库同步数据到评分表">🔄 同步此刻库</button>
-                    <div class="divider-vertical"></div>
-                    <span>随机抽样:</span>
-                    <button onclick="sampleScoring(10)" class="action-btn btn-secondary-outline">10条</button>
-                    <button onclick="sampleScoring(50)" class="action-btn btn-secondary-outline">50条</button>
-                    <button onclick="sampleScoring(100)" class="action-btn btn-secondary-outline">100条</button>
-                </div>
-                
-                <div class="divider-vertical"></div>
+	          <div class="kb-section scoring-page-shell">
+	            <div class="scoring-control-panel">
+	                <div class="scoring-command-row">
+	                    <div class="scoring-command-group scoring-command-group-main">
+	                        <button id="syncScoringBtn" onclick="syncScoringData()" class="action-btn btn-secondary-outline scoring-icon-btn" title="从V1库同步数据到评分表"><i class="fas fa-sync-alt"></i><span>同步此刻库</span></button>
+	                        <span class="scoring-command-label">抽样</span>
+	                        <button onclick="sampleScoring(10)" class="action-btn btn-secondary-outline scoring-chip-btn">10条</button>
+	                        <button onclick="sampleScoring(50)" class="action-btn btn-secondary-outline scoring-chip-btn">50条</button>
+	                        <button onclick="sampleScoring(100)" class="action-btn btn-secondary-outline scoring-chip-btn">100条</button>
+	                    </div>
+	                    <div class="scoring-command-group scoring-command-group-config">
+	                        <button onclick="openApiConfigModal()" class="action-btn btn-secondary-outline scoring-icon-btn"><i class="fas fa-cog"></i><span>API 配置</span></button>
+	                        <button onclick="openOpsLibraryModal()" class="action-btn btn-secondary-outline scoring-icon-btn"><i class="fas fa-book"></i><span>操作库</span></button>
+	                        <button onclick="openScoringCriteriaModal()" class="action-btn btn-secondary-outline scoring-icon-btn"><i class="fas fa-ruler-combined"></i><span>评分标准</span></button>
+	                    </div>
+	                </div>
 
-                <div class="flex-center gap-10 scoring-fixed-group">
-                    <button onclick="openApiConfigModal()" class="action-btn btn-secondary-outline">⚙️ API 配置</button>
-                    <button onclick="openOpsLibraryModal()" class="action-btn btn-secondary-outline">📚 操作库管理</button>
-                    <button onclick="openScoringCriteriaModal()" class="action-btn btn-secondary-outline">📏 评分标准</button>
-                </div>
+	                <div class="scoring-filter-grid">
+	                    <label class="scoring-filter-field scoring-filter-id">
+	                        <span>ID</span>
+	                        <input type="text" id="scoreSearchId" placeholder="ICWIKI..." class="scoring-input-id input-modern">
+	                    </label>
+	                    <label class="scoring-filter-field scoring-filter-product">
+	                        <span>产品</span>
+	                        <input type="text" id="scoreSearchProduct" placeholder="产品 / 型号" class="scoring-input-product input-modern">
+	                    </label>
+	                    <label class="scoring-filter-field scoring-filter-question">
+	                        <span>问题</span>
+	                        <input type="text" id="scoreSearchQuestion" placeholder="输入关键词" class="scoring-input-question input-modern">
+	                    </label>
+	                    <label class="scoring-filter-field scoring-filter-status">
+	                        <span>状态</span>
+	                        <select id="scoreSearchStatus" class="form-select scoring-status-select">
+	                            <option value="">所有状态</option>
+	                            <option value="unscored">未评分</option>
+	                            <option value="scored">已评分</option>
+	                            <option value="scoring">评分中</option>
+	                            <option value="outdated">已过期</option>
+	                        </select>
+	                    </label>
+	                    <div class="scoring-filter-field scoring-filter-score-range">
+	                        <span>总分</span>
+	                        <div class="scoring-score-range">
+	                            <input type="number" id="scoreSearchMinTotal" min="0" max="110" step="1" placeholder="下限" class="scoring-score-input input-modern">
+	                            <span class="scoring-range-divider">-</span>
+	                            <input type="number" id="scoreSearchMaxTotal" min="0" max="110" step="1" placeholder="上限" class="scoring-score-input input-modern">
+	                        </div>
+	                    </div>
+	                    <div class="scoring-filter-actions">
+	                        <button onclick="scoringPage=1; renderScoringTable(true)" class="primary-btn nowrap-btn scoring-icon-btn"><i class="fas fa-search"></i><span>筛选</span></button>
+	                        <button onclick="resetScoringFilter()" class="action-btn nowrap-btn scoring-icon-btn"><i class="fas fa-undo"></i><span>重置</span></button>
+	                        <button id="refreshScoringBtn" onclick="loadScoringData()" class="action-btn nowrap-btn scoring-icon-btn"><i class="fas fa-redo-alt"></i><span>刷新</span></button>
+	                    </div>
+	                </div>
+	            </div>
 
-                <div class="divider-vertical"></div>
-                
-                <div class="search-group flex-grow scoring-search-group">
-                    <input type="text" id="scoreSearchId" placeholder="ID..." class="scoring-input-id input-modern">
-                    <input type="text" id="scoreSearchProduct" placeholder="产品..." class="scoring-input-product input-modern">
-                    <input type="text" id="scoreSearchQuestion" placeholder="问题..." class="flex-grow scoring-input-question input-modern">
-                </div>
-            </div>
+	            <div class="scoring-action-strip">
+	                 <span id="scoringStats" class="scoring-stats">加载中...</span>
+	                 <div class="scoring-run-actions">
+	                     <label class="scoring-inline-check">
+	                        <input type="checkbox" id="useCacheCb" class="scoring-inline-check-input" checked> 使用缓存
+	                     </label>
+	                     <button onclick="clearScoringCache()" class="action-btn btn-secondary-outline danger-outline-btn scoring-icon-btn"><i class="fas fa-trash-alt"></i><span>清空缓存</span></button>
+	                     <button id="batchScoreBtn" onclick="batchEvaluateSelected()" class="primary-btn btn-primary-gradient scoring-icon-btn"><i class="fas fa-magic"></i><span>批量评分</span></button>
+	                     <button id="evaluateAllBtn" onclick="evaluateAll()" class="success-btn btn-success-solid scoring-icon-btn"><i class="fas fa-bolt"></i><span>评分未缓存项</span></button>
+	                     <button id="pauseScoringBtn" onclick="pauseScoring()" class="action-btn btn-secondary-outline scoring-icon-btn" disabled><i class="fas fa-pause"></i><span>暂停</span></button>
+	                     <button id="resumeScoringBtn" onclick="resumeScoring()" class="action-btn btn-secondary-outline scoring-icon-btn" disabled><i class="fas fa-play"></i><span>继续</span></button>
+	                     <button onclick="exportScores()" class="action-btn btn-secondary-outline scoring-icon-btn"><i class="fas fa-file-export"></i><span>导出</span></button>
+	                 </div>
+	            </div>
 
-            <div class="kb-toolbar scoring-toolbar-row scoring-toolbar-row-tight">
-                <div class="search-group flex-grow scoring-search-group scoring-search-group-right">
-                    <select id="scoreSearchStatus" class="form-select scoring-status-select">
-                        <option value="">所有状态</option>
-                        <option value="unscored">未评分</option>
-                        <option value="scored">已评分</option>
-                        <option value="scoring">评分中</option>
-                        <option value="outdated">已过期</option>
-                    </select>
-                    <button onclick="scoringPage=1; renderScoringTable(true)" class="primary-btn nowrap-btn">🔍 筛选</button>
-                    <button onclick="resetScoringFilter()" class="action-btn nowrap-btn">🔄 重置</button>
-                    <button id="refreshScoringBtn" onclick="loadScoringData()" class="action-btn nowrap-btn">🔄 刷新</button>
-                </div>
-            </div>
-
-            <div class="action-bar mt-10 mb-10">
-                 <span id="scoringStats" class="text-muted text-sm mr-auto">加载中...</span>
-                 <label class="mr-10 scoring-inline-check">
-                    <input type="checkbox" id="useCacheCb" class="scoring-inline-check-input" checked> 使用缓存
-                 </label>
-                 <button onclick="clearScoringCache()" class="action-btn btn-secondary-outline danger-outline-btn">🗑️ 清空评分缓存</button>
-                 <button id="batchScoreBtn" onclick="batchEvaluateSelected()" class="primary-btn btn-primary-gradient">🤖 批量评分选中项</button>
-                 <button id="evaluateAllBtn" onclick="evaluateAll()" class="success-btn btn-success-solid">评分未缓存项</button>
-                 <button id="pauseScoringBtn" onclick="pauseScoring()" class="action-btn btn-secondary-outline" disabled>⏸️ 暂停评分</button>
-                 <button id="resumeScoringBtn" onclick="resumeScoring()" class="action-btn btn-secondary-outline" disabled>▶️ 继续评分</button>
-                 <button onclick="exportScores()" class="action-btn btn-secondary-outline">📤 导出评分</button>
-            </div>
-
-            <div id="scoringTableContainer" class="table-container min-h-400 mb-0">
+	            <div id="scoringTableContainer" class="table-container min-h-400 mb-0 scoring-table-wrap">
                 <table class="kb-table" id="scoringTable">
+                    <colgroup>
+                        <col class="col-check">
+                        <col class="col-id">
+                        <col class="col-product">
+                        <col class="col-question">
+                        <col class="col-answer">
+                        <col class="col-score-breakdown">
+                        <col class="col-score-total">
+                        <col class="col-result">
+                        <col class="col-status">
+                        <col class="col-action">
+                    </colgroup>
                     <thead>
                         <tr>
                             <th class="col-check"><input type="checkbox" id="selectAllScoring" onchange="toggleSelectAllScoring()"></th>
@@ -937,21 +971,15 @@
                             <th class="col-product">产品</th>
                             <th class="col-question">问题</th>
                             <th class="col-answer">答案</th>
-                            <th title="问题质量(10)" class="col-score-quality">质量</th>
-                            <th title="答案合规(30)" class="col-score-compliance">合规</th>
-                            <th title="时效性(20)" class="col-score-timeliness">时效</th>
-                            <th title="解决力(30)" class="col-score-utility">解决</th>
-                            <th title="非冗余(10)" class="col-score-redundancy">非冗余</th>
-                            <th title="多媒体(加分)" class="col-score-multimedia">多媒体</th>
+                            <th title="质量 / 合规 / 时效 / 解决 / 非冗余 / 多媒体" class="col-score-breakdown">维度</th>
                             <th class="col-score-total">总分</th>
-                            <th class="col-remarks">建议</th>
-                            <th class="col-analysis">分析</th>
+                            <th class="col-result">结论</th>
                             <th class="col-status">状态</th>
                             <th class="col-action">操作</th>
                         </tr>
                     </thead>
                     <tbody id="scoringTableBody">
-                        <tr><td colspan="16" class="empty-message">请点击“刷新列表”或“同步 V1 库”加载数据</td></tr>
+                        <tr><td colspan="10" class="empty-message">请点击“刷新列表”或“同步 V1 库”加载数据</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1218,6 +1246,18 @@
                     <button onclick="deleteSelectedGovItems()" id="btnDeleteSelectedGov" class="danger-btn d-none">批量删除</button>
                     <button onclick="downloadGovernanceTemplate()" class="action-btn">📄 下载导入模板</button>
                     <button onclick="openGovImportModal()" class="primary-btn">📥 导入召回数据</button>
+                    <div class="gov-toolbar-dashboard">
+                        <label class="form-label gov-inline-label">大盘统计筛选:</label>
+                        <select id="govDashboardStartMonth" class="form-select w-150" onchange="saveGovDashboardRangeFromControls()">
+                            <option value="">起始月份</option>
+                        </select>
+                        <span>至</span>
+                        <select id="govDashboardEndMonth" class="form-select w-150" onchange="saveGovDashboardRangeFromControls()">
+                            <option value="">结束月份</option>
+                        </select>
+                        <span class="gov-dashboard-mode">计算模式：周期加权</span>
+                        <button onclick="loadGovDashboardData()" class="action-btn">刷新大盘</button>
+                    </div>
                 </div>
             </div>
             
@@ -1227,27 +1267,35 @@
 
             <!-- Filter Section -->
             <div class="gov-filter-panel">
-                <div id="govAdvancedSummary" class="gov-advanced-summary">
-                    <strong>当前已启用：</strong> 未启用按月高级条件
-                </div>
                 <div class="gov-filter-row gov-filter-row-basic">
+                    <div id="govAdvancedSummary" class="gov-advanced-summary">
+                        <strong>当前已启用：</strong> 未启用按月高级条件
+                    </div>
                     <div class="gov-filter-field gov-filter-field-id">
-                        <label for="govFilterId">WikiID / 问题ID</label>
+	                        <label for="govFilterId">问题 ID</label>
                         <input type="text" id="govFilterId" placeholder="WikiID / 问题ID" class="form-control">
                     </div>
                     <div class="gov-filter-field gov-filter-field-question">
                         <label for="govFilterQuestion">问题关键词</label>
                         <input type="text" id="govFilterQuestion" placeholder="问题关键词搜索... (支持模糊匹配)" class="form-control">
                     </div>
-                    <div class="gov-filter-field gov-filter-field-status">
-                        <label for="govFilterStatus">状态</label>
-                        <select id="govFilterStatus" class="form-select">
-                            <option value="">全部</option>
-                            <option value="使用中">使用中</option>
-                            <option value="主库不存在">主库不存在</option>
-                        </select>
-                    </div>
-                </div>
+	                    <div class="gov-filter-field gov-filter-field-status">
+	                        <label for="govFilterStatus">状态</label>
+	                        <select id="govFilterStatus" class="form-select">
+	                            <option value="">全部</option>
+	                            <option value="使用中">使用中</option>
+	                            <option value="主库不存在">主库不存在</option>
+	                        </select>
+	                    </div>
+	                    <div class="gov-filter-actions">
+	                        <div class="gov-filter-btn-group">
+	                            <button onclick="applyGovFilter()" class="primary-btn btn-primary-gradient">筛选</button>
+	                            <button onclick="resetGovFilter()" class="action-btn btn-secondary-outline">重置</button>
+	                            <button onclick="exportGovernanceFilteredExcel()" id="govExportBtn" class="action-btn btn-secondary-outline" type="button">导出 Excel</button>
+	                            <button onclick="toggleGovAdvancedBar()" id="govAdvancedToggleBtn" class="action-btn btn-secondary-outline" type="button">高级条件 ▼</button>
+	                        </div>
+	                    </div>
+	                </div>
 
                 <div id="govAdvancedInlineBar" class="gov-filter-row gov-filter-row-advanced d-none">
                     <div class="gov-range-cluster">
@@ -1267,17 +1315,9 @@
                     <button onclick="openGovAdvancedFilterModal()" class="gov-inline-link-btn" type="button">按月高级条件</button>
                 </div>
 
-                <div class="gov-filter-actions">
-                    <div class="gov-filter-btn-group">
-                        <button onclick="applyGovFilter()" class="primary-btn btn-primary-gradient">筛选</button>
-                        <button onclick="resetGovFilter()" class="action-btn btn-secondary-outline">重置</button>
-                        <button onclick="exportGovernanceFilteredExcel()" id="govExportBtn" class="action-btn btn-secondary-outline" type="button">导出 Excel</button>
-                        <button onclick="toggleGovAdvancedBar()" id="govAdvancedToggleBtn" class="action-btn btn-secondary-outline" type="button">高级条件 ▼</button>
-                    </div>
-                </div>
-            </div>
+	            </div>
             
-            <div class="table-container min-h-200 mb-0">
+            <div id="govTableContainer" class="table-container min-h-200 mb-0 governance-table-wrap">
                 <table class="kb-table" id="govTable">
                     <thead id="govThead">
                         <tr>
@@ -1302,7 +1342,7 @@
                 <div class="pagination-left">
                     <div class="page-size-wrapper">
                         <span class="page-size-label">每页显示：</span>
-                        <select id="govPageSizeSelect" onchange="changeGovPageSize()" class="page-size-select">
+                        <select id="govPageSizeSelect" onchange="changeGovPageSize()" class="page-size-select input-modern input-sm">
                             <option value="10">10</option>
                             <option value="20" selected>20</option>
                             <option value="50">50</option>
@@ -1311,11 +1351,261 @@
                 </div>
                 <div class="pagination-right">
                     <span id="govPageInfo" class="page-info">共 0 条</span>
-                    <button onclick="changeGovPage(-1)" id="prevGovPageBtn" disabled class="pagination-btn">上一页</button>
-                    <button onclick="changeGovPage(1)" id="nextGovPageBtn" disabled class="pagination-btn">下一页</button>
+                    <button onclick="changeGovPage(-1)" id="prevGovPageBtn" disabled class="pagination-btn btn-pagination-modern">上一页</button>
+                    <button onclick="changeGovPage(1)" id="nextGovPageBtn" disabled class="pagination-btn btn-pagination-modern">下一页</button>
                 </div>
             </div>
           </div>
+      </div>
+
+      <!-- Tab Content: Quality Control Center -->
+      <div id="controlCenterView" class="d-none">
+        <div class="kb-section qc-section">
+          <div class="qc-summary-panel">
+            <div class="qc-metric">
+              <span>任务池</span>
+              <strong id="qcMetricPools">0</strong>
+            </div>
+            <div class="qc-metric">
+              <span>待处理</span>
+              <strong id="qcMetricPending">0</strong>
+            </div>
+            <div class="qc-metric">
+              <span>处理中</span>
+              <strong id="qcMetricProcessing">0</strong>
+            </div>
+            <div class="qc-metric">
+              <span>已完成</span>
+              <strong id="qcMetricCompleted">0</strong>
+            </div>
+            <div class="qc-summary-actions">
+              <button type="button" class="action-btn" onclick="qcLoadAll()"><i class="fas fa-sync-alt"></i>刷新</button>
+              <button type="button" class="action-btn" onclick="qcExportTasks()"><i class="fas fa-file-export"></i>导出</button>
+            </div>
+          </div>
+
+          <div class="qc-inner-tabs">
+            <button type="button" class="qc-inner-tab is-active" data-qc-pane="tasks" onclick="qcSwitchPane('tasks')">任务工作台</button>
+            <button type="button" class="qc-inner-tab" data-qc-pane="pools" onclick="qcSwitchPane('pools')">任务池管理</button>
+            <button type="button" class="qc-inner-tab" data-qc-pane="import" onclick="qcSwitchPane('import')">数据导入</button>
+          </div>
+
+          <section id="qcPaneTasks" class="qc-pane is-active">
+            <div class="qc-panel qc-task-panel">
+              <div class="qc-panel-head">
+                <h3>任务处理工作台</h3>
+                <div class="qc-panel-actions">
+                  <button type="button" class="primary-btn" onclick="qcBatchTask('complete')">批次提交</button>
+                  <button type="button" class="action-btn" onclick="qcBatchTask('ignore')">批量忽略</button>
+                </div>
+              </div>
+              <div class="qc-filter-row qc-task-filter">
+                <input id="qcTaskKeyword" class="form-control" type="text" placeholder="搜索 WikiID / 问题 / 标签" oninput="qcDebouncedLoadTasks()">
+                <select id="qcTaskStatus" class="form-select" onchange="qcLoadTasks(1)">
+                  <option value="">全部状态</option>
+                  <option value="pending">待处理</option>
+                  <option value="processing">处理中</option>
+                  <option value="completed">已完成</option>
+                  <option value="ignored">已忽略</option>
+                </select>
+                <select id="qcTaskPriority" class="form-select" onchange="qcLoadTasks(1)">
+                  <option value="">全部优先级</option>
+                  <option value="p0">P0</option>
+                  <option value="p1">P1</option>
+                  <option value="p2">P2</option>
+                  <option value="p3">P3</option>
+                </select>
+                <select id="qcTaskSource" class="form-select" onchange="qcLoadTasks(1)">
+                  <option value="">全部来源</option>
+                  <option value="scoring">知识库评分</option>
+                  <option value="governance">知识库治理</option>
+                  <option value="external">外部检测</option>
+                </select>
+                <select id="qcTaskPoolFilter" class="form-select" onchange="qcLoadTasks(1)">
+                  <option value="">全部任务池</option>
+                </select>
+              </div>
+              <div class="table-container qc-task-table-wrap">
+                <table class="kb-table qc-table">
+                  <thead>
+                    <tr>
+                      <th class="qc-col-check"><input type="checkbox" id="qcSelectAllTasks" onchange="qcToggleAllTasks(this.checked)"></th>
+                      <th class="qc-col-status">状态</th>
+                      <th class="qc-col-id">ID</th>
+                      <th class="qc-col-question">问题</th>
+                      <th class="qc-col-suggestion">建议操作</th>
+                      <th class="qc-col-labels">问题标签</th>
+                      <th class="qc-col-source">来源</th>
+                      <th class="qc-col-ops">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="qcTaskTableBody">
+                    <tr><td colspan="8" class="empty-message">暂无任务</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="qc-pagination">
+                <label class="qc-page-size">
+                  <span>每页</span>
+                  <select id="qcTaskPageSize" class="form-select qc-page-size-select" onchange="qcChangeTaskPageSize(this.value)">
+                    <option value="10">10</option>
+                    <option value="20" selected>20</option>
+                    <option value="50">50</option>
+                  </select>
+                </label>
+                <span id="qcTaskPageInfo">共 0 条</span>
+                <button type="button" class="pagination-btn" onclick="qcChangeTaskPage(-1)">上一页</button>
+                <button type="button" class="pagination-btn" onclick="qcChangeTaskPage(1)">下一页</button>
+              </div>
+            </div>
+          </section>
+
+          <section id="qcPanePools" class="qc-pane d-none">
+            <div class="qc-pool-toolbar">
+              <input id="qcPoolSearch" class="form-control" type="text" placeholder="搜索任务池..." oninput="qcRenderPoolCards()">
+              <button type="button" class="primary-btn" onclick="qcOpenPoolWizard()"><i class="fas fa-plus"></i> 新建任务池</button>
+            </div>
+            <div id="qcPoolCards" class="qc-pool-card-grid"></div>
+            <section id="qcPoolDetailPanel" class="qc-panel qc-raw-panel d-none">
+              <div class="qc-panel-head">
+                <h3>任务池详情 / 补充聚合</h3>
+                <div class="qc-panel-actions">
+                  <select id="qcActivePoolSelect" class="form-select" onchange="qcSelectPool(this.value)">
+                    <option value="">暂无任务池</option>
+                  </select>
+                  <button type="button" class="action-btn" onclick="qcScanActivePool()"><i class="fas fa-search"></i>扫描原始问题</button>
+                  <select id="qcAggregatePriority" class="form-select">
+                    <option value="p0">P0</option>
+                    <option value="p1">P1</option>
+                    <option value="p2" selected>P2</option>
+                    <option value="p3">P3</option>
+                  </select>
+                  <button type="button" class="primary-btn" onclick="qcAggregateSelectedRaw()">聚合所选为任务</button>
+                  <button type="button" class="action-btn qc-icon-btn" onclick="qcHidePoolDetail()" title="收起详情"><i class="fas fa-chevron-up"></i></button>
+                </div>
+              </div>
+              <div class="qc-filter-row">
+                <input id="qcRawKeyword" class="form-control" type="text" placeholder="搜索原始问题" oninput="qcDebouncedLoadRaw()">
+                <select id="qcRawSource" class="form-select" onchange="qcLoadRawIssues(1)">
+                  <option value="">全部来源</option>
+                  <option value="scoring">知识库评分</option>
+                  <option value="governance">知识库治理</option>
+                  <option value="external">外部检测</option>
+                </select>
+                <label class="qc-inline-check"><input id="qcOnlyUnlinked" type="checkbox" checked onchange="qcLoadRawIssues(1)"> 未聚合</label>
+              </div>
+              <div class="table-container qc-table-wrap">
+                <table class="kb-table qc-table">
+                  <thead>
+                    <tr>
+                      <th class="qc-col-check"><input type="checkbox" id="qcSelectAllRaw" onchange="qcToggleAllRaw(this.checked)"></th>
+                      <th>WikiID</th>
+                      <th>来源</th>
+                      <th>问题标签</th>
+                      <th>状态</th>
+                    </tr>
+                  </thead>
+                  <tbody id="qcRawTableBody">
+                    <tr><td colspan="5" class="empty-message">暂无原始问题</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="qc-pagination">
+                <span id="qcRawPageInfo">共 0 条</span>
+                <button type="button" class="pagination-btn" onclick="qcChangeRawPage(-1)">上一页</button>
+                <button type="button" class="pagination-btn" onclick="qcChangeRawPage(1)">下一页</button>
+              </div>
+            </section>
+          </section>
+
+          <section id="qcPaneImport" class="qc-pane d-none">
+            <div class="qc-panel qc-import-panel">
+              <div class="qc-panel-head">
+                <h3>外部检测数据导入</h3>
+              </div>
+              <div class="qc-import-guide">
+                <div>支持 xlsx / csv，必填字段：WikiID、问题、建议操作。</div>
+                <div>导入时会校验 WikiID 是否存在，同 WikiID 已有任务时只追加问题标签。</div>
+              </div>
+              <div class="qc-import-drop">
+                <input id="qcImportFile" type="file" accept=".xlsx,.xls,.csv" class="form-control">
+                <button type="button" class="primary-btn" onclick="qcImportExternalFile()">导入外部检测</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <div id="qcPoolWizardModal" class="modal">
+        <div class="modal-content qc-wizard-modal">
+          <div class="modal-header">
+            <h3 id="qcWizardTitle" class="modal-title">新建任务池</h3>
+            <button type="button" class="close-modal-btn" onclick="qcClosePoolWizard()">&times;</button>
+          </div>
+          <div class="qc-wizard-steps">
+            <div class="qc-wizard-step-pill is-active" data-step="1"><b>1</b><span>基础配置</span></div>
+            <div class="qc-wizard-step-pill" data-step="2"><b>2</b><span>自定义筛选条件</span></div>
+            <div class="qc-wizard-step-pill" data-step="3"><b>3</b><span>字段映射</span></div>
+            <div class="qc-wizard-step-pill" data-step="4"><b>4</b><span>扫描预览与聚合</span></div>
+          </div>
+          <div class="qc-wizard-body">
+            <section class="qc-wizard-step" data-step="1">
+              <div class="qc-field">
+                <label for="qcPoolName">任务池名称 *</label>
+                <input id="qcPoolName" class="form-control" type="text" placeholder="输入任务池名称">
+              </div>
+              <div class="qc-field">
+                <label>数据来源 *</label>
+                <div class="qc-source-row">
+                  <label><input type="checkbox" class="qc-source-check" value="scoring" onchange="qcNormalizeConditionRowsForSources()"> 知识库评分</label>
+                  <label><input type="checkbox" class="qc-source-check" value="governance" onchange="qcNormalizeConditionRowsForSources()"> 知识库治理</label>
+                  <label><input type="checkbox" class="qc-source-check" value="external" onchange="qcNormalizeConditionRowsForSources()"> 外部检测报告</label>
+                </div>
+              </div>
+            </section>
+            <section class="qc-wizard-step d-none" data-step="2">
+              <div class="qc-rule-toolbar">
+                <select id="qcRuleLogic" class="form-select">
+                  <option value="AND">满足全部条件</option>
+                  <option value="OR">满足任一条件</option>
+                </select>
+                <button type="button" class="action-btn" onclick="qcAddConditionRow()"><i class="fas fa-plus"></i>添加条件</button>
+              </div>
+              <div id="qcConditionRows" class="qc-condition-list"></div>
+            </section>
+            <section class="qc-wizard-step d-none" data-step="3">
+              <div id="qcMappingRows" class="qc-mapping-source-list"></div>
+            </section>
+            <section class="qc-wizard-step d-none" data-step="4">
+              <div class="qc-final-box">
+                <div class="qc-final-title">扫描预览与聚合</div>
+                <div class="qc-preview-grid">
+                  <span>待聚合原始问题 <b id="qcWizardPreviewRaw">--</b></span>
+                  <span>涉及 WikiID <b id="qcWizardPreviewWiki">--</b></span>
+                  <span>知识库评分 <b id="qcWizardPreviewScoring">--</b></span>
+                  <span>知识库治理 <b id="qcWizardPreviewGovernance">--</b></span>
+                  <span>外部检测 <b id="qcWizardPreviewExternal">--</b></span>
+                </div>
+                <div id="qcWizardPreviewMessage" class="qc-final-copy">待扫描</div>
+                <label class="qc-inline-check">
+                  默认聚合优先级
+                  <select id="qcWizardDefaultPriority" class="form-select">
+                    <option value="p0">P0</option>
+                    <option value="p1">P1</option>
+                    <option value="p2" selected>P2</option>
+                    <option value="p3">P3</option>
+                  </select>
+                </label>
+                <label class="qc-inline-check"><input type="checkbox" id="qcWizardManualOnly" onchange="qcSyncWizardStep()"> 仅保存原始问题，稍后人工聚合</label>
+              </div>
+            </section>
+          </div>
+          <div class="modal-footer qc-wizard-footer">
+            <button type="button" class="action-btn" onclick="qcClosePoolWizard()">取消</button>
+            <button type="button" class="action-btn" id="qcWizardPrevBtn" onclick="qcWizardPrev()" disabled>上一步</button>
+            <button type="button" class="primary-btn" id="qcWizardNextBtn" onclick="qcWizardNext()">下一步</button>
+          </div>
+        </div>
       </div>
 
       <!-- Governance Advanced Filter Modal -->
@@ -1388,6 +1678,7 @@
                             <option value="知识库管理">知识库管理</option>
                             <option value="机型矩阵管理">机型矩阵管理</option>
                             <option value="智能映射">智能映射</option>
+                            <option value="管控中心">管控中心</option>
                         </select>
                     </label>
                     <label class="mod-filter-field">
@@ -1824,13 +2115,21 @@
                                     <b id="kbEditPreviewId">保存后自动生成</b>
                                 </div>
                                 <div>
-                                    <span>ID 参考</span>
-                                    <b id="kbEditPreviewTemplateRef">未选择</b>
-                                </div>
-                                <div>
                                     <span>状态</span>
                                     <b id="kbEditPreviewStatus">新增中</b>
                                 </div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="question">
+                                <label>问题</label>
+                                <div id="kbEditPreviewQuestion" class="kb-preview-text kb-preview-question">暂无问题内容</div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="similar_questions">
+                                <label>相似问</label>
+                                <div id="kbEditPreviewSimilarQuestions" class="kb-preview-chip-row"></div>
+                            </div>
+                            <div class="kb-preview-field" data-preview-key="answer">
+                                <label>答案</label>
+                                <div id="kbEditPreviewAnswer" class="kb-preview-text kb-preview-answer">暂无答案内容</div>
                             </div>
                             <div class="kb-preview-field" data-preview-key="product_category_name">
                                 <label>产品分类</label>
@@ -1840,25 +2139,17 @@
                                 <label>产品型号</label>
                                 <div id="kbEditPreviewProducts" class="kb-preview-chip-row"></div>
                             </div>
-                            <div class="kb-preview-field" data-preview-key="kb_tags_input">
-                                <label>标签</label>
-                                <div id="kbEditPreviewTags" class="kb-preview-chip-row"></div>
+                            <div class="kb-preview-field" data-preview-key="resources">
+                                <label>资源链接</label>
+                                <div id="kbEditPreviewResources" class="kb-preview-resources"></div>
                             </div>
                             <div class="kb-preview-field" data-preview-key="basic_meta">
                                 <label>属性</label>
                                 <div id="kbEditPreviewAttrs" class="kb-preview-chip-row"></div>
                             </div>
-                            <div class="kb-preview-field" data-preview-key="question">
-                                <label>问题</label>
-                                <div id="kbEditPreviewQuestion" class="kb-preview-text kb-preview-question">暂无问题内容</div>
-                            </div>
-                            <div class="kb-preview-field" data-preview-key="answer">
-                                <label>答案</label>
-                                <div id="kbEditPreviewAnswer" class="kb-preview-text kb-preview-answer">暂无答案内容</div>
-                            </div>
-                            <div class="kb-preview-field" data-preview-key="resources">
-                                <label>资源链接</label>
-                                <div id="kbEditPreviewResources" class="kb-preview-resources"></div>
+                            <div class="kb-preview-field" data-preview-key="kb_tags_input">
+                                <label>标签</label>
+                                <div id="kbEditPreviewTags" class="kb-preview-chip-row"></div>
                             </div>
                         </div>
                     </aside>
@@ -1968,6 +2259,35 @@
                             <div id="aiAnswerStreamPreview" class="ai-stream-preview d-none"></div>
                             <div id="answerTuiEditorWrap" style="position: relative;">
                                 <div id="answerTuiEditor"></div>
+                            </div>
+                            <div id="aiAnswerComparePanel" class="ai-answer-compare-panel d-none" aria-live="polite">
+                                <div class="ai-answer-compare-header">
+                                    <div>
+                                        <div class="ai-answer-compare-title">AI 处理结果</div>
+                                        <div id="aiAnswerCompareMeta" class="ai-answer-compare-meta">对比原答案和 AI 优化后内容</div>
+                                    </div>
+                                    <div class="ai-answer-compare-actions">
+                                        <button type="button" class="primary-btn btn-sm" onclick="aiAnswerApplyDraft()">替换</button>
+                                        <button type="button" class="action-btn btn-sm" onclick="aiAnswerCancelDraft()">取消</button>
+                                    </div>
+                                </div>
+                                <div class="ai-answer-compare-grid">
+                                    <section class="ai-answer-compare-card">
+                                        <div class="ai-answer-compare-card-head">
+                                            <span>处理前</span>
+                                            <b id="aiAnswerOriginalCount">0 字</b>
+                                        </div>
+                                        <div id="aiAnswerOriginalText" class="ai-answer-compare-text"></div>
+                                    </section>
+                                    <section class="ai-answer-compare-card is-refined">
+                                        <div class="ai-answer-compare-card-head">
+                                            <span>AI 优化后</span>
+                                            <b id="aiAnswerRefinedCount">0 字</b>
+                                        </div>
+                                        <div id="aiAnswerRefinedText" class="ai-answer-compare-text"></div>
+                                    </section>
+                                </div>
+                                <div id="aiAnswerCompareNotes" class="ai-answer-compare-notes d-none"></div>
                             </div>
                             <!-- Compatibility: keep textarea as source-of-truth field for submit/dirty-check -->
                             <textarea name="answer" id="answerEditor" class="markdown-textarea" style="position:absolute; left:-99999px; top:-99999px; width:1px; height:1px; opacity:0;" tabindex="-1" aria-hidden="true"></textarea>
@@ -2533,10 +2853,11 @@ G10 系列: G10S, G10S Pro"></textarea>
                             <li><strong>支持格式 ：</strong>Excel (.xlsx, .xls)、CSV。</li>
                             <li><strong>三种导入模式 ：</strong></li>
                             <ul style="padding-left: 15px; margin-top: 5px;">
-                                <li><span class="manual-badge badge-upsert">增量更新 (Upsert)</span> ID 存在则更新，不存在则新增（推荐用于日常维护）。</li>
-                                <li><span class="manual-badge badge-append">批量新增 (Append)</span> 自动跳过已存在的 ID，仅插入新数据（安全补充）。</li>
-                                <li><span class="manual-badge badge-overwrite">全量覆盖 (Overwrite)</span> 导入前先自动将 V1 同步至 V1T-1 备份，再清空 V1 并重新导入（用于重大版本重置）。</li>
-                            </ul>
+	                                <li><span class="manual-badge badge-upsert">增量更新 (Upsert)</span> ID 存在则更新，不存在则新增（推荐用于日常维护）。</li>
+	                                <li><span class="manual-badge badge-append">批量新增 (Append)</span> 自动跳过已存在的 ID，仅插入新数据（安全补充）。</li>
+	                                <li><span class="manual-badge badge-overwrite">全量覆盖 (Overwrite)</span> 导入前先自动将 V1 同步至 V1T-1 备份，再清空 V1 并重新导入（用于重大版本重置）。</li>
+	                                <li><span class="manual-badge badge-overwrite">同步删除缺失 ID</span> 可选开关；V1 中存在但导入文件 ID 列未包含的记录，会二次确认后从 V1 物理删除。</li>
+	                            </ul>
                             <li><strong>辅助功能 ：</strong></li>
                             <ul style="padding-left: 15px; margin-top: 5px;">
                                 <li>查重预览 ：导入前检查重复 ID，避免冲突。</li>

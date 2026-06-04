@@ -2,6 +2,7 @@
 CREATE TABLE IF NOT EXISTS kb_scores (
     id SERIAL PRIMARY KEY,
     kb_id TEXT NOT NULL UNIQUE,
+    product_name TEXT,
     question_content TEXT,
     answer_content TEXT,
     status TEXT DEFAULT 'unscored', -- 'unscored', 'scored', 'outdated'

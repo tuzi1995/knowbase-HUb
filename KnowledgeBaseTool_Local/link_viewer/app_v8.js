@@ -124,6 +124,7 @@ let currentTab = 'kbView';
 
 // Link View State
 let currentLinks = [];
+let linksLoaded = false;
 let activeFilterTags = [];
 let selectedIds = new Set();
 let linkCurrentPage = 1;
@@ -785,6 +786,8 @@ let selectedMatrixRows = new Set();
 let matrixFilteredTotal = null;
 let matrixFilteredTotalRequestSeq = 0;
 let matrixDiffCompareEnabled = false;
+let matrixLoaded = false;
+let matrixLastRequestKey = '';
 
 // Scoring View State
 let currentScoringData = [];
@@ -792,6 +795,7 @@ let scoringTotal = 0;
 let scoringPage = 1;
 let scoringPageSize = 50;
 let selectedScoringRows = new Set();
+let scoringLoaded = false;
 let scoringProgressTimer = null;
 let scoringRunState = {
     active: false,
@@ -915,6 +919,11 @@ const TAB_META = {
         title: '知识库治理',
         group: '质量管控',
         description: '按月份与质量指标治理知识库，查看筛选摘要与召回关联结果。',
+    },
+    controlCenterView: {
+        title: '管控中心',
+        group: '质量管控',
+        description: '管理质量任务池、原始问题聚合与任务整改闭环。',
     },
     dataSettingsView: {
         title: '数据设置',
@@ -1084,7 +1093,7 @@ function scheduleWorkbenchSidebarHeightUpdate() {
 function normalizeWorkbenchViews() {
     const viewsWrap = document.querySelector('.workbench-views');
     if (!viewsWrap) return;
-    const viewIds = ['kbView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const viewIds = ['kbView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
     viewIds.forEach(id => {
         const el = document.getElementById(id);
         if (el && el.parentElement !== viewsWrap) viewsWrap.appendChild(el);
@@ -1093,8 +1102,17 @@ function normalizeWorkbenchViews() {
 
 function switchTab(tabId) {
     normalizeWorkbenchViews();
-    const tabs = ['kbView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const tabs = ['kbView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
     const viewsWrap = document.querySelector('.workbench-views');
+    const isQualityControlCenter = tabId === 'controlCenterView';
+    [
+        document.getElementById('workbenchLayout'),
+        document.querySelector('.workbench-main'),
+        document.querySelector('.workbench-content-panel'),
+        viewsWrap
+    ].forEach(el => {
+        if (el) el.classList.toggle('qc-active-workbench', isQualityControlCenter);
+    });
     
     tabs.forEach(id => {
         const el = document.getElementById(id);
@@ -1139,21 +1157,23 @@ function switchTab(tabId) {
     
     // Load data for the tab
     if (tabId === 'matrixView') {
-        if (typeof loadMatrixData === 'function') loadMatrixData(1);
+        if (typeof loadMatrixData === 'function') loadMatrixData(matrixCurrentPage || 1, { reuse: true });
     } else if (tabId === 'linkView') {
-        if (typeof loadLinks === 'function') loadLinks();
+        if (typeof loadLinks === 'function') loadLinks({ reuse: true });
     } else if (tabId === 'kbView') {
-        if (typeof loadKBTable === 'function') loadKBTable();
+        if (typeof loadKBTable === 'function') loadKBTable(kbCurrentPage || 1);
     } else if (tabId === 'scoringView') {
         if (typeof isScoringInProgress === 'function' && isScoringInProgress()) {
             if (typeof renderScoringTable === 'function') renderScoringTable(true);
             if (typeof updateScoringStats === 'function') updateScoringStats();
             if (typeof updateScoringProgressUI === 'function') updateScoringProgressUI();
         } else if (typeof loadScoringData === 'function') {
-            loadScoringData();
+            loadScoringData({ reuse: true });
         }
     } else if (tabId === 'governanceView') {
-        if (typeof loadGovMonths === 'function') loadGovMonths();
+        if (typeof loadGovMonths === 'function') loadGovMonths('', { reuse: true });
+    } else if (tabId === 'controlCenterView') {
+        if (typeof qcLoadAll === 'function') qcLoadAll();
     } else if (tabId === 'modificationsView') {
         if (typeof loadModifications === 'function') loadModifications(1);
         const toggle = document.getElementById('modAutoRefreshToggle');
@@ -2865,7 +2885,12 @@ function previewUrl(url) {
     }
 }
 
-async function loadLinks() {
+async function loadLinks(options = {}) {
+  if (options.reuse && linksLoaded) {
+    linkTableWidths = loadLinkTableWidths();
+    renderLinkTable();
+    return;
+  }
   try {
     const [res] = await Promise.all([
         api('/links'),
@@ -2873,6 +2898,7 @@ async function loadLinks() {
     ]);
     // Ensure we handle both array (legacy) and object response
     currentLinks = Array.isArray(res) ? res : (res.data || []);
+    linksLoaded = true;
     linkTableWidths = loadLinkTableWidths();
     renderLinkTable();
   } catch {}
@@ -3910,6 +3936,9 @@ function renderLinkTable() {
 // ==========================================
 let govData = [];
 let govMonths = [];
+let govMonthsLoaded = false;
+let govLastDataKey = '';
+let govLastDashboardKey = '';
 let govCurrentPage = 1;
 let govPageSize = 50;
 let govSortBy = 'recall_count';
@@ -3918,11 +3947,122 @@ let selectedGovRows = new Set();
 let currentGovMonths = []; // Store currently displayed months
 let currentGovSummary = {}; // Store summary data
 let govAdvancedConditions = {}; // { [month]: { recallMin, recallMax, validMin, validMax } }
+let govDashboardData = [];
+let govDashboardMonths = [];
+let currentGovDashboardSummary = {};
+let govDashboardDataById = new Map();
+let currentGovDashboardMetrics = null;
+let currentGovDashboardRange = { startMonth: '', endMonth: '', months: [] };
+let govDashboardStatusMessage = '请选择大盘统计月份范围';
+let govDashboardStatusClass = 'text-muted';
+
+const GOV_DASHBOARD_RANGE_STORAGE_KEY = 'kbHub.govDashboard.range';
 
 function _govParseNumber(value) {
     if (value === '' || value === null || value === undefined) return null;
     const n = Number(value);
     return Number.isFinite(n) ? n : null;
+}
+
+function _govFormatInteger(value) {
+    const n = _govParseNumber(value);
+    if (n === null) return '-';
+    return Math.round(n).toLocaleString('zh-CN');
+}
+
+function _govFormatAverage(value) {
+    const n = _govParseNumber(value);
+    if (n === null) return '-';
+    return n.toFixed(2);
+}
+
+function _govFormatPercent(value) {
+    const n = _govParseNumber(value);
+    if (n === null) return '-';
+    return `${(n * 100).toFixed(2)}%`;
+}
+
+function _govPopulateMonthSelect(select, months, placeholder) {
+    if (!select) return;
+    select.innerHTML = `<option value="">${placeholder}</option>`;
+    (months || []).forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        select.appendChild(opt);
+    });
+}
+
+function clearGovernanceViewState() {
+    govData = [];
+    currentGovMonths = [];
+    currentGovSummary = {};
+    govCurrentPage = 1;
+    selectedGovRows.clear();
+    govDashboardData = [];
+    govDashboardMonths = [];
+    currentGovDashboardSummary = {};
+    govDashboardDataById = new Map();
+    currentGovDashboardMetrics = null;
+    currentGovDashboardRange = { startMonth: '', endMonth: '', months: [] };
+    govDashboardStatusMessage = '暂无可统计数据';
+    govDashboardStatusClass = 'text-muted';
+
+    const monthFilterSel = document.getElementById('govFilterMonths');
+    if (monthFilterSel) {
+        monthFilterSel.innerHTML = '<option value="">全部月份</option>';
+    }
+
+    renderGovSummaryPanel();
+    renderGovTable();
+    updateGovPagination();
+}
+
+function _govReadDashboardRange() {
+    try {
+        return JSON.parse(localStorage.getItem(GOV_DASHBOARD_RANGE_STORAGE_KEY) || '{}') || {};
+    } catch (e) {
+        return {};
+    }
+}
+
+function _govSaveDashboardRange(startMonth, endMonth) {
+    try {
+        localStorage.setItem(GOV_DASHBOARD_RANGE_STORAGE_KEY, JSON.stringify({
+            startMonth: startMonth || '',
+            endMonth: endMonth || ''
+        }));
+    } catch (e) {
+        console.warn('Failed to save governance dashboard range', e);
+    }
+}
+
+function _govParseEffectiveMonth(kbId) {
+    const match = String(kbId || '').trim().match(/^ICWIKI(\d{4})(\d{2})(\d{2})/i);
+    if (!match) return null;
+
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const date = new Date(year, month - 1, day);
+    if (
+        !Number.isFinite(year) ||
+        month < 1 || month > 12 ||
+        day < 1 || day > 31 ||
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== day
+    ) {
+        return null;
+    }
+
+    return `${match[1]}-${match[2]}`;
+}
+
+function _govGetMonthlyWeight(kbId, statMonth) {
+    const effectiveMonth = _govParseEffectiveMonth(kbId);
+    if (!effectiveMonth) return 1;
+    return effectiveMonth <= statMonth ? 1 : 0;
 }
 
 function _govGetMonthlyCounts(item, month) {
@@ -4061,6 +4201,11 @@ function _govGetSortValue(item, sortKey) {
         if (sortKey === 'valid_rate') return totals.recall > 0 ? (totals.valid / totals.recall) : 0;
     }
 
+    if (sortKey.startsWith('weighted_')) {
+        const metrics = _govGetDashboardWeightedMetricsForItem(item);
+        return metrics?.[sortKey] ?? null;
+    }
+
     if (sortKey === 'id') return item?.id ?? '';
     if (sortKey === 'question') return item?.question ?? '';
     if (sortKey === 'ai_score') return _govParseNumber(item?.ai_score) ?? -Infinity;
@@ -4101,16 +4246,28 @@ function _govSortableHeaderHtml(label, sortKey) {
     return `<div class="sortable-header" onclick="handleGovSort('${safeKey}')">${label}<span class="sort-icon">${_govSortIcon(sortKey)}</span></div>`;
 }
 
-async function loadGovMonths(preferredMonth = '') {
+async function loadGovMonths(preferredMonth = '', options = {}) {
+    if (options.reuse && govMonthsLoaded) {
+        renderGovSummaryPanel();
+        renderGovTable();
+        updateGovPagination();
+        return;
+    }
     try {
         const res = await api('/governance/months');
         if (res.success) {
             govMonths = (res.months || []).filter(Boolean);
+            govMonthsLoaded = true;
             const startSelect = document.getElementById('govStartMonth');
             const endSelect = document.getElementById('govEndMonth');
+            const dashboardStartSelect = document.getElementById('govDashboardStartMonth');
+            const dashboardEndSelect = document.getElementById('govDashboardEndMonth');
             const importMonth = document.getElementById('govImportMonth');
             const prevStart = startSelect?.value || '';
             const prevEnd = endSelect?.value || '';
+            const prevDashboardStart = dashboardStartSelect?.value || '';
+            const prevDashboardEnd = dashboardEndSelect?.value || '';
+            const savedDashboardRange = _govReadDashboardRange();
 
             if (preferredMonth && !govMonths.includes(preferredMonth)) {
                 govMonths.push(preferredMonth);
@@ -4118,13 +4275,7 @@ async function loadGovMonths(preferredMonth = '') {
             govMonths = Array.from(new Set(govMonths)).sort((a, b) => b.localeCompare(a));
             
             if (startSelect) {
-                startSelect.innerHTML = '<option value="">起始月份</option>';
-                govMonths.forEach(m => {
-                    const opt = document.createElement('option');
-                    opt.value = m;
-                    opt.textContent = m;
-                    startSelect.appendChild(opt);
-                });
+                _govPopulateMonthSelect(startSelect, govMonths, '起始月份');
                 if (preferredMonth && govMonths.includes(preferredMonth)) {
                     startSelect.value = preferredMonth;
                 } else if (prevStart && govMonths.includes(prevStart)) {
@@ -4135,17 +4286,33 @@ async function loadGovMonths(preferredMonth = '') {
             }
             
             if (endSelect) {
-                endSelect.innerHTML = '<option value="">结束月份</option>';
-                govMonths.forEach(m => {
-                    const opt = document.createElement('option');
-                    opt.value = m;
-                    opt.textContent = m;
-                    endSelect.appendChild(opt);
-                });
+                _govPopulateMonthSelect(endSelect, govMonths, '结束月份');
                 if (preferredMonth) {
                     endSelect.value = '';
                 } else if (prevEnd && govMonths.includes(prevEnd)) {
                     endSelect.value = prevEnd;
+                }
+            }
+
+            if (dashboardStartSelect) {
+                _govPopulateMonthSelect(dashboardStartSelect, govMonths, '起始月份');
+                const savedStart = savedDashboardRange.startMonth || '';
+                if (prevDashboardStart && govMonths.includes(prevDashboardStart)) {
+                    dashboardStartSelect.value = prevDashboardStart;
+                } else if (savedStart && govMonths.includes(savedStart)) {
+                    dashboardStartSelect.value = savedStart;
+                } else if (govMonths.length > 0) {
+                    dashboardStartSelect.value = govMonths[0];
+                }
+            }
+
+            if (dashboardEndSelect) {
+                _govPopulateMonthSelect(dashboardEndSelect, govMonths, '结束月份');
+                const savedEnd = savedDashboardRange.endMonth || '';
+                if (prevDashboardEnd && govMonths.includes(prevDashboardEnd)) {
+                    dashboardEndSelect.value = prevDashboardEnd;
+                } else if (savedEnd && govMonths.includes(savedEnd)) {
+                    dashboardEndSelect.value = savedEnd;
                 }
             }
             
@@ -4160,14 +4327,19 @@ async function loadGovMonths(preferredMonth = '') {
                 }
             }
             
-            if (govMonths.length > 0) loadGovernanceData();
+            if (govMonths.length > 0) {
+                await loadGovernanceData(options);
+                await loadGovDashboardData(options);
+            } else {
+                clearGovernanceViewState();
+            }
         }
     } catch (e) {
         console.error("Failed to load gov months", e);
     }
 }
 
-async function loadGovernanceData() {
+async function loadGovernanceData(options = {}) {
     const startMonth = document.getElementById('govStartMonth')?.value;
     const endMonth = document.getElementById('govEndMonth')?.value;
     
@@ -4181,82 +4353,21 @@ async function loadGovernanceData() {
     
     try {
         const url = `/governance/data?month=${startMonth}&end_month=${endMonth || ''}`;
+        if (options.reuse && govLastDataKey === url && Array.isArray(govData)) {
+            renderGovSummaryPanel();
+            renderGovTable();
+            updateGovPagination();
+            return;
+        }
         const res = await api(url);
         
         if (res.success) {
             // Process data: Keep raw data for dynamic rendering
-            govData = res.data || [];
             currentGovMonths = res.months || [];
             currentGovSummary = res.summary || {};
-            
-            // Calculate and display summary
-            let totalRecall = 0;
-            let totalValid = 0;
-            
-            // Build month summaries HTML
-            let monthSummariesHtml = '';
-            
-            // Sort months to ensure correct order if needed (though API usually returns sorted)
-            // currentGovMonths is array of strings 'YYYY-MM'
-            
-            currentGovMonths.forEach(month => {
-                const s = currentGovSummary[month] || { total_recall: 0, total_valid: 0 };
-                totalRecall += s.total_recall || 0;
-                totalValid += s.total_valid || 0;
-                
-                const mRate = (s.total_recall > 0) ? ((s.total_valid / s.total_recall) * 100).toFixed(2) + '%' : '0%';
-                
-                monthSummariesHtml += `
-                    <div style="padding: 10px 15px; background: #fff; border: 1px solid #eee; border-radius: 6px; min-width: 140px;">
-                        <div style="font-weight: bold; color: #333; margin-bottom: 5px; border-bottom: 1px solid #f0f0f0; padding-bottom: 3px;">${month}</div>
-                        <div style="font-size: 0.85em; color: #666; display: flex; justify-content: space-between;">
-                            <span>召回:</span> <span style="font-weight: 500;">${s.total_recall || 0}</span>
-                        </div>
-                        <div style="font-size: 0.85em; color: #666; display: flex; justify-content: space-between;">
-                            <span>有效:</span> <span style="font-weight: 500; color: #28a745;">${s.total_valid || 0}</span>
-                        </div>
-                        <div style="font-size: 0.85em; color: #666; display: flex; justify-content: space-between;">
-                            <span>有效率:</span> <span style="font-weight: 500; color: #17a2b8;">${mRate}</span>
-                        </div>
-                    </div>
-                `;
-            });
-            
-            const validRate = totalRecall > 0 ? ((totalValid / totalRecall) * 100).toFixed(2) + '%' : '0%';
-            
-            const summaryEl = document.getElementById('govSummary');
-            if (summaryEl) {
-                summaryEl.innerHTML = `
-                    <div style="display: flex; gap: 20px; align-items: flex-start; overflow-x: auto; padding-bottom: 5px;">
-                        <!-- Total Block -->
-                        <div style="padding: 10px 20px; background: #fff; border: 1px solid #ddd; border-radius: 6px; min-width: 180px; box-shadow: 0 2px 4px rgba(0,0,0,0.02);">
-                            <div style="font-weight: bold; font-size: 1.1em; color: #333; margin-bottom: 8px; border-bottom: 2px solid #007bff; padding-bottom: 5px; display: inline-block;">全部汇总</div>
-                            <div style="display: flex; flex-direction: column; gap: 5px;">
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <span class="text-muted text-sm">总召回频数</span>
-                                    <span style="font-size: 1.1em; font-weight: bold;">${totalRecall}</span>
-                                </div>
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <span class="text-muted text-sm">有效召回频数</span>
-                                    <span style="font-size: 1.1em; font-weight: bold; color: #28a745;">${totalValid}</span>
-                                </div>
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <span class="text-muted text-sm">整体有效召回率</span>
-                                    <span style="font-size: 1.1em; font-weight: bold; color: #17a2b8;">${validRate}</span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- Divider -->
-                        <div style="width: 1px; background: #ddd; align-self: stretch;"></div>
-                        
-                        <!-- Monthly Blocks -->
-                        <div style="display: flex; gap: 10px;">
-                            ${monthSummariesHtml}
-                        </div>
-                    </div>
-                `;
-            }
+            govData = res.data || [];
+            govLastDataKey = url;
+            renderGovSummaryPanel();
 
             // Refresh month filter options based on currentGovMonths
             const monthFilterSel = document.getElementById('govFilterMonths');
@@ -4282,6 +4393,372 @@ async function loadGovernanceData() {
         }
     } catch (e) {
         if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="error-message">加载失败: ${e.message}</td></tr>`;
+    }
+}
+
+function saveGovDashboardRangeFromControls() {
+    const startMonth = document.getElementById('govDashboardStartMonth')?.value || '';
+    const endMonth = document.getElementById('govDashboardEndMonth')?.value || '';
+    _govSaveDashboardRange(startMonth, endMonth);
+}
+
+function _govGetDashboardRangeLabel(startMonth, endMonth, months) {
+    if (months && months.length > 0) {
+        if (months.length === 1) return months[0];
+        return `${months[0]} 至 ${months[months.length - 1]}`;
+    }
+    if (startMonth && endMonth) return `${startMonth} 至 ${endMonth}`;
+    return startMonth || '-';
+}
+
+function _govNormalizeDashboardRange(startMonth, endMonth) {
+    if (startMonth && endMonth && startMonth > endMonth) {
+        return { startMonth: endMonth, endMonth: startMonth };
+    }
+    return { startMonth, endMonth };
+}
+
+function _govRenderDashboardMessage(message, className = 'text-muted') {
+    currentGovDashboardMetrics = null;
+    govDashboardStatusMessage = message || '';
+    govDashboardStatusClass = className || 'text-muted';
+    renderGovSummaryPanel();
+}
+
+function _govComputeDashboardMetrics(data, months, summary) {
+    const items = Array.isArray(data) ? data : [];
+    const statMonths = Array.isArray(months) ? months.filter(Boolean).sort() : [];
+
+    if (items.length === 0 || statMonths.length === 0) {
+        return {
+            hasData: false,
+            itemCount: items.length,
+            monthCount: statMonths.length,
+            totalRecall: null,
+            totalValid: null,
+            overallValidRate: null,
+            totalWeight: 0,
+            avgRecall: null,
+            avgValidRecall: null,
+            avgRecallRatio: null,
+            avgValidRecallRatio: null,
+            avgValidRate: null
+        };
+    }
+
+    let totalRecall = 0;
+    let totalValid = 0;
+    let totalWeight = 0;
+    let recallRatioWeightedSum = 0;
+    let validRecallRatioWeightedSum = 0;
+    let validRateWeightedSum = 0;
+
+    items.forEach(item => {
+        statMonths.forEach(month => {
+            const counts = _govGetMonthlyCounts(item, month);
+            totalRecall += counts.recall;
+            totalValid += counts.valid;
+
+            const weight = _govGetMonthlyWeight(item?.id, month);
+            if (weight <= 0) return;
+
+            const monthTotalRecall = _govParseNumber(summary?.[month]?.total_recall) ?? 0;
+            const monthTotalValid = _govParseNumber(summary?.[month]?.total_valid) ?? 0;
+            const recallRatio = monthTotalRecall > 0 ? counts.recall / monthTotalRecall : 0;
+            const validRecallRatio = monthTotalValid > 0 ? counts.valid / monthTotalValid : 0;
+            const validRate = counts.recall > 0 ? counts.valid / counts.recall : 0;
+
+            totalWeight += weight;
+            recallRatioWeightedSum += recallRatio * weight;
+            validRecallRatioWeightedSum += validRecallRatio * weight;
+            validRateWeightedSum += validRate * weight;
+        });
+    });
+
+    return {
+        hasData: true,
+        itemCount: items.length,
+        monthCount: statMonths.length,
+        totalRecall,
+        totalValid,
+        overallValidRate: totalRecall > 0 ? totalValid / totalRecall : 0,
+        totalWeight,
+        avgRecall: totalWeight > 0 ? totalRecall / totalWeight : null,
+        avgValidRecall: totalWeight > 0 ? totalValid / totalWeight : null,
+        avgRecallRatio: totalWeight > 0 ? recallRatioWeightedSum / totalWeight : null,
+        avgValidRecallRatio: totalWeight > 0 ? validRecallRatioWeightedSum / totalWeight : null,
+        avgValidRate: totalWeight > 0 ? validRateWeightedSum / totalWeight : null
+    };
+}
+
+function _govComputeItemWeightedMetrics(item, months = currentGovMonths, summary = currentGovSummary) {
+    const statMonths = Array.isArray(months) ? months.filter(Boolean).sort() : [];
+
+    let totalRecall = 0;
+    let totalValid = 0;
+    let totalWeight = 0;
+    let recallRatioWeightedSum = 0;
+    let validRecallRatioWeightedSum = 0;
+    let validRateWeightedSum = 0;
+
+    statMonths.forEach(month => {
+        const counts = _govGetMonthlyCounts(item, month);
+        totalRecall += counts.recall;
+        totalValid += counts.valid;
+
+        const weight = _govGetMonthlyWeight(item?.id, month);
+        if (weight <= 0) return;
+
+        const monthTotalRecall = _govParseNumber(summary?.[month]?.total_recall) ?? 0;
+        const monthTotalValid = _govParseNumber(summary?.[month]?.total_valid) ?? 0;
+        const recallRatio = monthTotalRecall > 0 ? counts.recall / monthTotalRecall : 0;
+        const validRecallRatio = monthTotalValid > 0 ? counts.valid / monthTotalValid : 0;
+        const validRate = counts.recall > 0 ? counts.valid / counts.recall : 0;
+
+        totalWeight += weight;
+        recallRatioWeightedSum += recallRatio * weight;
+        validRecallRatioWeightedSum += validRecallRatio * weight;
+        validRateWeightedSum += validRate * weight;
+    });
+
+    return {
+        totalRecall,
+        totalValid,
+        totalWeight,
+        weighted_avg_recall: totalWeight > 0 ? totalRecall / totalWeight : null,
+        weighted_avg_valid_recall: totalWeight > 0 ? totalValid / totalWeight : null,
+        weighted_avg_recall_ratio: totalWeight > 0 ? recallRatioWeightedSum / totalWeight : null,
+        weighted_avg_valid_recall_ratio: totalWeight > 0 ? validRecallRatioWeightedSum / totalWeight : null,
+        weighted_avg_valid_rate: totalWeight > 0 ? validRateWeightedSum / totalWeight : null
+    };
+}
+
+function _govGetWeightedMetricSpecs() {
+    return [
+        { label: '平均召回频数', metric: 'weighted_avg_recall', type: 'number' },
+        { label: '平均有效召回频数', metric: 'weighted_avg_valid_recall', type: 'number' },
+        { label: '平均召回占比', metric: 'weighted_avg_recall_ratio', type: 'percent' },
+        { label: '平均有效召回占比', metric: 'weighted_avg_valid_recall_ratio', type: 'percent' },
+        { label: '平均有效召回率', metric: 'weighted_avg_valid_rate', type: 'percent' }
+    ];
+}
+
+function _govFormatWeightedMetric(value, type) {
+    return type === 'percent' ? _govFormatPercent(value) : _govFormatAverage(value);
+}
+
+function _govGetDashboardWeightedMetricsForItem(item) {
+    if (!Array.isArray(govDashboardMonths) || govDashboardMonths.length === 0) return null;
+    const id = String(item?.id || '').trim();
+    const dashboardItem = govDashboardDataById.get(id);
+    if (!dashboardItem) {
+        return _govComputeItemWeightedMetrics({ id, monthly_data: {} }, govDashboardMonths, currentGovDashboardSummary);
+    }
+    return dashboardItem.weighted_summary || _govComputeItemWeightedMetrics(dashboardItem, govDashboardMonths, currentGovDashboardSummary);
+}
+
+function _govDashboardCardHtml(title, value, options = {}) {
+    const valueClass = options.valueClass ? ` ${options.valueClass}` : '';
+    const note = options.note ? `<div class="gov-summary-card-note">${options.note}</div>` : '';
+    return `
+        <div class="gov-summary-card ${options.cardClass || ''}">
+            <div class="gov-summary-card-title">${title}</div>
+            <div class="gov-summary-card-metric${valueClass}">${value}</div>
+            ${note}
+        </div>
+    `;
+}
+
+function _govSummaryRowsCardHtml(title, totalRecall, totalValid, options = {}) {
+    const validRate = totalRecall > 0 ? totalValid / totalRecall : 0;
+    const recallLabel = options.isTotal ? '总召回' : '召回';
+    const validLabel = options.isTotal ? '总有效' : '有效';
+    return `
+        <div class="gov-summary-card ${options.cardClass || ''}">
+            <div class="gov-summary-card-title">${title}</div>
+            <div class="gov-summary-card-body">
+                <div class="gov-summary-card-row">
+                    <span>${recallLabel}</span><strong>${_govFormatInteger(totalRecall)}</strong>
+                </div>
+                <div class="gov-summary-card-row">
+                    <span>${validLabel}</span><strong class="is-success">${_govFormatInteger(totalValid)}</strong>
+                </div>
+                <div class="gov-summary-card-row">
+                    <span>有效率</span><strong class="is-info">${_govFormatPercent(validRate)}</strong>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function _govBuildNativeSummaryHtml() {
+    const months = Array.isArray(currentGovMonths) ? currentGovMonths.filter(Boolean) : [];
+    if (months.length === 0) {
+        return `
+            <div class="gov-summary-section">
+                <div class="gov-summary-head">
+                    <div>
+                        <strong>选择月份范围汇总</strong>
+                        <span>-</span>
+                    </div>
+                    <small>暂无可统计数据</small>
+                </div>
+                <div class="gov-summary-empty">-</div>
+            </div>
+        `;
+    }
+
+    let totalRecall = 0;
+    let totalValid = 0;
+    const monthCardsHtml = months.map(month => {
+        const s = currentGovSummary?.[month] || {};
+        const monthRecall = _govParseNumber(s.total_recall) ?? 0;
+        const monthValid = _govParseNumber(s.total_valid) ?? 0;
+        totalRecall += monthRecall;
+        totalValid += monthValid;
+        return _govSummaryRowsCardHtml(month, monthRecall, monthValid, { cardClass: 'gov-summary-card-month' });
+    }).join('');
+
+    const rangeLabel = months.length === 1 ? months[0] : `${months[0]} 至 ${months[months.length - 1]}`;
+    return `
+        <div class="gov-summary-section">
+            <div class="gov-summary-head">
+                <div>
+                    <strong>选择月份范围汇总</strong>
+                    <span>${rangeLabel}</span>
+                </div>
+                <small>${months.length} 个月 · 原生口径</small>
+            </div>
+            <div class="gov-summary-strip">
+                ${_govSummaryRowsCardHtml('全部汇总', totalRecall, totalValid, { cardClass: 'gov-summary-card-total', isTotal: true })}
+                <div class="gov-summary-divider"></div>
+                <div class="gov-summary-month-list">
+                    ${monthCardsHtml}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function _govBuildDashboardSummaryHtml() {
+    const metrics = currentGovDashboardMetrics;
+    const startMonth = currentGovDashboardRange.startMonth || '';
+    const endMonth = currentGovDashboardRange.endMonth || '';
+    const months = currentGovDashboardRange.months || govDashboardMonths || [];
+
+    if (!metrics?.hasData) {
+        return `
+            <div class="gov-summary-section">
+                <div class="gov-summary-head">
+                    <div>
+                        <strong>周期加权大盘</strong>
+                        <span>${_govGetDashboardRangeLabel(startMonth, endMonth, months)}</span>
+                    </div>
+                    <small>${govDashboardStatusMessage || '暂无可统计数据'}</small>
+                </div>
+                <div class="gov-summary-empty">-</div>
+            </div>
+        `;
+    }
+
+    const rangeLabel = _govGetDashboardRangeLabel(startMonth, endMonth, months);
+    const metaText = `${metrics.monthCount} 个月 · ${_govFormatInteger(metrics.itemCount)} 条知识 · 权重分母 ${_govFormatInteger(metrics.totalWeight)}`;
+    return `
+        <div class="gov-summary-section">
+            <div class="gov-summary-head">
+                <div>
+                    <strong>周期加权大盘</strong>
+                    <span>${rangeLabel}</span>
+                </div>
+                <small>${metaText}</small>
+            </div>
+            <div class="gov-summary-strip gov-summary-strip-dashboard">
+                ${_govDashboardCardHtml('总召回频数', _govFormatInteger(metrics.totalRecall), { cardClass: 'gov-summary-card-total' })}
+                ${_govDashboardCardHtml('总有效召回频数', _govFormatInteger(metrics.totalValid), { valueClass: 'is-success' })}
+                ${_govDashboardCardHtml('整体有效召回率', _govFormatPercent(metrics.overallValidRate), { valueClass: 'is-info' })}
+                <div class="gov-summary-divider"></div>
+                ${_govDashboardCardHtml('平均召回频数', _govFormatAverage(metrics.avgRecall), { note: '总召回 / 总权重' })}
+                ${_govDashboardCardHtml('平均有效召回频数', _govFormatAverage(metrics.avgValidRecall), { valueClass: 'is-success', note: '总有效 / 总权重' })}
+                ${_govDashboardCardHtml('平均召回占比', _govFormatPercent(metrics.avgRecallRatio), { valueClass: 'is-info', note: '按月占比加权' })}
+                ${_govDashboardCardHtml('平均有效召回占比', _govFormatPercent(metrics.avgValidRecallRatio), { valueClass: 'is-info', note: '按月占比加权' })}
+                ${_govDashboardCardHtml('平均有效召回率', _govFormatPercent(metrics.avgValidRate), { valueClass: 'is-info', note: '按月有效率加权' })}
+            </div>
+        </div>
+    `;
+}
+
+function renderGovSummaryPanel() {
+    const summaryEl = document.getElementById('govSummary');
+    if (!summaryEl) return;
+    summaryEl.innerHTML = `
+        ${_govBuildNativeSummaryHtml()}
+        ${_govBuildDashboardSummaryHtml()}
+    `;
+}
+
+function _govRenderDashboardSummary(startMonth, endMonth, months, metrics) {
+    currentGovDashboardMetrics = metrics || null;
+    currentGovDashboardRange = { startMonth: startMonth || '', endMonth: endMonth || '', months: months || [] };
+    govDashboardStatusMessage = metrics?.hasData ? '' : '暂无可统计数据';
+    govDashboardStatusClass = 'text-muted';
+    renderGovSummaryPanel();
+}
+
+async function loadGovDashboardData(options = {}) {
+    const startMonth = document.getElementById('govDashboardStartMonth')?.value;
+    const endMonth = document.getElementById('govDashboardEndMonth')?.value;
+
+    if (!startMonth) {
+        if (govMonths.length === 0) await loadGovMonths();
+        _govRenderDashboardMessage('请选择大盘统计月份范围');
+        return;
+    }
+
+    saveGovDashboardRangeFromControls();
+    _govRenderDashboardMessage('大盘加载中...');
+
+    try {
+        const normalizedRange = _govNormalizeDashboardRange(startMonth, endMonth);
+        const params = new URLSearchParams({ month: normalizedRange.startMonth });
+        if (normalizedRange.endMonth) params.set('end_month', normalizedRange.endMonth);
+        const url = `/governance/data?${params.toString()}`;
+        if (options.reuse && govLastDashboardKey === url && currentGovDashboardMetrics) {
+            _govRenderDashboardSummary(
+                normalizedRange.startMonth,
+                normalizedRange.endMonth,
+                govDashboardMonths,
+                currentGovDashboardMetrics
+            );
+            if (govData.length > 0) {
+                renderGovTable();
+                updateGovPagination();
+            }
+            return;
+        }
+        const res = await api(url);
+
+        if (!res.success) {
+            _govRenderDashboardMessage(res.message || '大盘加载失败', 'error-message');
+            return;
+        }
+
+        govDashboardMonths = res.months || [];
+        currentGovDashboardSummary = res.summary || {};
+        govDashboardData = (res.data || []).map(item => ({
+            ...item,
+            weighted_summary: _govComputeItemWeightedMetrics(item, govDashboardMonths, currentGovDashboardSummary)
+        }));
+        govDashboardDataById = new Map(govDashboardData.map(item => [String(item.id || '').trim(), item]));
+
+        const metrics = _govComputeDashboardMetrics(govDashboardData, govDashboardMonths, currentGovDashboardSummary);
+        govLastDashboardKey = url;
+        _govRenderDashboardSummary(normalizedRange.startMonth, normalizedRange.endMonth, govDashboardMonths, metrics);
+        if (govData.length > 0) {
+            renderGovTable();
+            updateGovPagination();
+        }
+    } catch (e) {
+        _govRenderDashboardMessage(`大盘加载失败: ${e.message}`, 'error-message');
     }
 }
 
@@ -4327,6 +4804,14 @@ function renderGovTable() {
         th.innerHTML = `<b>${month}</b>`;
         tr1.appendChild(th);
     });
+
+    const thWeighted = document.createElement('th');
+    thWeighted.colSpan = 5;
+    thWeighted.className = 'text-center gov-weighted-group';
+    thWeighted.style.borderBottom = '1px solid #dee2e6';
+    thWeighted.style.backgroundColor = '#e0f2fe';
+    thWeighted.innerHTML = '<b>大盘周期加权汇总</b>';
+    tr1.appendChild(thWeighted);
     
     // Status Column
     const thStatus = document.createElement('th');
@@ -4360,6 +4845,15 @@ function renderGovTable() {
              tr2.appendChild(th);
         });
     });
+
+    _govGetWeightedMetricSpecs().forEach(spec => {
+        const th = document.createElement('th');
+        th.className = 'col-weighted';
+        th.style.fontSize = '0.9em';
+        th.style.color = '#0369a1';
+        th.innerHTML = _govSortableHeaderHtml(spec.label, spec.metric);
+        tr2.appendChild(th);
+    });
     thead.appendChild(tr2);
 
     // 2. Render Rows
@@ -4373,8 +4867,8 @@ function renderGovTable() {
     const pageData = data.slice(start, end);
     
     if (pageData.length === 0) {
-         // Calculate colspan: 3 (fixed) + months * 5 + 1 (status)
-         const totalCols = 3 + (currentGovMonths.length * 5) + 1;
+         // Calculate colspan: 3 (fixed) + months * 5 + 5 (weighted summary) + 1 (status)
+         const totalCols = 3 + (currentGovMonths.length * 5) + 5 + 1;
          tbody.innerHTML = `<tr><td colspan="${totalCols}" class="empty-message">暂无数据</td></tr>`;
          document.getElementById('govPageInfo').innerText = '共 0 条';
          document.getElementById('prevGovPageBtn').disabled = true;
@@ -4420,6 +4914,11 @@ function renderGovTable() {
                 <td class="text-center text-muted">${validRecallRatio}</td>
                 <td class="text-center">${validRate}</td>
             `;
+        });
+
+        const weightedMetrics = _govGetDashboardWeightedMetricsForItem(item);
+        _govGetWeightedMetricSpecs().forEach(spec => {
+            tr.innerHTML += `<td class="text-center gov-weighted-cell">${_govFormatWeightedMetric(weightedMetrics?.[spec.metric], spec.type)}</td>`;
         });
         
         // Status
@@ -4585,6 +5084,10 @@ async function exportGovernanceFilteredExcel() {
     const originalText = btn ? btn.innerText : '导出 Excel';
     const data = _getFilteredGovData();
     const months = Array.isArray(currentGovMonths) ? [...currentGovMonths] : [];
+    const rows = data.map(item => ({
+        ...item,
+        weighted_summary: _govGetDashboardWeightedMetricsForItem(item)
+    }));
 
     if (data.length === 0) {
         alert('当前筛选结果为空，无法导出。');
@@ -4600,7 +5103,7 @@ async function exportGovernanceFilteredExcel() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'same-origin',
-            body: JSON.stringify({ months, rows: data })
+            body: JSON.stringify({ months, rows })
         });
         if (!resp.ok) {
             let message = '导出失败';
@@ -4635,6 +5138,33 @@ function openGovImportModal() {
 
 function closeGovImportModal() {
     document.getElementById('govImportModal').style.display = 'none';
+}
+
+async function deleteGovernanceData() {
+    const month = document.getElementById('govStartMonth')?.value;
+    if (!month) {
+        alert('请先选择要删除的月份。');
+        return;
+    }
+
+    const confirmed = confirm(`确认删除 ${month} 的知识库治理召回数据吗？此操作不可恢复。`);
+    if (!confirmed) return;
+
+    try {
+        const res = await api('/governance/delete', 'POST', { month });
+        if (!res.success) {
+            alert('删除失败: ' + (res.message || '未知错误'));
+            return;
+        }
+
+        const deletedText = (res.deleted === null || res.deleted === undefined)
+            ? ''
+            : `，共删除 ${res.deleted} 条`;
+        alert(`已删除 ${month} 数据${deletedText}。`);
+        await loadGovMonths();
+    } catch (e) {
+        alert('删除异常: ' + (e?.message || String(e)));
+    }
 }
 
 async function confirmGovImport() {
@@ -4684,6 +5214,1174 @@ function downloadGovernanceTemplate() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+}
+
+// ==========================================
+// Quality Control Center Logic
+// ==========================================
+let qcPools = [];
+let qcActivePoolId = null;
+let qcRawPage = 1;
+let qcRawTotal = 0;
+let qcRawPageSize = 50;
+let qcTaskPage = 1;
+let qcTaskTotal = 0;
+let qcTaskPageSize = 20;
+let qcSelectedRaw = new Set();
+let qcSelectedTasks = new Set();
+let qcLastTasks = [];
+let qcLoadedOnce = false;
+let qcActivePane = 'tasks';
+let qcWizardStep = 1;
+let qcWizardEditingPoolId = null;
+let qcWizardSavedPoolId = null;
+let qcWizardScanResult = null;
+let qcConditionSeq = 0;
+let qcMappingDraftBySource = {};
+
+const QC_SOURCE_LABELS = {
+    scoring: '知识库评分',
+    governance: '知识库治理',
+    external: '外部检测'
+};
+const QC_STATUS_LABELS = {
+    pending: '待处理',
+    processing: '处理中',
+    completed: '已完成',
+    ignored: '已忽略'
+};
+const QC_FIELD_OPTIONS = {
+    scoring: [
+        ['kb_id', 'WikiID', 'text'],
+        ['question_content', '问题', 'text'],
+        ['answer_content', '答案', 'text'],
+        ['status', '评分状态', 'text'],
+        ['total_score', '总评分', 'number'],
+        ['remarks', '处理建议/备注', 'text'],
+        ['updated_at', '评分更新时间', 'text']
+    ],
+    governance: [
+        ['kb_id', 'WikiID', 'text'],
+        ['question', '问题', 'text'],
+        ['conclusion', '结论', 'text'],
+        ['analysis', '分析评价', 'text'],
+        ['suggestion', '优化建议', 'text'],
+        ['remarks', '处理建议/备注', 'text'],
+        ['status', '知识库状态', 'text'],
+        ['month', '月份', 'text'],
+        ['recall_count', '每月召回频数', 'number'],
+        ['valid_recall_count', '每月有效召回频数', 'number'],
+        ['valid_rate', '每月有效召回率', 'number'],
+        ['avg_recall_count', '平均召回频数', 'number'],
+        ['avg_valid_recall_count', '平均有效召回频数', 'number'],
+        ['avg_valid_rate', '平均有效召回率', 'number'],
+        ['weighted_avg_recall', '大盘周期加权_平均召回频数', 'number'],
+        ['weighted_avg_valid_recall', '大盘周期加权_平均有效召回频数', 'number'],
+        ['weighted_avg_recall_ratio', '大盘周期加权_平均召回占比', 'number'],
+        ['weighted_avg_valid_recall_ratio', '大盘周期加权_平均有效召回占比', 'number'],
+        ['weighted_avg_valid_rate', '大盘周期加权_平均有效召回率', 'number']
+    ],
+    external: [
+        ['wiki_id', 'WikiID', 'text'],
+        ['issue_text', '问题', 'text'],
+        ['remediation_reference', '建议操作', 'text'],
+        ['priority', '优先级', 'text']
+    ]
+};
+const QC_MAPPING_FIELDS = [
+    ['wiki_id', 'WikiID 字段', false],
+    ['issue', '问题字段', true],
+    ['action', '建议操作字段', true],
+    ['priority', '优先级字段', true]
+];
+const QC_MAPPING_DEFAULTS = {
+    scoring: { wiki_id: 'kb_id', issue: '', action: 'remarks', priority: '' },
+    governance: { wiki_id: 'kb_id', issue: '', action: 'suggestion', priority: '' },
+    external: { wiki_id: 'wiki_id', issue: 'issue_text', action: 'remediation_reference', priority: 'priority' }
+};
+const QC_OPERATOR_OPTIONS = [
+    ['contains', '包含'],
+    ['eq', '等于'],
+    ['neq', '不等于'],
+    ['gt', '大于'],
+    ['gte', '大于等于'],
+    ['lt', '小于'],
+    ['lte', '小于等于'],
+    ['between', '区间'],
+    ['empty', '为空'],
+    ['not_empty', '不为空']
+];
+
+function qcStatusLabel(status) {
+    return QC_STATUS_LABELS[status] || status || '-';
+}
+
+function qcSourceLabel(source) {
+    return QC_SOURCE_LABELS[source] || source || '-';
+}
+
+function qcPriorityLabel(priority) {
+    return String(priority || '').toUpperCase() || '-';
+}
+
+function qcSetText(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = String(text ?? '');
+}
+
+function qcResetWizardAggregationState() {
+    qcWizardSavedPoolId = null;
+    qcWizardScanResult = null;
+    qcRenderWizardPreview(null, '待扫描');
+}
+
+function qcRenderWizardPreview(result, message = '') {
+    const summary = result?.raw_summary || result || {};
+    const sourceCounts = summary.source_counts || {};
+    qcSetText('qcWizardPreviewRaw', summary.raw_count ?? '--');
+    qcSetText('qcWizardPreviewWiki', summary.wiki_count ?? '--');
+    qcSetText('qcWizardPreviewScoring', sourceCounts.scoring ?? '--');
+    qcSetText('qcWizardPreviewGovernance', sourceCounts.governance ?? '--');
+    qcSetText('qcWizardPreviewExternal', sourceCounts.external ?? '--');
+    qcSetText('qcWizardPreviewMessage', message || (result ? '扫描完成' : '待扫描'));
+}
+
+function qcWizardHasNoPendingAggregation() {
+    if (!qcWizardScanResult) return false;
+    const summary = qcWizardScanResult.raw_summary || {};
+    return Number(summary.raw_count || 0) <= 0;
+}
+
+function qcGetGovernanceRuleRange() {
+    const saved = (typeof _govReadDashboardRange === 'function') ? _govReadDashboardRange() : {};
+    const startMonth = (
+        document.getElementById('govDashboardStartMonth')?.value ||
+        currentGovDashboardRange?.startMonth ||
+        saved.startMonth ||
+        ''
+    );
+    const endMonth = (
+        document.getElementById('govDashboardEndMonth')?.value ||
+        currentGovDashboardRange?.endMonth ||
+        saved.endMonth ||
+        ''
+    );
+    if (typeof _govNormalizeDashboardRange === 'function') {
+        return _govNormalizeDashboardRange(startMonth, endMonth);
+    }
+    return (startMonth && endMonth && startMonth > endMonth)
+        ? { startMonth: endMonth, endMonth: startMonth }
+        : { startMonth, endMonth };
+}
+
+function qcGetActivePool() {
+    return qcPools.find(p => String(p.id) === String(qcActivePoolId)) || null;
+}
+
+function qcGetRulePayload() {
+    const rows = Array.from(document.querySelectorAll('#qcConditionRows .qc-condition-row'));
+    const conditions = rows.map(row => {
+        const source = row.querySelector('.qc-cond-source')?.value || '';
+        const fieldEl = row.querySelector('.qc-cond-field');
+        const field = fieldEl?.value || '';
+        const fieldLabel = fieldEl?.selectedOptions?.[0]?.textContent || field;
+        const operatorEl = row.querySelector('.qc-cond-operator');
+        const operator = operatorEl?.value || 'contains';
+        const operatorLabel = operatorEl?.selectedOptions?.[0]?.textContent || operator;
+        const value = String(row.querySelector('.qc-cond-value')?.value ?? '').trim();
+        const value2 = String(row.querySelector('.qc-cond-value2')?.value ?? '').trim();
+        if (!source || !field || (!['empty', 'not_empty'].includes(operator) && !value && operator !== 'between')) return null;
+        return { source, field, field_label: fieldLabel, operator, operator_label: operatorLabel, value, value2 };
+    }).filter(Boolean);
+    const payload = {
+        version: 2,
+        logic: document.getElementById('qcRuleLogic')?.value || 'AND',
+        conditions
+    };
+    const selectedSources = qcGetSelectedSources();
+    const hasGovernanceCondition = conditions.some(c => c.source === 'governance') || selectedSources.includes('governance');
+    if (hasGovernanceCondition) {
+        const range = qcGetGovernanceRuleRange();
+        if (range.startMonth) payload.governance_month_start = range.startMonth;
+        if (range.endMonth) payload.governance_month_end = range.endMonth;
+    }
+    return payload;
+}
+
+function qcGetSelectedSources() {
+    return Array.from(document.querySelectorAll('#qcPoolWizardModal .qc-source-check:checked'))
+        .map(cb => cb.value)
+        .filter(Boolean);
+}
+
+function qcDefaultConditionForSource(source) {
+    const defaults = {
+        scoring: { source: 'scoring', field: 'total_score', operator: 'lte', value: '70' },
+        governance: { source: 'governance', field: 'weighted_avg_recall', operator: 'gt', value: '0' },
+        external: { source: 'external', field: 'issue_text', operator: 'not_empty', value: '' }
+    };
+    return defaults[source] || defaults.governance;
+}
+
+function qcDefaultMappingForSource(source) {
+    return { ...(QC_MAPPING_DEFAULTS[source] || QC_MAPPING_DEFAULTS.external) };
+}
+
+function qcMappingAliasValue(source, key, value) {
+    const norm = String(value || '').trim().replace(/[\s_：:]+/g, '').toLowerCase();
+    if (!norm) return '';
+    const aliases = {
+        scoring: {
+            wiki_id: { wikiid: 'kb_id', kbid: 'kb_id', 知识库id: 'kb_id' },
+            issue: { 问题: 'question_content', 问题描述: 'question_content', 建议操作: 'remarks', 处理建议: 'remarks', 备注: 'remarks' },
+            action: { 建议操作: 'remarks', 处理建议: 'remarks', 备注: 'remarks' },
+            priority: { 优先级: '' }
+        },
+        governance: {
+            wiki_id: { wikiid: 'kb_id', kbid: 'kb_id', 知识库id: 'kb_id' },
+            issue: { 问题: 'question' },
+            action: { 建议操作: 'suggestion', 优化建议: 'suggestion', 处理建议: 'suggestion', 分析评价: 'analysis', 结论: 'conclusion', 备注: 'remarks' },
+            priority: { 优先级: '' }
+        },
+        external: {
+            wiki_id: { wikiid: 'wiki_id', kbid: 'wiki_id', 知识库id: 'wiki_id' },
+            issue: { 问题: 'issue_text', 问题描述: 'issue_text', 检测问题: 'issue_text' },
+            action: { 建议操作: 'remediation_reference', 建议: 'remediation_reference', 处理建议: 'remediation_reference' },
+            priority: { 优先级: 'priority', p级别: 'priority', 等级: 'priority' }
+        }
+    };
+    const sourceAliases = aliases[source]?.[key] || {};
+    return Object.prototype.hasOwnProperty.call(sourceAliases, norm) ? sourceAliases[norm] : null;
+}
+
+function qcResolveMappingValueForSource(source, key, value) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    const alias = qcMappingAliasValue(source, key, raw);
+    if (alias !== null) return alias;
+    const norm = raw.replace(/[\s_：:]+/g, '').toLowerCase();
+    const option = (QC_FIELD_OPTIONS[source] || []).find(([fieldValue, label]) => {
+        return [fieldValue, label].some(item => String(item || '').replace(/[\s_：:]+/g, '').toLowerCase() === norm);
+    });
+    return option ? option[0] : raw;
+}
+
+function qcNormalizeMappingConfig(mapping = {}, sources = []) {
+    const selectedSources = (sources && sources.length) ? sources : ['governance'];
+    const bySource = mapping?.by_source || mapping?.bySource || mapping?.source_mappings || {};
+    const hasBySource = bySource && typeof bySource === 'object' && !Array.isArray(bySource);
+    const out = {};
+    selectedSources.forEach(source => {
+        const defaults = qcDefaultMappingForSource(source);
+        const raw = hasBySource ? (bySource[source] || {}) : (mapping || {});
+        const item = {};
+        QC_MAPPING_FIELDS.forEach(([key]) => {
+            const hasRawValue = raw && Object.prototype.hasOwnProperty.call(raw, key);
+            const resolved = hasRawValue ? qcResolveMappingValueForSource(source, key, raw?.[key]) : '';
+            item[key] = hasRawValue ? resolved : (defaults[key] || '');
+        });
+        out[source] = item;
+    });
+    return out;
+}
+
+function qcReadMappingDraftFromDom() {
+    const next = { ...qcMappingDraftBySource };
+    document.querySelectorAll('#qcMappingRows .qc-mapping-card').forEach(card => {
+        const source = card.dataset.source;
+        if (!source) return;
+        const item = {};
+        card.querySelectorAll('.qc-map-field').forEach(select => {
+            const key = select.dataset.mapKey;
+            if (key) item[key] = String(select.value || '').trim();
+        });
+        next[source] = { ...qcDefaultMappingForSource(source), ...item };
+    });
+    qcMappingDraftBySource = next;
+    return next;
+}
+
+function qcMappingFieldOptionsForSource(source, selected = '', allowEmpty = true) {
+    const options = [...(QC_FIELD_OPTIONS[source] || [])];
+    const hasSelected = !selected || options.some(([value]) => value === selected);
+    const emptyOption = allowEmpty ? '<option value="">不设置</option>' : '';
+    const customOption = (!hasSelected && selected)
+        ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}</option>`
+        : '';
+    return `${emptyOption}${customOption}${options.map(([value, label]) => {
+        return `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    }).join('')}`;
+}
+
+function qcRenderMappingRows(options = {}) {
+    const host = document.getElementById('qcMappingRows');
+    if (!host) return;
+    if (options.preserveDom !== false) qcReadMappingDraftFromDom();
+    const sources = qcGetSelectedSources();
+    if (!sources.length) {
+        host.innerHTML = '<div class="qc-empty-panel">请先选择数据来源</div>';
+        return;
+    }
+    qcMappingDraftBySource = qcNormalizeMappingConfig({ by_source: qcMappingDraftBySource }, sources);
+    host.innerHTML = sources.map(source => {
+        const mapping = qcMappingDraftBySource[source] || qcDefaultMappingForSource(source);
+        const fields = QC_MAPPING_FIELDS.map(([key, label, allowEmpty]) => `
+            <label>
+                <span>${escapeHtml(label)}</span>
+                <select class="form-select qc-map-field" data-map-key="${escapeHtml(key)}" onchange="qcReadMappingDraftFromDom()">
+                    ${qcMappingFieldOptionsForSource(source, mapping[key] || '', allowEmpty)}
+                </select>
+            </label>
+        `).join('');
+        return `
+            <div class="qc-mapping-card" data-source="${escapeHtml(source)}">
+                <div class="qc-mapping-card-head">
+                    <b>${escapeHtml(qcSourceLabel(source))}</b>
+                </div>
+                <div class="qc-mapping-grid">${fields}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function qcBuildFieldMappingPayload() {
+    const sources = qcGetSelectedSources();
+    const bySource = qcNormalizeMappingConfig({ by_source: qcReadMappingDraftFromDom() }, sources);
+    qcMappingDraftBySource = bySource;
+    const primary = bySource[sources[0]] || {};
+    return {
+        version: 2,
+        ...primary,
+        by_source: bySource
+    };
+}
+
+function qcApplyPoolToForm(pool) {
+    const setVal = (id, value = '') => {
+        const el = document.getElementById(id);
+        if (el) el.value = value ?? '';
+    };
+    setVal('qcPoolName', pool?.name || '');
+    const rule = pool?.rule_config || {};
+    setVal('qcRuleLogic', rule.logic || 'AND');
+    const sources = new Set(pool?.sources || ['scoring', 'governance']);
+    document.querySelectorAll('#qcPoolWizardModal .qc-source-check').forEach(cb => {
+        cb.checked = sources.has(cb.value);
+    });
+    qcMappingDraftBySource = qcNormalizeMappingConfig(pool?.field_mapping || {}, Array.from(sources));
+    qcRenderMappingRows({ preserveDom: false });
+    qcRenderConditionRows(rule.conditions || []);
+}
+
+function qcFieldOptionsForSource(source, selected = '') {
+    const list = QC_FIELD_OPTIONS[source] || [];
+    return list.map(([value, label]) => `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
+}
+
+function qcSourceOptions(selected = '') {
+    const selectedSources = qcGetSelectedSources();
+    const values = selectedSources.length ? selectedSources : Object.keys(QC_SOURCE_LABELS);
+    const unique = selected && !values.includes(selected) ? [selected, ...values] : values;
+    return unique.map(value => `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(qcSourceLabel(value))}</option>`).join('');
+}
+
+function qcOperatorOptions(selected = '') {
+    return QC_OPERATOR_OPTIONS.map(([value, label]) => `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
+}
+
+function qcRenderConditionRows(conditions = []) {
+    const host = document.getElementById('qcConditionRows');
+    if (!host) return;
+    host.innerHTML = '';
+    const defaultSource = qcGetSelectedSources()[0] || 'governance';
+    const rows = Array.isArray(conditions) && conditions.length ? conditions : [qcDefaultConditionForSource(defaultSource)];
+    rows.forEach(c => qcAddConditionRow(c));
+    qcNormalizeConditionRowsForSources();
+}
+
+function qcAddConditionRow(condition = {}) {
+    const host = document.getElementById('qcConditionRows');
+    if (!host) return;
+    const selectedSources = qcGetSelectedSources();
+    let source = condition.source || selectedSources[0] || 'governance';
+    if (selectedSources.length && !selectedSources.includes(source)) source = selectedSources[0];
+    const rowId = `qc-cond-${++qcConditionSeq}`;
+    const row = document.createElement('div');
+    row.className = 'qc-condition-row';
+    row.dataset.rowId = rowId;
+    row.innerHTML = `
+        <select class="form-select qc-cond-source" onchange="qcUpdateConditionFieldOptions(this)">
+            ${qcSourceOptions(source)}
+        </select>
+        <select class="form-select qc-cond-field">${qcFieldOptionsForSource(source, condition.field || '')}</select>
+        <select class="form-select qc-cond-operator" onchange="qcSyncConditionValueInputs(this)">${qcOperatorOptions(condition.operator || 'contains')}</select>
+        <input class="form-control qc-cond-value" type="text" placeholder="值" value="${escapeHtml(condition.value ?? '')}">
+        <input class="form-control qc-cond-value2" type="text" placeholder="结束值" value="${escapeHtml(condition.value2 ?? '')}">
+        <button type="button" class="danger-btn qc-icon-btn" title="删除条件" onclick="this.closest('.qc-condition-row').remove()"><i class="fas fa-trash"></i></button>
+    `;
+    host.appendChild(row);
+    qcSyncConditionValueInputs(row.querySelector('.qc-cond-operator'));
+}
+
+function qcNormalizeConditionRowsForSources() {
+    const rows = Array.from(document.querySelectorAll('#qcConditionRows .qc-condition-row'));
+    const selectedSources = qcGetSelectedSources();
+    if (!rows.length) {
+        if (selectedSources.length) qcRenderConditionRows([qcDefaultConditionForSource(selectedSources[0])]);
+        qcRenderMappingRows();
+        return;
+    }
+    rows.forEach(row => {
+        const sourceSelect = row.querySelector('.qc-cond-source');
+        const fieldSelect = row.querySelector('.qc-cond-field');
+        if (!sourceSelect || !fieldSelect) return;
+        let source = sourceSelect.value || selectedSources[0] || 'governance';
+        if (selectedSources.length && !selectedSources.includes(source)) source = selectedSources[0];
+        const previousField = fieldSelect.value;
+        sourceSelect.innerHTML = qcSourceOptions(source);
+        sourceSelect.value = source;
+        fieldSelect.innerHTML = qcFieldOptionsForSource(source, previousField);
+        if (!fieldSelect.value && fieldSelect.options.length) fieldSelect.selectedIndex = 0;
+    });
+    qcRenderMappingRows();
+}
+
+function qcUpdateConditionFieldOptions(sourceSelect) {
+    const row = sourceSelect.closest('.qc-condition-row');
+    const field = row?.querySelector('.qc-cond-field');
+    if (!field) return;
+    field.innerHTML = qcFieldOptionsForSource(sourceSelect.value);
+}
+
+function qcSyncConditionValueInputs(operatorSelect) {
+    const row = operatorSelect?.closest('.qc-condition-row');
+    if (!row) return;
+    const op = operatorSelect.value;
+    const value = row.querySelector('.qc-cond-value');
+    const value2 = row.querySelector('.qc-cond-value2');
+    const noValue = ['empty', 'not_empty'].includes(op);
+    if (value) value.style.display = noValue ? 'none' : '';
+    if (value2) value2.style.display = op === 'between' ? '' : 'none';
+}
+
+function qcRenderPoolOptions() {
+    const activeSelect = document.getElementById('qcActivePoolSelect');
+    const taskPoolSelect = document.getElementById('qcTaskPoolFilter');
+    const options = qcPools.map(pool => `<option value="${escapeHtml(pool.id)}">${escapeHtml(pool.name)}</option>`).join('');
+    if (activeSelect) {
+        activeSelect.innerHTML = qcPools.length ? options : '<option value="">暂无任务池</option>';
+        activeSelect.value = qcActivePoolId ? String(qcActivePoolId) : '';
+    }
+    if (taskPoolSelect) {
+        const current = taskPoolSelect.value;
+        taskPoolSelect.innerHTML = `<option value="">全部任务池</option>${options}`;
+        taskPoolSelect.value = current;
+    }
+    qcSetText('qcMetricPools', qcPools.length);
+    qcRenderPoolCards();
+}
+
+function qcRenderPoolCards() {
+    const host = document.getElementById('qcPoolCards');
+    if (!host) return;
+    const kw = String(document.getElementById('qcPoolSearch')?.value || '').trim().toLowerCase();
+    const pools = qcPools.filter(pool => {
+        if (!kw) return true;
+        return [pool.name, pool.rule_summary, ...(pool.source_labels || [])].join(' ').toLowerCase().includes(kw);
+    });
+    if (!pools.length) {
+        host.innerHTML = '<div class="qc-empty-panel">暂无任务池</div>';
+        return;
+    }
+    host.innerHTML = pools.map(pool => `
+        <article class="qc-pool-card ${String(pool.id) === String(qcActivePoolId) ? 'is-active' : ''}">
+            <div class="qc-pool-card-head">
+                <div>
+                    <h3>${escapeHtml(pool.name || '-')}</h3>
+                    <span class="qc-pill ${pool.status === 'active' ? 'qc-pill-completed' : 'qc-pill-ignored'}">${pool.status === 'active' ? '启用中' : '已停用'}</span>
+                </div>
+                <button type="button" class="danger-btn qc-icon-btn" onclick="qcDeletePool(${Number(pool.id)})" title="删除任务池"><i class="fas fa-trash"></i></button>
+            </div>
+            <div class="qc-source-list">${(pool.source_labels || []).map(s => `<span class="qc-source-pill">${escapeHtml(s)}</span>`).join('')}</div>
+            <div class="qc-rule-summary">${escapeHtml(pool.rule_summary || '未设置筛选条件')}</div>
+            <div class="qc-pool-stats">
+                <span>原始数据 <b>${Number(pool.raw_count || 0)}</b></span>
+                <span>已聚合 <b>${Number(pool.aggregated_count || pool.task_count || 0)}</b></span>
+                <span>待处理 <b>${Number(pool.pending_count || 0)}</b></span>
+                <span>处理中 <b>${Number(pool.processing_count || 0)}</b></span>
+                <span>已完成 <b>${Number(pool.completed_count || 0)}</b></span>
+            </div>
+            <div class="qc-pool-card-actions">
+                <button type="button" class="action-btn" onclick="qcViewPoolTasks(${Number(pool.id)})"><i class="fas fa-eye"></i> 查看任务</button>
+                <button type="button" class="action-btn" onclick="qcOpenPoolWizard(${Number(pool.id)})"><i class="fas fa-edit"></i> 编辑规则</button>
+                <button type="button" class="action-btn" onclick="qcScanPool(${Number(pool.id)})"><i class="fas fa-search"></i> 重新扫描</button>
+                <button type="button" class="primary-btn" onclick="qcActivatePoolForAggregation(${Number(pool.id)})">继续聚合</button>
+            </div>
+        </article>
+    `).join('');
+}
+
+function qcNewPool() {
+    qcOpenPoolWizard();
+}
+
+async function qcLoadPools() {
+    const res = await api('/quality/pools');
+    if (!res?.success) throw new Error(res?.message || '任务池加载失败');
+    qcPools = Array.isArray(res.pools) ? res.pools : [];
+    if (!qcActivePoolId && qcPools.length) qcActivePoolId = qcPools[0].id;
+    if (qcActivePoolId && !qcPools.some(p => String(p.id) === String(qcActivePoolId))) {
+        qcActivePoolId = qcPools.length ? qcPools[0].id : null;
+    }
+    qcRenderPoolOptions();
+    qcApplyPoolToForm(qcGetActivePool());
+}
+
+async function qcLoadAll() {
+    try {
+        await qcLoadPools();
+        await Promise.all([qcLoadRawIssues(1), qcLoadTasks(1)]);
+        qcLoadedOnce = true;
+    } catch (e) {
+        showToast('管控中心加载失败: ' + (e?.message || String(e)), 'error');
+    }
+}
+
+function qcSelectPool(value) {
+    qcActivePoolId = value ? Number(value) : null;
+    qcSelectedRaw.clear();
+    qcApplyPoolToForm(qcGetActivePool());
+    qcLoadRawIssues(1);
+}
+
+function qcSwitchPane(pane) {
+    qcActivePane = pane || 'tasks';
+    document.querySelectorAll('.qc-inner-tab').forEach(btn => {
+        btn.classList.toggle('is-active', btn.dataset.qcPane === qcActivePane);
+    });
+    document.querySelectorAll('#controlCenterView .qc-pane').forEach(el => {
+        const active = el.id === `qcPane${qcActivePane.charAt(0).toUpperCase()}${qcActivePane.slice(1)}`;
+        el.classList.toggle('is-active', active);
+        el.classList.toggle('d-none', !active);
+    });
+    if (qcActivePane === 'pools') {
+        qcRenderPoolCards();
+        const detail = document.getElementById('qcPoolDetailPanel');
+        if (detail && !detail.classList.contains('d-none')) qcLoadRawIssues(qcRawPage);
+    } else if (qcActivePane === 'tasks') {
+        qcLoadTasks(qcTaskPage);
+    }
+}
+
+function qcOpenPoolWizard(poolId = null) {
+    qcWizardEditingPoolId = poolId;
+    qcWizardStep = 1;
+    qcResetWizardAggregationState();
+    const pool = poolId ? qcPools.find(p => String(p.id) === String(poolId)) : null;
+    const modal = document.getElementById('qcPoolWizardModal');
+    const title = document.getElementById('qcWizardTitle');
+    if (title) title.textContent = pool ? '编辑任务池' : '新建任务池';
+    const manualOnly = document.getElementById('qcWizardManualOnly');
+    if (manualOnly) manualOnly.checked = false;
+    qcApplyPoolToForm(pool);
+    if (!pool) {
+        document.querySelectorAll('#qcPoolWizardModal .qc-source-check').forEach(cb => {
+            cb.checked = cb.value === 'governance';
+        });
+        qcRenderConditionRows([]);
+    }
+    qcSyncWizardStep();
+    if (modal) modal.style.display = 'block';
+}
+
+function qcClosePoolWizard() {
+    const modal = document.getElementById('qcPoolWizardModal');
+    if (modal) modal.style.display = 'none';
+    qcWizardEditingPoolId = null;
+}
+
+function qcShowPoolDetail(poolId) {
+    qcActivePoolId = poolId ? Number(poolId) : qcActivePoolId;
+    const select = document.getElementById('qcActivePoolSelect');
+    if (select && qcActivePoolId) select.value = String(qcActivePoolId);
+    const detail = document.getElementById('qcPoolDetailPanel');
+    if (detail) detail.classList.remove('d-none');
+    qcSwitchPane('pools');
+}
+
+function qcHidePoolDetail() {
+    const detail = document.getElementById('qcPoolDetailPanel');
+    if (detail) detail.classList.add('d-none');
+}
+
+function qcSyncWizardStep() {
+    document.querySelectorAll('#qcPoolWizardModal .qc-wizard-step').forEach(el => {
+        const active = Number(el.dataset.step) === qcWizardStep;
+        el.classList.toggle('d-none', !active);
+    });
+    document.querySelectorAll('#qcPoolWizardModal .qc-wizard-step-pill').forEach(el => {
+        const step = Number(el.dataset.step);
+        el.classList.toggle('is-active', step === qcWizardStep);
+        el.classList.toggle('is-done', step < qcWizardStep);
+    });
+    const prev = document.getElementById('qcWizardPrevBtn');
+    const next = document.getElementById('qcWizardNextBtn');
+    if (prev) prev.disabled = qcWizardStep <= 1;
+    if (next) {
+        if (qcWizardStep < 4) {
+            next.textContent = '下一步';
+        } else if (!qcWizardScanResult) {
+            next.textContent = '保存并扫描';
+        } else if (qcWizardHasNoPendingAggregation()) {
+            next.textContent = '完成';
+        } else if (document.getElementById('qcWizardManualOnly')?.checked) {
+            next.textContent = '完成';
+        } else {
+            next.textContent = '聚合生成任务';
+        }
+    }
+}
+
+function qcWizardPrev() {
+    if (qcWizardStep === 4) {
+        qcWizardScanResult = null;
+        qcRenderWizardPreview(null, '待扫描');
+    }
+    qcWizardStep = Math.max(1, qcWizardStep - 1);
+    qcSyncWizardStep();
+}
+
+async function qcWizardNext() {
+    if (qcWizardStep < 4) {
+        if (qcWizardStep === 1) {
+            const name = String(document.getElementById('qcPoolName')?.value || '').trim();
+            if (!name) {
+                showToast('请填写任务池名称', 'warning');
+                return;
+            }
+            if (!qcGetSelectedSources().length) {
+                showToast('至少选择一个数据来源', 'warning');
+                return;
+            }
+            qcNormalizeConditionRowsForSources();
+        }
+        qcWizardStep += 1;
+        qcSyncWizardStep();
+        return;
+    }
+    if (!qcWizardScanResult) {
+        const saveResult = await qcSavePool({
+            fromWizard: true,
+            closeWizard: false,
+            scanAfterSave: true,
+            quietSuccess: true
+        });
+        if (!saveResult?.success || !saveResult.scanOk) return;
+        qcWizardSavedPoolId = saveResult.pool?.id || qcActivePoolId;
+        qcWizardScanResult = saveResult.scanResult || { raw_summary: saveResult.pool?.raw_summary || {} };
+        const removedText = Number(qcWizardScanResult.removed_raw_count || 0) > 0 ? `，清理 ${qcWizardScanResult.removed_raw_count} 条旧命中` : '';
+        const noPendingText = qcWizardHasNoPendingAggregation() ? '，暂无新的待聚合项' : '';
+        qcRenderWizardPreview(qcWizardScanResult, `扫描完成：命中 ${qcWizardScanResult.matched_count || 0} 条${removedText}${noPendingText}`);
+        qcSyncWizardStep();
+        return;
+    }
+    if (qcWizardHasNoPendingAggregation()) {
+        qcClosePoolWizard();
+        qcSwitchPane('pools');
+        await Promise.all([qcLoadPools(), qcLoadTasks(1), qcLoadRawIssues(1)]);
+        showToast('命中项已全部聚合，无需重复生成任务', 'info');
+        return;
+    }
+    if (document.getElementById('qcWizardManualOnly')?.checked) {
+        qcClosePoolWizard();
+        qcSwitchPane('pools');
+        qcShowPoolDetail(qcWizardSavedPoolId || qcActivePoolId);
+        showToast('原始问题已保存，可稍后人工聚合', 'success');
+        return;
+    }
+    await qcAggregateAllRawForActivePool({
+        closeWizard: true,
+        priority: document.getElementById('qcWizardDefaultPriority')?.value || 'p2'
+    });
+}
+
+async function qcSavePool(options = {}) {
+    const name = String(document.getElementById('qcPoolName')?.value || '').trim();
+    if (!name) {
+        showToast('请填写任务池名称', 'warning');
+        return;
+    }
+    const payload = {
+        name,
+        sources: qcGetSelectedSources(),
+        rule_config: qcGetRulePayload(),
+        field_mapping: qcBuildFieldMappingPayload()
+    };
+    try {
+        const editingId = options.fromWizard ? (qcWizardEditingPoolId || qcWizardSavedPoolId) : (qcWizardEditingPoolId || qcActivePoolId);
+        const path = editingId ? `/quality/pools/${editingId}` : '/quality/pools';
+        const method = editingId ? 'PATCH' : 'POST';
+        const res = await api(path, method, payload);
+        if (!res?.success) throw new Error(res?.message || '保存失败');
+        qcActivePoolId = res.pool?.id || qcActivePoolId;
+        if (options.fromWizard) qcWizardSavedPoolId = qcActivePoolId;
+        await qcLoadPools();
+        const shouldScan = !!options.scanAfterSave;
+        let scanOk = true;
+        let scanResult = null;
+        if (shouldScan && qcActivePoolId) {
+            scanResult = await qcScanActivePool({ silent: true, returnResult: true });
+            scanOk = !!scanResult;
+        }
+        if (options.closeWizard) {
+            const defaultPriority = document.getElementById('qcWizardDefaultPriority')?.value || 'p2';
+            const aggregatePriority = document.getElementById('qcAggregatePriority');
+            if (aggregatePriority) aggregatePriority.value = defaultPriority;
+            qcClosePoolWizard();
+            qcSwitchPane('pools');
+            qcShowPoolDetail(qcActivePoolId);
+        }
+        if (!options.quietSuccess) {
+            showToast(shouldScan ? (scanOk ? '任务池已保存并扫描完成' : '任务池已保存，扫描未完成') : '任务池规则已保存', scanOk ? 'success' : 'warning');
+        }
+        return { success: true, pool: res.pool, scanOk, scanResult };
+    } catch (e) {
+        showToast('保存任务池失败: ' + (e?.message || String(e)), 'error');
+        return { success: false };
+    }
+}
+
+function qcViewPoolTasks(poolId) {
+    const filter = document.getElementById('qcTaskPoolFilter');
+    if (filter) filter.value = String(poolId);
+    qcSwitchPane('tasks');
+    qcLoadTasks(1);
+}
+
+function qcActivatePoolForAggregation(poolId) {
+    qcShowPoolDetail(poolId);
+}
+
+async function qcScanPool(poolId) {
+    qcActivePoolId = poolId;
+    const select = document.getElementById('qcActivePoolSelect');
+    if (select) select.value = String(poolId);
+    qcShowPoolDetail(poolId);
+    return qcScanActivePool();
+}
+
+async function qcDeletePool(poolId) {
+    qcActivePoolId = poolId;
+    await qcDeleteActivePool();
+}
+
+async function qcDeleteActivePool() {
+    if (!qcActivePoolId) {
+        showToast('请先选择任务池', 'warning');
+        return;
+    }
+    const pool = qcGetActivePool();
+    if (!confirm(`确认删除任务池“${pool?.name || qcActivePoolId}”及其生成的任务吗？`)) return;
+    try {
+        const res = await api(`/quality/pools/${qcActivePoolId}`, 'DELETE');
+        if (!res?.success) throw new Error(res?.message || '删除失败');
+        qcActivePoolId = null;
+        qcSelectedRaw.clear();
+        qcSelectedTasks.clear();
+        await qcLoadAll();
+        showToast('任务池已删除', 'success');
+    } catch (e) {
+        showToast('删除任务池失败: ' + (e?.message || String(e)), 'error');
+    }
+}
+
+async function qcScanActivePool(options = {}) {
+    if (!qcActivePoolId) {
+        showToast('请先选择任务池', 'warning');
+        return false;
+    }
+    try {
+        const pool = qcGetActivePool();
+        const scanPayload = {};
+        if ((pool?.sources || []).includes('governance')) {
+            const range = qcGetGovernanceRuleRange();
+            if (range.startMonth) scanPayload.governance_month_start = range.startMonth;
+            if (range.endMonth) scanPayload.governance_month_end = range.endMonth;
+        }
+        const res = await api(`/quality/pools/${qcActivePoolId}/scan`, 'POST', scanPayload);
+        if (!res?.success) throw new Error(res?.message || '扫描失败');
+        await qcLoadPools();
+        await qcLoadRawIssues(1);
+        const removedText = Number(res.removed_raw_count || 0) > 0 ? `，清理 ${res.removed_raw_count} 条旧命中` : '';
+        if (!options.silent) showToast(`扫描完成：命中 ${res.matched_count || 0} 条${removedText}`, 'success');
+        return options.returnResult ? res : true;
+    } catch (e) {
+        showToast('扫描失败: ' + (e?.message || String(e)), 'error');
+        return options.returnResult ? null : false;
+    }
+}
+
+async function qcImportExternalFile() {
+    const input = document.getElementById('qcImportFile');
+    if (!input?.files?.length) {
+        showToast('请选择外部检测文件', 'warning');
+        return;
+    }
+    const formData = new FormData();
+    formData.append('file', input.files[0]);
+    if (qcActivePoolId) formData.append('target_pool_id', qcActivePoolId);
+    try {
+        const resp = await fetch(`${API_BASE}/quality/import`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            body: formData
+        });
+        const res = await resp.json();
+        if (!res?.success) throw new Error(res?.message || '导入失败');
+        qcActivePoolId = res.pool?.id || qcActivePoolId;
+        input.value = '';
+        await qcLoadPools();
+        await Promise.all([qcLoadRawIssues(1), qcLoadTasks(1)]);
+        const job = res.job || {};
+        showToast(`导入完成：成功 ${job.success_count || 0} 条，失败 ${job.failed_count || 0} 条`, job.failed_count ? 'warning' : 'success');
+        if (job.failed_count && Array.isArray(job.failed_detail)) {
+            console.warn('[Quality Import Failed Detail]', job.failed_detail);
+        }
+    } catch (e) {
+        showToast('导入失败: ' + (e?.message || String(e)), 'error');
+    }
+}
+
+async function qcLoadRawIssues(page = qcRawPage) {
+    qcRawPage = Math.max(1, Number(page) || 1);
+    const tbody = document.getElementById('qcRawTableBody');
+    if (!qcActivePoolId) {
+        if (tbody) tbody.innerHTML = '<tr><td colspan="5" class="empty-message">请先创建或选择任务池</td></tr>';
+        qcSetText('qcRawPageInfo', '共 0 条');
+        return;
+    }
+    const params = new URLSearchParams({
+        page: String(qcRawPage),
+        pageSize: String(qcRawPageSize)
+    });
+    const keyword = String(document.getElementById('qcRawKeyword')?.value || '').trim();
+    const source = String(document.getElementById('qcRawSource')?.value || '').trim();
+    const onlyUnlinked = !!document.getElementById('qcOnlyUnlinked')?.checked;
+    if (keyword) params.set('keyword', keyword);
+    if (source) params.set('source', source);
+    if (onlyUnlinked) params.set('only_unlinked', '1');
+    try {
+        const res = await api(`/quality/pools/${qcActivePoolId}/raw_issues?${params.toString()}`);
+        if (!res?.success) throw new Error(res?.message || '原始问题加载失败');
+        qcRawTotal = Number(res.total || 0);
+        qcRenderRawIssues(res.raw_issues || []);
+    } catch (e) {
+        if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="error-message">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    }
+}
+
+function qcRenderRawIssues(rows) {
+    const tbody = document.getElementById('qcRawTableBody');
+    if (!tbody) return;
+    if (!Array.isArray(rows) || !rows.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-message">暂无原始问题</td></tr>';
+    } else {
+        tbody.innerHTML = rows.map(item => {
+            const id = String(item.id);
+            const checked = qcSelectedRaw.has(id) ? 'checked' : '';
+            const linked = item.linked_task_id ? `已聚合 #${item.linked_task_id}` : (item.ignored ? '已忽略' : '未聚合');
+            return `
+                <tr>
+                    <td class="qc-col-check"><input type="checkbox" ${checked} onchange="qcToggleRaw('${escapeHtml(id)}', this.checked)"></td>
+                    <td><span class="mod-id-text">${escapeHtml(item.wiki_id || '')}</span></td>
+                    <td><span class="qc-source-pill">${escapeHtml(qcSourceLabel(item.source_type))}</span></td>
+                    <td><div class="qc-text-cell" title="${escapeHtml(item.issue_text || '')}">${escapeHtml(item.issue_text || '-')}</div></td>
+                    <td><span class="qc-pill">${escapeHtml(linked)}</span></td>
+                </tr>
+            `;
+        }).join('');
+    }
+    const totalPages = Math.max(1, Math.ceil(qcRawTotal / qcRawPageSize));
+    qcSetText('qcRawPageInfo', `第 ${Math.min(qcRawPage, totalPages)}/${totalPages} 页 ｜ 共 ${qcRawTotal} 条`);
+    const all = document.getElementById('qcSelectAllRaw');
+    if (all) all.checked = rows.length > 0 && rows.every(r => qcSelectedRaw.has(String(r.id)));
+}
+
+function qcToggleRaw(id, checked) {
+    if (checked) qcSelectedRaw.add(String(id));
+    else qcSelectedRaw.delete(String(id));
+}
+
+function qcToggleAllRaw(checked) {
+    document.querySelectorAll('#qcRawTableBody input[type="checkbox"]').forEach(cb => {
+        cb.checked = !!checked;
+        const match = cb.getAttribute('onchange')?.match(/qcToggleRaw\('([^']+)'/);
+        if (match) qcToggleRaw(match[1], !!checked);
+    });
+}
+
+function qcChangeRawPage(delta) {
+    const totalPages = Math.max(1, Math.ceil(qcRawTotal / qcRawPageSize));
+    const next = Math.min(totalPages, Math.max(1, qcRawPage + Number(delta || 0)));
+    if (next !== qcRawPage) qcLoadRawIssues(next);
+}
+
+const qcDebouncedLoadRawImpl = debounce(() => qcLoadRawIssues(1), 300);
+function qcDebouncedLoadRaw() {
+    qcDebouncedLoadRawImpl();
+}
+
+async function qcAggregateAllRawForActivePool(options = {}) {
+    if (!qcActivePoolId) {
+        showToast('请先选择任务池', 'warning');
+        return false;
+    }
+    const priority = options.priority || document.getElementById('qcAggregatePriority')?.value || 'p2';
+    try {
+        const res = await api(`/quality/pools/${qcActivePoolId}/aggregate_all`, 'POST', {
+            priority,
+            only_unlinked: true
+        });
+        if (!res?.success) throw new Error(res?.message || '聚合失败');
+        qcSelectedRaw.clear();
+        await Promise.all([qcLoadPools(), qcLoadTasks(1), qcLoadRawIssues(1)]);
+        if (options.closeWizard) {
+            qcClosePoolWizard();
+            const filter = document.getElementById('qcTaskPoolFilter');
+            if (filter) filter.value = String(qcActivePoolId);
+            qcSwitchPane('tasks');
+        }
+        if (Number(res.linked_count || 0) <= 0 && res.message) {
+            showToast(res.message, 'info');
+        } else {
+            showToast(`聚合完成：${res.wiki_count || 0} 个 WikiID，关联 ${res.linked_count || 0} 条原始问题`, 'success');
+        }
+        return true;
+    } catch (e) {
+        showToast('聚合失败: ' + (e?.message || String(e)), 'error');
+        return false;
+    }
+}
+
+async function qcAggregateSelectedRaw() {
+    if (!qcActivePoolId) {
+        showToast('请先选择任务池', 'warning');
+        return;
+    }
+    const ids = Array.from(qcSelectedRaw);
+    if (!ids.length) {
+        showToast('请选择原始问题', 'warning');
+        return;
+    }
+    const priority = document.getElementById('qcAggregatePriority')?.value || 'p2';
+    try {
+        const res = await api(`/quality/pools/${qcActivePoolId}/aggregate`, 'POST', {
+            raw_issue_ids: ids,
+            priority
+        });
+        if (!res?.success) throw new Error(res?.message || '聚合失败');
+        qcSelectedRaw.clear();
+        await Promise.all([qcLoadRawIssues(qcRawPage), qcLoadTasks(1), qcLoadPools()]);
+        showToast(`聚合完成：关联 ${res.linked_count || 0} 条`, 'success');
+    } catch (e) {
+        showToast('聚合失败: ' + (e?.message || String(e)), 'error');
+    }
+}
+
+async function qcLoadTasks(page = qcTaskPage) {
+    qcTaskPage = Math.max(1, Number(page) || 1);
+    const params = new URLSearchParams({
+        page: String(qcTaskPage),
+        pageSize: String(qcTaskPageSize)
+    });
+    ['Status', 'Priority', 'Source'].forEach(name => {
+        const el = document.getElementById(`qcTask${name}`);
+        const key = name.toLowerCase();
+        if (el?.value) params.set(key, el.value);
+    });
+    const poolFilter = document.getElementById('qcTaskPoolFilter')?.value;
+    if (poolFilter) params.set('pool_id', poolFilter);
+    const keyword = String(document.getElementById('qcTaskKeyword')?.value || '').trim();
+    if (keyword) params.set('keyword', keyword);
+    const tbody = document.getElementById('qcTaskTableBody');
+    try {
+        const res = await api(`/quality/tasks?${params.toString()}`);
+        if (!res?.success) throw new Error(res?.message || '任务加载失败');
+        qcTaskTotal = Number(res.total || 0);
+        qcLastTasks = Array.isArray(res.tasks) ? res.tasks : [];
+        qcRenderTasks(qcLastTasks);
+        qcUpdateMetrics(res.summary || {});
+    } catch (e) {
+        if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="error-message">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    }
+}
+
+function qcUpdateMetrics(summary) {
+    qcSetText('qcMetricPending', summary.pending || 0);
+    qcSetText('qcMetricProcessing', summary.processing || 0);
+    qcSetText('qcMetricCompleted', summary.completed || 0);
+}
+
+function qcCleanSuggestionText(value) {
+    const parts = String(value || '')
+        .split(/[；;\n]/)
+        .map(item => item.trim())
+        .filter(item => item && !/^[-+]?\d+(?:\.\d+)?%?$/.test(item));
+    return Array.from(new Set(parts)).join('；');
+}
+
+function qcRenderTasks(tasks) {
+    const tbody = document.getElementById('qcTaskTableBody');
+    if (!tbody) return;
+    if (!Array.isArray(tasks) || !tasks.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty-message">暂无任务</td></tr>';
+    } else {
+        tbody.innerHTML = tasks.map(task => {
+            const id = String(task.id);
+            const checked = qcSelectedTasks.has(id) ? 'checked' : '';
+            const sources = (task.source_tags || []).map(s => `<span class="qc-source-pill">${escapeHtml(s.source_label)}${s.count ? ` ${s.count}` : ''}</span>`).join('');
+            const issueText = task.issue_tag_text || `共 ${task.issue_count || 0} 条问题 ｜ ${((task.pool_names || []).join('、') || '未关联任务池')}`;
+            const suggestionText = qcCleanSuggestionText(task.suggested_action_text) || '-';
+            return `
+                <tr>
+                    <td class="qc-col-check"><input type="checkbox" ${checked} onchange="qcToggleTask('${escapeHtml(id)}', this.checked)"></td>
+                    <td><span class="qc-pill qc-pill-${escapeHtml(task.status || '')}">${escapeHtml(qcStatusLabel(task.status))}</span></td>
+                    <td><span class="mod-id-text">${escapeHtml(task.wiki_id || '')}</span></td>
+                    <td><div class="qc-text-cell" title="${escapeHtml(task.question || '')}">${escapeHtml(task.question || '-')}</div></td>
+                    <td><div class="qc-text-cell" title="${escapeHtml(suggestionText)}">${escapeHtml(suggestionText)}</div></td>
+                    <td><div class="qc-text-cell" title="${escapeHtml(issueText)}">${escapeHtml(issueText)}</div></td>
+                    <td>
+                        <div class="qc-source-list">${sources || '-'}</div>
+                    </td>
+                    <td>
+                        <div class="qc-action-cell">
+                            <button type="button" class="primary-btn" onclick="qcOpenTaskEditor(${Number(task.id)})" title="编辑"><i class="fas fa-edit"></i></button>
+                            <button type="button" class="action-btn" onclick="qcPatchTask(${Number(task.id)}, { status: 'completed' })" title="完成"><i class="fas fa-check"></i></button>
+                            <button type="button" class="action-btn" onclick="qcPatchTask(${Number(task.id)}, { status: 'ignored' })" title="忽略"><i class="fas fa-ban"></i></button>
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    }
+    const totalPages = Math.max(1, Math.ceil(qcTaskTotal / qcTaskPageSize));
+    qcSetText('qcTaskPageInfo', `第 ${Math.min(qcTaskPage, totalPages)}/${totalPages} 页 ｜ 共 ${qcTaskTotal} 条`);
+    const pageSizeEl = document.getElementById('qcTaskPageSize');
+    if (pageSizeEl && pageSizeEl.value !== String(qcTaskPageSize)) pageSizeEl.value = String(qcTaskPageSize);
+    const all = document.getElementById('qcSelectAllTasks');
+    if (all) all.checked = tasks.length > 0 && tasks.every(t => qcSelectedTasks.has(String(t.id)));
+}
+
+function qcToggleTask(id, checked) {
+    if (checked) qcSelectedTasks.add(String(id));
+    else qcSelectedTasks.delete(String(id));
+}
+
+function qcToggleAllTasks(checked) {
+    (qcLastTasks || []).forEach(task => qcToggleTask(String(task.id), !!checked));
+    document.querySelectorAll('#qcTaskTableBody input[type="checkbox"]').forEach(cb => {
+        cb.checked = !!checked;
+    });
+}
+
+function qcChangeTaskPage(delta) {
+    const totalPages = Math.max(1, Math.ceil(qcTaskTotal / qcTaskPageSize));
+    const next = Math.min(totalPages, Math.max(1, qcTaskPage + Number(delta || 0)));
+    if (next !== qcTaskPage) qcLoadTasks(next);
+}
+
+function qcChangeTaskPageSize(value) {
+    const next = Number(value);
+    qcTaskPageSize = [10, 20, 50].includes(next) ? next : 20;
+    qcLoadTasks(1);
+}
+
+const qcDebouncedLoadTasksImpl = debounce(() => qcLoadTasks(1), 300);
+function qcDebouncedLoadTasks() {
+    qcDebouncedLoadTasksImpl();
+}
+
+async function qcPatchTask(taskId, payload) {
+    try {
+        const res = await api(`/quality/tasks/${taskId}`, 'PATCH', payload || {});
+        if (!res?.success) throw new Error(res?.message || '更新失败');
+        await qcLoadTasks(qcTaskPage);
+    } catch (e) {
+        showToast('更新任务失败: ' + (e?.message || String(e)), 'error');
+    }
+}
+
+async function qcBatchTask(action) {
+    const ids = Array.from(qcSelectedTasks);
+    if (!ids.length) {
+        showToast('请选择任务', 'warning');
+        return;
+    }
+    const label = action === 'complete' ? '提交完成' : action === 'ignore' ? '忽略' : '更新';
+    if (!confirm(`确认${label}当前选中的 ${ids.length} 条任务吗？`)) return;
+    try {
+        const res = await api('/quality/tasks/batch', 'POST', { task_ids: ids, action });
+        if (!res?.success) throw new Error(res?.message || '批量操作失败');
+        qcSelectedTasks.clear();
+        await qcLoadTasks(qcTaskPage);
+        showToast(`已处理 ${res.changed || 0} 条任务`, 'success');
+    } catch (e) {
+        showToast('批量操作失败: ' + (e?.message || String(e)), 'error');
+    }
+}
+
+async function qcOpenTaskEditor(taskId) {
+    try {
+        const res = await api(`/quality/tasks/${taskId}`);
+        if (!res?.success) throw new Error(res?.message || '任务详情加载失败');
+        const task = res.task || {};
+        const item = res.kb_item;
+        if (!item) {
+            showToast('知识库主库未找到该 WikiID，无法编辑', 'error');
+            return;
+        }
+        await openKBEditModal(task.wiki_id, {
+            item,
+            qualityTask: {
+                task_id: task.id,
+                wiki_id: task.wiki_id,
+                base_update_time: item.update_time || ''
+            }
+        });
+    } catch (e) {
+        showToast('打开任务失败: ' + (e?.message || String(e)), 'error');
+    }
+}
+
+async function qcExportTasks() {
+    const ids = Array.from(qcSelectedTasks);
+    try {
+        const resp = await fetch(`${API_BASE}/quality/tasks/export`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ task_ids: ids })
+        });
+        if (!resp.ok) {
+            let msg = '导出失败';
+            try {
+                const err = await resp.json();
+                msg = err.message || msg;
+            } catch (_) {}
+            throw new Error(msg);
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `管控中心任务_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        showToast('导出失败: ' + (e?.message || String(e)), 'error');
+    }
 }
 
 // ==========================================
@@ -7289,6 +8987,7 @@ async function importKB() {
   const btn = document.getElementById('importBtn');
   const status = document.getElementById('importStatus');
   const mode = document.querySelector('input[name="importMode"]:checked')?.value || 'upsert';
+  const deleteMissing = mode !== 'overwrite' && Boolean(document.getElementById('deleteMissingIds')?.checked);
   
   if (!fileInput.files[0]) {
     alert('请选择文件');
@@ -7296,6 +8995,7 @@ async function importKB() {
   }
 
   let overwritePreview = null;
+  let deleteMissingPreview = null;
   if (mode === 'overwrite') {
     try {
       if (status) status.textContent = '正在生成全量覆盖预览...';
@@ -7330,6 +9030,52 @@ async function importKB() {
     );
     if (!ok) return;
   }
+
+  if (deleteMissing) {
+    try {
+      if (status) status.textContent = '正在生成缺失 ID 删除预览...';
+      const previewForm = new FormData();
+      previewForm.append('file', fileInput.files[0]);
+      previewForm.append('delete_missing', 'true');
+      const previewRes = await fetch(API_BASE + '/kb/import/preview', {
+        method: 'POST',
+        body: previewForm,
+        credentials: 'same-origin'
+      });
+      const previewData = await previewRes.json();
+      if (!previewData || !previewData.success) {
+        throw new Error(previewData?.message || '生成缺失 ID 删除预览失败');
+      }
+      deleteMissingPreview = previewData.preview || {};
+      if (deleteMissingPreview.delete_missing_blocked) {
+        alert('启用“同步删除缺失 ID”时，导入文件必须包含至少一个有效 ID。');
+        if (status) status.textContent = '预览失败：文件缺少有效 ID';
+        return;
+      }
+      if ((deleteMissingPreview.invalid_model_count || 0) > 0) {
+        const first = (deleteMissingPreview.invalid_rows || []).slice(0, 5).map(r => `第 ${r.row} 行: ${(r.invalid_models || []).join(', ')}`).join('\n');
+        alert(`导入文件存在未知型号 ${deleteMissingPreview.invalid_model_count} 行，请修正后再导入。\n${first}`);
+        if (status) status.textContent = '预览失败：存在未知型号';
+        return;
+      }
+    } catch (e) {
+      if (status) status.textContent = '预览失败: ' + e.message;
+      alert('缺失 ID 删除预览失败: ' + e.message);
+      return;
+    }
+
+    const deleteCount = deleteMissingPreview.delete_missing_count || 0;
+    if (deleteCount > 0) {
+      const sample = (deleteMissingPreview.delete_missing_sample_ids || []).slice(0, 10).join(', ');
+      const sampleText = sample ? `\n示例 ID：${sample}` : '';
+      const ok = await showDangerConfirmModal(
+        '同步删除缺失 ID 确认',
+        `当前 V1 中有 ${deleteCount} 条记录未出现在导入文件 ID 列中。导入成功后，这些记录会从 V1 直接物理删除。${sampleText}\n确认继续？`,
+        '确认物理删除'
+      );
+      if (!ok) return;
+    }
+  }
   
   btn.disabled = true;
   status.textContent = '正在上传并导入...';
@@ -7337,6 +9083,13 @@ async function importKB() {
   const formData = new FormData();
   formData.append('file', fileInput.files[0]);
   formData.append('mode', mode);
+  if (deleteMissing) {
+    formData.append('delete_missing', 'true');
+    formData.append('confirm_delete_missing', 'true');
+    if (deleteMissingPreview && deleteMissingPreview.delete_missing_count !== undefined) {
+      formData.append('expected_delete_missing_count', String(deleteMissingPreview.delete_missing_count));
+    }
+  }
   if (mode === 'overwrite') {
     formData.append('confirm_overwrite', 'true');
     if (overwritePreview && overwritePreview.incoming_count !== undefined) {
@@ -7361,6 +9114,13 @@ async function importKB() {
       let msg = `导入成功！共插入 ${data.count} 条记录。`;
       if (data.pre_sync_v1_to_t1) {
         msg += `\n\n（全量覆盖前置备份）${data.pre_sync_v1_to_t1}`;
+      }
+      if (data.delete_missing) {
+        msg += `\n\n同步删除缺失 ID：已从 V1 物理删除 ${data.delete_missing.count || 0} 条。`;
+        const cleanupWarnings = Array.isArray(data.delete_missing.warnings) ? data.delete_missing.warnings.filter(Boolean) : [];
+        if (cleanupWarnings.length > 0) {
+          msg += `\n关联清理提醒：${cleanupWarnings.slice(0, 3).join('；')}`;
+        }
       }
       alert(msg);
       loadKBTable(1);
@@ -7453,6 +9213,9 @@ async function previewCheckDuplicates() {
     
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
+    const mode = document.querySelector('input[name="importMode"]:checked')?.value || 'upsert';
+    const deleteMissing = mode !== 'overwrite' && Boolean(document.getElementById('deleteMissingIds')?.checked);
+    if (deleteMissing) formData.append('delete_missing', 'true');
     
     // Add button loading state
     const btn = document.querySelector('button[onclick="previewCheckDuplicates()"]');
@@ -7472,24 +9235,44 @@ async function previewCheckDuplicates() {
         if (data.success) {
             const errorCount = data.error_count || 0;
             const errorMsg = errorCount > 0 ? `\n异常记录: ${errorCount} (包含未知型号)` : '';
-            alert(`查重完成。\n重复记录: ${data.duplicates_count}\n新增记录: ${data.new_count}${errorMsg}`);
+            const deleteMissingCount = data.delete_missing_count || 0;
+            const deleteMissingMsg = deleteMissing ? `\n将物理删除: ${deleteMissingCount}` : '';
+            alert(`查重完成。\n重复记录: ${data.duplicates_count || 0}\n新增记录: ${data.new_count || 0}${errorMsg}${deleteMissingMsg}`);
             
             const checkResultDiv = document.getElementById('checkResult');
             if (checkResultDiv && data.report) {
                 const errors = data.report.filter(item => item.status === '异常');
+                const sections = [];
                 if (errors.length > 0) {
-                    checkResultDiv.classList.remove('d-none');
                     let html = `<div style="color: #dc3545; margin-bottom: 5px;"><b>发现 ${errors.length} 条异常记录 (未计入新增):</b></div>`;
                     html += '<ul style="padding-left: 20px; margin: 0; color: #666;">';
-                    // Show max 50 errors to avoid freezing UI
                     errors.slice(0, 50).forEach(err => {
-                        html += `<li><b>${err.id}</b>: ${err.details}</li>`;
+                        html += `<li><b>${escapeHtml(err.id)}</b>: ${escapeHtml(err.details)}</li>`;
                     });
                     if (errors.length > 50) {
                         html += `<li>...以及其他 ${errors.length - 50} 条记录</li>`;
                     }
                     html += '</ul>';
-                    checkResultDiv.innerHTML = html;
+                    sections.push(html);
+                }
+                if (deleteMissing && data.delete_missing_blocked) {
+                    sections.push('<div style="color: #dc3545;"><b>同步删除缺失 ID 不可执行：</b>未提取到有效 ID。</div>');
+                } else if (deleteMissing && deleteMissingCount > 0) {
+                    const sampleIds = data.delete_missing_sample_ids || [];
+                    let html = `<div style="color: #b45309; margin-bottom: 5px;"><b>将从 V1 物理删除 ${deleteMissingCount} 条缺失 ID:</b></div>`;
+                    html += '<ul style="padding-left: 20px; margin: 0; color: #666;">';
+                    sampleIds.forEach(id => {
+                        html += `<li><b>${escapeHtml(id)}</b></li>`;
+                    });
+                    if (deleteMissingCount > sampleIds.length) {
+                        html += `<li>...以及其他 ${deleteMissingCount - sampleIds.length} 条记录</li>`;
+                    }
+                    html += '</ul>';
+                    sections.push(html);
+                }
+                if (sections.length > 0) {
+                    checkResultDiv.classList.remove('d-none');
+                    checkResultDiv.innerHTML = sections.join('<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 10px 0;">');
                 } else {
                     checkResultDiv.classList.add('d-none');
                     checkResultDiv.innerHTML = '';
@@ -7793,6 +9576,7 @@ let __kbEditSaving = false;
 let __kbEditCurrentPreviewItem = null;
 let __kbEditTemplateRefId = '';
 let __kbEditTemplatePickerBound = false;
+let __kbEditQualityContext = null;
 const KB_EDIT_DRAFT_KEY_PREFIX = 'kb_edit_draft_v1:';
 const KB_EDIT_PENDING_SYNC_KEY = 'kb_edit_pending_sync_v1';
 
@@ -7963,6 +9747,8 @@ function __kbEditRenderPreview() {
     __kbEditWriteText('kbEditPreviewStatus', statusText);
     const headerTemplateWrap = document.getElementById('kbEditHeaderTemplateRefWrap');
     if (headerTemplateWrap) headerTemplateWrap.style.display = __kbEditIsCreateMode ? '' : 'none';
+    const previewTemplateWrap = document.getElementById('kbEditPreviewTemplateRefWrap');
+    if (previewTemplateWrap) previewTemplateWrap.style.display = __kbEditIsCreateMode ? '' : 'none';
 
     __kbEditRenderPreviewChips('kbEditPreviewCategory', __kbEditSplitPreviewList(digest.product_category_name), '未选择分类');
     __kbEditRenderPreviewChips('kbEditPreviewProducts', __kbEditSplitPreviewList(digest.product_name), '未选择型号');
@@ -7974,6 +9760,7 @@ function __kbEditRenderPreview() {
     ].filter(Boolean), '未设置属性');
 
     __kbEditRenderPreviewText('kbEditPreviewQuestion', digest.question, '暂无问题内容');
+    __kbEditRenderPreviewChips('kbEditPreviewSimilarQuestions', __kbEditSplitPreviewList(digest.similar_questions), '未设置相似问');
     __kbEditRenderPreviewText('kbEditPreviewAnswer', digest.answer, '暂无答案内容');
     __kbEditRenderPreviewResources(digest);
     __kbEditSyncPreviewChangedState();
@@ -8150,6 +9937,11 @@ function __kbEditBuildSubmitPayload() {
     });
     if (typeof data.link_url === 'string') data.link_url = data.link_url.trim();
     if (typeof data.link_type === 'string') data.link_type = data.link_type.trim();
+    if (__kbEditQualityContext) {
+        data.change_source = '管控中心';
+        data.quality_task_id = __kbEditQualityContext.task_id;
+        data.base_update_time = __kbEditQualityContext.base_update_time || '';
+    }
     return { data, tagNames };
 }
 
@@ -8330,6 +10122,8 @@ function __kbEditSyncTemplateReferenceUi(message = '') {
 
     const headerTemplateWrap = document.getElementById('kbEditHeaderTemplateRefWrap');
     if (headerTemplateWrap) headerTemplateWrap.style.display = __kbEditIsCreateMode ? '' : 'none';
+    const previewTemplateWrap = document.getElementById('kbEditPreviewTemplateRefWrap');
+    if (previewTemplateWrap) previewTemplateWrap.style.display = __kbEditIsCreateMode ? '' : 'none';
 }
 
 function __kbEditResetTemplatePicker() {
@@ -8355,6 +10149,58 @@ function __kbEditBindTemplatePicker() {
             kbSearchTemplateById();
         }
     });
+}
+
+function __kbEditResetWorkbenchScroll() {
+    const modal = document.getElementById('kbEditModal');
+    if (!modal) return;
+
+    try {
+        const active = document.activeElement;
+        if (active && modal.contains(active) && typeof active.blur === 'function') {
+            active.blur();
+        }
+    } catch {}
+
+    const selectors = [
+        '.kb-edit-modal-content',
+        '.kb-edit-modal-body',
+        '.kb-edit-preview-pane',
+        '.kb-edit-main-pane',
+        '.kb-edit-side-pane',
+        '#answerTuiEditor .toastui-editor-md-container',
+        '#answerTuiEditor .toastui-editor-md-container .toastui-editor',
+        '#answerTuiEditor .toastui-editor-md-preview',
+        '#answerTuiEditor .toastui-editor-ww-container',
+        '#answerTuiEditor .toastui-editor-ww-container .toastui-editor-contents'
+    ];
+
+    try {
+        modal.scrollTop = 0;
+        modal.scrollLeft = 0;
+        const content = modal.querySelector('.kb-edit-modal-content');
+        if (content) {
+            content.scrollTop = 0;
+            content.scrollLeft = 0;
+        }
+    } catch {}
+
+    selectors.forEach((selector) => {
+        modal.querySelectorAll(selector).forEach((el) => {
+            try {
+                el.scrollTop = 0;
+                el.scrollLeft = 0;
+            } catch {}
+        });
+    });
+}
+
+function __kbEditScheduleTopReset() {
+    __kbEditResetWorkbenchScroll();
+    try { requestAnimationFrame(__kbEditResetWorkbenchScroll); } catch {}
+    try { requestAnimationFrame(() => requestAnimationFrame(__kbEditResetWorkbenchScroll)); } catch {}
+    setTimeout(__kbEditResetWorkbenchScroll, 80);
+    setTimeout(__kbEditResetWorkbenchScroll, 180);
 }
 
 async function __kbEditFetchItemTags(wikiId) {
@@ -8495,12 +10341,14 @@ function kbClearTemplateReference() {
 window.kbSearchTemplateById = kbSearchTemplateById;
 window.kbClearTemplateReference = kbClearTemplateReference;
 
-async function openKBEditModal(id = null) {
+async function openKBEditModal(id = null, options = {}) {
     const modal = document.getElementById('kbEditModal');
     const form = document.getElementById('kbEditForm');
     if (!modal || !form) return;
+    options = options || {};
     const seq = ++__kbEditOpenSeq;
     __kbEditIsCreateMode = !id;
+    __kbEditQualityContext = options.qualityTask || null;
     __kbEditDraftContextId = String(id || '__new__');
     __kbEditEnsureSyncBindings();
     __kbEditBindTemplatePicker();
@@ -8513,16 +10361,19 @@ async function openKBEditModal(id = null) {
     form.reset();
     __kbEditCurrentPreviewItem = null;
     __kbEditResetTemplatePicker();
-    document.getElementById('kbEditTitle').innerText = id ? '编辑数据' : '新增数据';
+    document.getElementById('kbEditTitle').innerText = __kbEditQualityContext ? '编辑管控任务内容' : (id ? '编辑数据' : '新增数据');
     const tagsEl = document.getElementById('kbEditTagsInput');
     if (tagsEl) tagsEl.value = '';
     try { if (!id) __kbAnswerSetMarkdown('', { from: 'openKBEditModal-create' }); } catch {}
 
     // Show early to avoid perceived lag and to ensure form fields are present.
-    modal.style.display = 'block';
+    modal.classList.add('is-open');
+    modal.style.display = 'flex';
+    try { __kbAnswerScheduleLayoutRefresh(); } catch {}
+    __kbEditScheduleTopReset();
     
     if (id) {
-        const item = currentKBData.find(i => String(i.question_wiki_id) === String(id) || String(i.id) === String(id));
+        const item = options.item || currentKBData.find(i => String(i.question_wiki_id) === String(id) || String(i.id) === String(id));
         if (item) {
             __kbEditCurrentPreviewItem = item;
             const formatListTextarea = (value, opts = {}) => {
@@ -8616,7 +10467,7 @@ async function openKBEditModal(id = null) {
     if (seq !== __kbEditOpenSeq) return;
     // After catalog is ready, re-apply product checks for edit mode (create mode stays empty)
     if (id) {
-        const item = currentKBData.find(i => String(i.question_wiki_id) === String(id) || String(i.id) === String(id));
+        const item = __kbEditCurrentPreviewItem || options.item || currentKBData.find(i => String(i.question_wiki_id) === String(id) || String(i.id) === String(id));
         if (item) {
             const prods = (item.product_name || '').split(/[,，]/).map(s => s.trim()).filter(s => s);
             document.querySelectorAll('#productCheckboxes input.product-item-check').forEach(cb => {
@@ -8659,6 +10510,7 @@ async function openKBEditModal(id = null) {
         __kbEditSetDraftStatus('clean');
     }
     __kbEditRenderPreview();
+    __kbEditScheduleTopReset();
 }
 
 let __kbEditUiBound = false;
@@ -8818,7 +10670,12 @@ function closeKBEditModal(options = {}) {
         }
         try { __aiCancelAllInFlight('kb-edit-modal-closed'); } catch {}
         __aiResetKbEditUiState();
-        document.getElementById('kbEditModal').style.display = 'none';
+        const modal = document.getElementById('kbEditModal');
+        if (modal) {
+            modal.classList.remove('is-open');
+            modal.style.display = 'none';
+        }
+        __kbEditQualityContext = null;
     };
 
     if (!force && __kbEditHasUnsavedChanges()) {
@@ -8942,6 +10799,7 @@ let __aiSimilarDraftItems = [];
 window.__aiSimilarPanelVisible = false;
 let __aiSimilarInFlight = false;
 let __aiSimilarReqSeq = 0;
+let __aiAnswerDraftResult = null;
 const __aiInFlightControllers = new Set();
 
 function __aiTrackController(controller) {
@@ -8974,6 +10832,7 @@ function __aiResetKbEditUiState() {
     if (qActions) qActions.style.display = 'none';
     const aActions = document.getElementById('aiAnswerJsonActions');
     if (aActions) aActions.style.display = 'none';
+    __aiAnswerHideCompare();
     __aiSimilarInFlight = false;
     __aiSimilarReqSeq += 1; // invalidate stale async callbacks
     __aiSimilarDraftItems = [];
@@ -9001,6 +10860,43 @@ function __aiDebounce(fn, waitMs = 800) {
     };
 }
 
+function __aiCjkishCount(text) {
+    const m = String(text || '').match(/[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]/g);
+    return m ? m.length : 0;
+}
+
+function __aiMaybeRepairMojibakeText(value) {
+    if (typeof value !== 'string' || !value) return value;
+    if (!/[ÃÂãäåæçèéêëìíîïðñòóôõöøùúûü][\u0080-\u00ff]/.test(value)) return value;
+    if (typeof TextDecoder !== 'function') return value;
+    try {
+        const bytes = new Uint8Array(value.length);
+        for (let i = 0; i < value.length; i += 1) {
+            const code = value.charCodeAt(i);
+            if (code > 255) return value;
+            bytes[i] = code;
+        }
+        const repaired = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        if (repaired !== value && __aiCjkishCount(repaired) > __aiCjkishCount(value)) {
+            return repaired;
+        }
+    } catch {}
+    return value;
+}
+
+function __aiRepairMojibakeDeep(value) {
+    if (typeof value === 'string') return __aiMaybeRepairMojibakeText(value);
+    if (Array.isArray(value)) return value.map(item => __aiRepairMojibakeDeep(item));
+    if (value && typeof value === 'object') {
+        const out = {};
+        Object.keys(value).forEach(key => {
+            out[key] = __aiRepairMojibakeDeep(value[key]);
+        });
+        return out;
+    }
+    return value;
+}
+
 async function __aiOptimize(area, task, inputs, extra = {}) {
     const controller = new AbortController();
     __aiTrackController(controller);
@@ -9017,7 +10913,8 @@ async function __aiOptimize(area, task, inputs, extra = {}) {
             showLogin(true);
             throw new Error('Unauthorized');
         }
-        return res.json();
+        const data = await res.json();
+        return __aiRepairMojibakeDeep(data);
     } finally {
         clearTimeout(t);
         __aiUntrackController(controller);
@@ -9062,7 +10959,7 @@ async function __aiOptimizeStream(area, task, inputs, extra = {}, onEvent) {
                 if (!line) continue;
                 let evt = null;
                 try {
-                    evt = JSON.parse(line);
+                    evt = __aiRepairMojibakeDeep(JSON.parse(line));
                 } catch {
                     continue;
                 }
@@ -9099,6 +10996,103 @@ function __aiStreamPreviewAppend(text) {
     el.textContent += String(text || '');
     el.scrollTop = el.scrollHeight;
 }
+
+function __aiAnswerTextStats(text) {
+    const s = String(text || '');
+    const lines = s ? s.split('\n').length : 0;
+    const chars = s.replace(/\s+/g, '').length;
+    return `${lines} 行 · ${chars} 字`;
+}
+
+function __aiAnswerSetCompareText(id, text) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const s = String(text || '').trim();
+    el.textContent = s || '暂无内容';
+    el.classList.toggle('is-empty', !s);
+}
+
+function __aiAnswerGetPanel() {
+    return document.querySelector('#kbEditModal .kb-answer-panel');
+}
+
+function __aiAnswerSetReviewMode(active) {
+    const isActive = !!active;
+    const panel = __aiAnswerGetPanel();
+    const editorWrap = document.getElementById('answerTuiEditorWrap');
+    const comparePanel = document.getElementById('aiAnswerComparePanel');
+    if (panel) panel.classList.toggle('is-ai-review', isActive);
+    if (editorWrap) editorWrap.setAttribute('aria-hidden', isActive ? 'true' : 'false');
+    if (comparePanel) comparePanel.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+    if (!isActive) {
+        try { __kbAnswerScheduleLayoutRefresh(); } catch {}
+    }
+}
+
+function __aiAnswerHideCompare() {
+    __aiAnswerDraftResult = null;
+    __aiAnswerSetReviewMode(false);
+    const panel = document.getElementById('aiAnswerComparePanel');
+    if (panel) {
+        panel.classList.add('d-none');
+        panel.scrollTop = 0;
+    }
+    __aiAnswerSetCompareText('aiAnswerOriginalText', '');
+    __aiAnswerSetCompareText('aiAnswerRefinedText', '');
+    __aiSetMetrics('aiAnswerCompareMeta', '对比原答案和 AI 优化后内容');
+    __aiSetMetrics('aiAnswerOriginalCount', '0 字');
+    __aiSetMetrics('aiAnswerRefinedCount', '0 字');
+    const notesEl = document.getElementById('aiAnswerCompareNotes');
+    if (notesEl) {
+        notesEl.classList.add('d-none');
+        notesEl.textContent = '';
+    }
+}
+
+function __aiAnswerShowCompare(payload, task = '') {
+    const original = String(payload?.original_answer ?? '');
+    const refined = String(payload?.refined_answer ?? payload?.answer ?? '');
+    const notes = payload?.notes;
+    __aiAnswerDraftResult = { original_answer: original, refined_answer: refined, notes, task: String(task || '') };
+
+    __aiAnswerSetCompareText('aiAnswerOriginalText', original);
+    __aiAnswerSetCompareText('aiAnswerRefinedText', refined);
+    __aiSetMetrics('aiAnswerOriginalCount', __aiAnswerTextStats(original));
+    __aiSetMetrics('aiAnswerRefinedCount', __aiAnswerTextStats(refined));
+    __aiSetMetrics('aiAnswerCompareMeta', refined ? '检查无误后可替换到答案编辑器，未确认前不会改动原文。' : 'AI 未返回可用的优化后内容');
+
+    const notesEl = document.getElementById('aiAnswerCompareNotes');
+    if (notesEl) {
+        const notesText = Array.isArray(notes) ? notes.filter(Boolean).join('\n') : String(notes ?? '').trim();
+        notesEl.textContent = notesText ? `备注：${notesText}` : '';
+        notesEl.classList.toggle('d-none', !notesText);
+    }
+
+    const panel = document.getElementById('aiAnswerComparePanel');
+    if (panel) {
+        panel.classList.remove('d-none');
+        panel.scrollTop = 0;
+    }
+    __aiAnswerSetReviewMode(true);
+}
+
+function aiAnswerApplyDraft() {
+    const refined = String(__aiAnswerDraftResult?.refined_answer || '').trim();
+    if (!refined) {
+        alert('AI 优化后内容为空，无法替换');
+        return;
+    }
+    __kbAnswerSetMarkdown(refined, { from: 'aiAnswerApplyDraft' });
+    __aiAnswerHideCompare();
+    __aiSetMetrics('aiAnswerStatus', '已替换为 AI 优化后内容');
+}
+window.aiAnswerApplyDraft = aiAnswerApplyDraft;
+
+function aiAnswerCancelDraft() {
+    __aiAnswerHideCompare();
+    __aiSetMetrics('aiAnswerStatus', '已取消 AI 结果');
+}
+window.aiAnswerCancelDraft = aiAnswerCancelDraft;
 
 function __aiSetAnswerButtonsLoading(isLoading, activeTask = null) {
     const ids = ['aiAnswerBtnStructure', 'aiAnswerBtnFault', 'aiAnswerBtnUsage', 'aiAnswerBtnFeature'];
@@ -9325,10 +11319,13 @@ function aiAnswerAction(task) {
         const aEl = form.elements['answer'];
         const fileUrlsEl = form.elements['file_urls'];
         if (!aEl) return;
+        try { __kbAnswerSyncToTextarea({ emit: false }); } catch {}
+        const originalAnswerBeforeAi = String(aEl.value || '');
 
         // 每次调用 AI 前先隐藏 JSON 操作按钮
         const jsonActionsEl = document.getElementById('aiAnswerJsonActions');
         if (jsonActionsEl) jsonActionsEl.style.display = 'none';
+        __aiAnswerHideCompare();
 
         __aiSetMetrics('aiAnswerStatus', 'AI 处理中...');
         __aiSetAnswerButtonsLoading(true, task);
@@ -9362,15 +11359,21 @@ function aiAnswerAction(task) {
             const isJsonTask = (t === 'structure' || t === 'fault' || t === 'usage' || t === 'feature');
             if (isJsonTask) {
                 const payload = {
-                    original_answer: (typeof data.original_answer === 'string') ? data.original_answer : (typeof data.answer === 'string' ? (form.elements['answer']?.value || '') : ''),
+                    original_answer: (typeof data.original_answer === 'string') ? data.original_answer : originalAnswerBeforeAi,
                     refined_answer: (typeof data.refined_answer === 'string') ? data.refined_answer : (typeof data.answer === 'string' ? data.answer : ''),
                     notes: (data.notes === undefined ? null : data.notes)
                 };
-                const text = JSON.stringify(payload, null, 2);
-                __kbAnswerSetMarkdown(text, { from: 'aiAnswerAction-json' });
-                if (jsonActionsEl) jsonActionsEl.style.display = 'flex';
+                if (payload.refined_answer.trim()) {
+                    __aiAnswerShowCompare(payload, t);
+                } else {
+                    __aiSetMetrics('aiAnswerStatus', 'AI 未返回可用结果');
+                }
             } else if (typeof data.answer === 'string' && data.answer.trim()) {
-                __kbAnswerSetMarkdown(data.answer, { from: 'aiAnswerAction' });
+                __aiAnswerShowCompare({
+                    original_answer: originalAnswerBeforeAi,
+                    refined_answer: data.answer,
+                    notes: data.notes
+                }, t);
             } else {
                 __aiSetMetrics('aiAnswerStatus', 'AI 未返回可用结果');
             }
@@ -9394,6 +11397,11 @@ window.aiAnswerAction = aiAnswerAction;
 
 function aiAnswerApplyJson(useRefined) {
     try {
+        if (__aiAnswerDraftResult) {
+            if (useRefined) aiAnswerApplyDraft();
+            else aiAnswerCancelDraft();
+            return;
+        }
         const form = __aiGetKbEditForm();
         if (!form) return;
         const aEl = form.elements['answer'];
@@ -9902,10 +11910,16 @@ async function saveKBItem() {
         __kbEditTouched = false;
         __kbEditInitialDigest = __kbEditCollectDigest();
         __kbEditClearDraft(__kbEditDraftContextId);
+        const qualityContext = __kbEditQualityContext;
         closeKBEditModal({ force: true });
         // 保存后必须清空分页缓存，否则会继续命中旧数据导致“预览未更新”。
         clearKBCache();
-        await loadKBTable(kbCurrentPage);
+        if (qualityContext && typeof qcLoadTasks === 'function') {
+            await qcLoadTasks(qcTaskPage);
+            await qcLoadRawIssues(qcRawPage);
+        } else {
+            await loadKBTable(kbCurrentPage);
+        }
         if (typeof loadModifications === 'function') loadModifications(1);
     } catch (e) {
         alert('保存异常: ' + e.message);
@@ -11005,7 +13019,7 @@ function setupMatrixSearchProductFilterUI() {
     setMatrixProductMatchMode(matrixProductMatchMode);
 }
 
-async function loadMatrixData(page = 1) {
+async function loadMatrixData(page = 1, options = {}) {
     const id = document.getElementById('matrixSearchId')?.value.trim() || '';
     const q = document.getElementById('matrixSearchQuestion').value.trim();
     const a = document.getElementById('matrixSearchAnswer')?.value.trim() || '';
@@ -11038,6 +13052,13 @@ async function loadMatrixData(page = 1) {
 
     const tbody = document.getElementById('matrixTableBody');
     if (!tbody) return;
+    const requestKey = params.toString();
+    if (options.reuse && matrixLoaded && matrixLastRequestKey === requestKey) {
+        renderMatrixTable();
+        updateMatrixPagination();
+        refreshMatrixFilteredTotal();
+        return;
+    }
     tbody.innerHTML = '<tr><td colspan="100" class="empty-message">加载中...</td></tr>';
 
     try {
@@ -11055,6 +13076,8 @@ async function loadMatrixData(page = 1) {
         matrixColumns = (res.columns || []).filter(c => String(c || '').trim() && String(c || '').trim() !== '测试型号');
         matrixTotal = res.total;
         matrixCurrentPage = res.page;
+        matrixLoaded = true;
+        matrixLastRequestKey = requestKey;
         
         if (Array.isArray(res.product_categories)) {
             renderMatrixChips(
@@ -12129,9 +14152,15 @@ async function loadScoringData(options = {}) {
         updateScoringProgressUI();
         return;
     }
+    if (options.reuse && scoringLoaded && !options.force) {
+        renderScoringTable();
+        updateScoringStats();
+        updateScoringProgressUI();
+        return;
+    }
     
     const tbody = document.getElementById('scoringTableBody');
-    if (tbody) tbody.innerHTML = '<tr><td colspan="100" class="empty-message">加载中...</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="10" class="empty-message">加载中...</td></tr>';
     
     try {
         const res = await api('/scoring/data');
@@ -12170,38 +14199,106 @@ async function loadScoringData(options = {}) {
                 }
                 return item;
             });
+            scoringLoaded = true;
             scoringPage = 1;
             renderScoringTable();
             updateScoringStats();
         } else {
-            if (tbody) tbody.innerHTML = `<tr><td colspan="100" class="error-message">加载失败: ${res.message}</td></tr>`;
+            if (tbody) tbody.innerHTML = `<tr><td colspan="10" class="error-message">加载失败: ${res.message}</td></tr>`;
         }
     } catch (e) {
-        if (tbody) tbody.innerHTML = `<tr><td colspan="100" class="error-message">系统错误: ${e.message}</td></tr>`;
+        if (tbody) tbody.innerHTML = `<tr><td colspan="10" class="error-message">系统错误: ${e.message}</td></tr>`;
     }
 }
 
+function parseScoringScoreFilter(value) {
+    if (value === undefined || value === null) return null;
+    const text = String(value).trim();
+    if (!text) return null;
+    const score = Number(text);
+    return Number.isFinite(score) ? score : null;
+}
+
+function getScoringItemTotalScore(item) {
+    const rawScore = item?.total_score ?? item?.score;
+    if (rawScore === undefined || rawScore === null || rawScore === '') return null;
+    const score = Number(rawScore);
+    return Number.isFinite(score) ? score : null;
+}
+
+const SCORING_DIMENSION_CONFIG = [
+    { key: 'quality', label: '质' },
+    { key: 'compliance', label: '规' },
+    { key: 'timeliness', label: '时' },
+    { key: 'utility', label: '解' },
+    { key: 'redundancy', label: '冗' },
+    { key: 'multimedia', label: '媒' }
+];
+
+function formatScoringDimensionValue(item, key) {
+    const value = item?.[key];
+    return value !== undefined && value !== null && value !== '' ? String(value) : '-';
+}
+
+function renderScoringDimensionSummary(item) {
+    return `
+        <div class="scoring-metric-grid">
+            ${SCORING_DIMENSION_CONFIG.map(dim => `
+                <span class="scoring-metric-pill" title="${_escapeAttr(dim.label)}：${_escapeAttr(formatScoringDimensionValue(item, dim.key))}">
+                    <span>${dim.label}</span>
+                    <b>${_escapeHtml(formatScoringDimensionValue(item, dim.key))}</b>
+                </span>
+            `).join('')}
+        </div>
+    `;
+}
+
+function buildScoringResultPreview(item) {
+    const suggestion = String(item?.suggestion || '').trim();
+    const analysis = String(item?.analysis || '').trim();
+    if (suggestion && analysis) return `建议：${suggestion}\n分析：${analysis}`;
+    if (suggestion) return `建议：${suggestion}`;
+    if (analysis) return `分析：${analysis}`;
+    return '';
+}
+
+function getScoringFilterValues() {
+    return {
+        idFilter: document.getElementById('scoreSearchId')?.value.trim().toLowerCase() || '',
+        productFilter: document.getElementById('scoreSearchProduct')?.value.trim().toLowerCase() || '',
+        questionFilter: document.getElementById('scoreSearchQuestion')?.value.trim().toLowerCase() || '',
+        statusFilter: document.getElementById('scoreSearchStatus')?.value || '',
+        minTotalScore: parseScoringScoreFilter(document.getElementById('scoreSearchMinTotal')?.value),
+        maxTotalScore: parseScoringScoreFilter(document.getElementById('scoreSearchMaxTotal')?.value)
+    };
+}
+
+function scoringItemMatchesFilters(item, filters = getScoringFilterValues()) {
+    if (filters.idFilter && !String(item.kb_id || item.id).toLowerCase().includes(filters.idFilter)) return false;
+    if (filters.productFilter && !String(item.product_name || '').toLowerCase().includes(filters.productFilter)) return false;
+    if (filters.questionFilter && !String(item.question_content || '').toLowerCase().includes(filters.questionFilter)) return false;
+    if (filters.statusFilter && item.status !== filters.statusFilter) return false;
+
+    if (filters.minTotalScore !== null || filters.maxTotalScore !== null) {
+        const totalScore = getScoringItemTotalScore(item);
+        if (totalScore === null) return false;
+        if (filters.minTotalScore !== null && totalScore < filters.minTotalScore) return false;
+        if (filters.maxTotalScore !== null && totalScore > filters.maxTotalScore) return false;
+    }
+
+    return true;
+}
 function renderScoringTable(filter = false) {
     const tbody = document.getElementById('scoringTableBody');
     if (!tbody) return;
     tbody.innerHTML = '';
-    
+
     let data = currentScoringData;
-    
+
     // Client-side filtering
     if (filter) {
-        const idFilter = document.getElementById('scoreSearchId')?.value.toLowerCase();
-        const productFilter = document.getElementById('scoreSearchProduct')?.value.toLowerCase();
-        const questionFilter = document.getElementById('scoreSearchQuestion')?.value.toLowerCase();
-        const statusFilter = document.getElementById('scoreSearchStatus')?.value;
-        
-        data = data.filter(item => {
-            if (idFilter && !String(item.kb_id || item.id).toLowerCase().includes(idFilter)) return false;
-            if (productFilter && !String(item.product_name || '').toLowerCase().includes(productFilter)) return false;
-            if (questionFilter && !String(item.question_content || '').toLowerCase().includes(questionFilter)) return false;
-            if (statusFilter && item.status !== statusFilter) return false;
-            return true;
-        });
+        const filters = getScoringFilterValues();
+        data = data.filter(item => scoringItemMatchesFilters(item, filters));
     }
     
     // Pagination
@@ -12210,7 +14307,7 @@ function renderScoringTable(filter = false) {
     const pageData = data.slice(start, end);
     
     if (pageData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="100" class="empty-message">暂无评分数据，请点击“同步打分数据”</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="empty-message">暂无评分数据，请点击“同步打分数据”</td></tr>';
         updateScoringPagination(data.length);
         return;
     }
@@ -12227,6 +14324,7 @@ function renderScoringTable(filter = false) {
 
         // ID
         const tdId = document.createElement('td');
+        tdId.className = 'scoring-id-cell';
         tdId.appendChild(document.createTextNode(id));
         
         // Single score icon
@@ -12255,55 +14353,57 @@ function renderScoringTable(filter = false) {
         
         // Product (Not in kb_scores usually, placeholder)
         const tdProd = document.createElement('td');
-        tdProd.textContent = item.product_name || '-';
+        tdProd.className = 'scoring-product-cell';
+        const productText = item.product_name || '-';
+        tdProd.innerHTML = `<div class="scoring-product-preview" title="${_escapeAttr(productText)}">${_escapeHtml(productText)}</div>`;
         tr.appendChild(tdProd);
         
         // Question
         const tdQ = document.createElement('td');
+        tdQ.className = 'scoring-text-cell scoring-question-cell';
         tdQ.innerHTML = tdRenderExpandableText(`score:${id}:question`, item.question_content || '', { placeholder: '-' });
         tr.appendChild(tdQ);
         
         // Answer
         const tdA = document.createElement('td');
+        tdA.className = 'scoring-text-cell scoring-answer-cell';
         tdA.innerHTML = tdRenderExpandableText(`score:${id}:answer`, item.answer_content || '', { placeholder: '-' });
         tr.appendChild(tdA);
         
-        // Scores
-        ['quality', 'compliance', 'timeliness', 'utility', 'redundancy', 'multimedia'].forEach(key => {
-            const td = document.createElement('td');
-            if (item.status === 'scoring') {
-                td.innerHTML = '<i class="fas fa-spinner fa-spin text-muted"></i>';
-            } else {
-                td.textContent = item[key] !== undefined && item[key] !== null ? item[key] : '-';
-            }
-            tr.appendChild(td);
-        });
+        // Score dimensions
+        const tdDimensions = document.createElement('td');
+        tdDimensions.className = 'scoring-breakdown-cell';
+        tdDimensions.innerHTML = item.status === 'scoring'
+            ? '<i class="fas fa-spinner fa-spin text-muted"></i>'
+            : renderScoringDimensionSummary(item);
+        tr.appendChild(tdDimensions);
 
         // Total Score
         const tdScore = document.createElement('td');
+        tdScore.className = 'scoring-total-cell';
         if (item.status === 'scoring') {
             tdScore.innerHTML = '<i class="fas fa-spinner fa-spin text-primary"></i>';
         } else {
-            const score = item.total_score || item.score;
+            const score = getScoringItemTotalScore(item);
             tdScore.textContent = score !== undefined && score !== null ? score : '-';
-            if (score < 60) tdScore.style.color = 'red';
-            else if (score >= 80) tdScore.style.color = 'green';
+            if (score !== null) {
+                if (score < 70) tdScore.classList.add('score-low');
+                else if (score < 85) tdScore.classList.add('score-medium');
+                else tdScore.classList.add('score-high');
+            }
             tdScore.style.fontWeight = 'bold';
         }
         tr.appendChild(tdScore);
         
-        // Remarks / Suggestion
-        const tdRem = document.createElement('td');
-        tdRem.innerHTML = tdRenderExpandableText(`score:${id}:suggestion`, item.suggestion || '', { placeholder: '-' });
-        tr.appendChild(tdRem);
-
-        // Analysis
-        const tdAna = document.createElement('td');
-        tdAna.innerHTML = tdRenderExpandableText(`score:${id}:analysis`, item.analysis || '', { placeholder: '-' });
-        tr.appendChild(tdAna);
+        // Suggestion and analysis preview
+        const tdResult = document.createElement('td');
+        tdResult.className = 'scoring-text-cell scoring-result-cell';
+        tdResult.innerHTML = tdRenderExpandableText(`score:${id}:result`, buildScoringResultPreview(item), { placeholder: '-' });
+        tr.appendChild(tdResult);
 
         // Status
         const tdStatus = document.createElement('td');
+        tdStatus.className = 'scoring-status-cell';
         const status = item.status || 'unscored';
         let badgeClass = 'badge-secondary';
         let statusText = '未评分';
@@ -12317,6 +14417,7 @@ function renderScoringTable(filter = false) {
 
         // Action
         const tdAction = document.createElement('td');
+        tdAction.className = 'scoring-action-cell';
         tdAction.innerHTML = `<button class="action-btn btn-sm" onclick="viewScoreDetail('${id}')">详情</button>`;
         tr.appendChild(tdAction);
 
@@ -12363,6 +14464,7 @@ function toggleScoringRow(id) {
     } else {
         selectedScoringRows.delete(id);
     }
+    updateScoringStats();
 }
 
 function toggleSelectAllScoring() {
@@ -12377,6 +14479,7 @@ function toggleSelectAllScoring() {
             selectedScoringRows.delete(cb.value);
         }
     });
+    updateScoringStats();
 }
 
 function resetScoringFilter() {
@@ -12384,6 +14487,8 @@ function resetScoringFilter() {
     document.getElementById('scoreSearchProduct').value = '';
     document.getElementById('scoreSearchQuestion').value = '';
     document.getElementById('scoreSearchStatus').value = '';
+    document.getElementById('scoreSearchMinTotal').value = '';
+    document.getElementById('scoreSearchMaxTotal').value = '';
     scoringPage = 1;
     renderScoringTable(false);
 }
@@ -12693,6 +14798,22 @@ function getScoringErrorSummaryText() {
         .join('；');
 }
 
+function setScoringButtonLabel(btn, text) {
+    if (!btn) return;
+    const iconMap = {
+        batchScoreBtn: 'fas fa-magic',
+        evaluateAllBtn: 'fas fa-bolt',
+        pauseScoringBtn: 'fas fa-pause',
+        resumeScoringBtn: 'fas fa-play'
+    };
+    const iconClass = iconMap[btn.id];
+    if (iconClass) {
+        btn.innerHTML = `<i class="${iconClass}"></i><span>${escapeHtml(text)}</span>`;
+    } else {
+        btn.textContent = text;
+    }
+}
+
 function setScoringControlsDisabled(disabled, activeBtn = null) {
     const controlIds = ['syncScoringBtn', 'refreshScoringBtn', 'batchScoreBtn', 'evaluateAllBtn'];
     controlIds.forEach(id => {
@@ -12715,26 +14836,26 @@ function updateScoringProgressUI() {
     setScoringControlsDisabled(isScoringInProgress() || isScoringPaused());
     
     if (isScoringInProgress()) {
-        if (btn) btn.innerText = progressText || '评分中...';
-        if (batchBtn) batchBtn.innerText = progressText || '评分中...';
+        if (btn) setScoringButtonLabel(btn, progressText || '评分中...');
+        if (batchBtn) setScoringButtonLabel(batchBtn, progressText || '评分中...');
         if (pauseBtn) {
             pauseBtn.disabled = !!scoringRunState.pauseRequested;
-            pauseBtn.innerText = scoringRunState.pauseRequested ? '⏸️ 暂停中...' : '⏸️ 暂停评分';
+            setScoringButtonLabel(pauseBtn, scoringRunState.pauseRequested ? '暂停中...' : '暂停');
         }
         if (resumeBtn) resumeBtn.disabled = true;
     } else if (isScoringPaused()) {
-        if (btn) btn.innerText = progressText || '评分已暂停';
-        if (batchBtn) batchBtn.innerText = progressText || '评分已暂停';
+        if (btn) setScoringButtonLabel(btn, progressText || '评分已暂停');
+        if (batchBtn) setScoringButtonLabel(batchBtn, progressText || '评分已暂停');
         if (pauseBtn) {
             pauseBtn.disabled = true;
-            pauseBtn.innerText = '⏸️ 暂停评分';
+            setScoringButtonLabel(pauseBtn, '暂停');
         }
         if (resumeBtn) resumeBtn.disabled = false;
     } else {
-        if (batchBtn) batchBtn.innerText = '🤖 批量评分选中项';
+        if (batchBtn) setScoringButtonLabel(batchBtn, '批量评分');
         if (pauseBtn) {
             pauseBtn.disabled = true;
-            pauseBtn.innerText = '⏸️ 暂停评分';
+            setScoringButtonLabel(pauseBtn, '暂停');
         }
         if (resumeBtn) resumeBtn.disabled = true;
         updateEvaluateAllButtonLabel();
@@ -12855,7 +14976,7 @@ async function streamEvaluate(ids, btn, originalText, options = {}) {
     
     if (btn) {
         btn.disabled = true;
-        btn.innerText = '准备评分...';
+        setScoringButtonLabel(btn, '准备评分...');
     }
 
     // 1. Mark selected rows as "scoring" in UI immediately
@@ -12929,7 +15050,7 @@ async function streamEvaluate(ids, btn, originalText, options = {}) {
                         }
                         refreshScoringTableIfVisible();
                         
-                        if (btn && !isScoringInProgress()) btn.innerText = `评分中 (${successCount}/${ids.length})`;
+                        if (btn && !isScoringInProgress()) setScoringButtonLabel(btn, `评分中 (${successCount}/${ids.length})`);
 
                     } else if (msg.type === 'error') {
                         errorCount++;
@@ -13013,43 +15134,37 @@ async function batchEvaluateSelected() {
     } catch (e) {
         alert('评分请求异常: ' + e.message);
     } finally {
-        if (!isScoringPaused()) finishScoringRun();
-        if (btn && !isScoringInProgress() && !isScoringPaused()) {
-            btn.disabled = false;
-            btn.innerText = '🤖 批量评分选中项';
-        }
-    }
+	        if (!isScoringPaused()) finishScoringRun();
+	        if (btn && !isScoringInProgress() && !isScoringPaused()) {
+	            btn.disabled = false;
+	            setScoringButtonLabel(btn, '批量评分');
+	        }
+	    }
 }
 
 function updateEvaluateAllButtonLabel() {
-    const btn = document.getElementById('evaluateAllBtn') || document.querySelector('button[onclick="evaluateAll()"]');
-    if (!btn || btn.disabled) return;
-    const useCache = document.getElementById('useCacheCb') ? document.getElementById('useCacheCb').checked : true;
-    btn.innerText = useCache ? '评分未缓存项' : '🚀 全量评分';
+	    const btn = document.getElementById('evaluateAllBtn') || document.querySelector('button[onclick="evaluateAll()"]');
+	    if (!btn || btn.disabled) return;
+	    const useCache = document.getElementById('useCacheCb') ? document.getElementById('useCacheCb').checked : true;
+	    setScoringButtonLabel(btn, useCache ? '评分未缓存项' : '全量评分');
 }
 
 async function evaluateAll() {
-    if (isScoringInProgress() || isScoringPaused()) {
-        alert('当前已有评分任务正在进行，请等待完成后再发起新的评分。');
-        return;
-    }
-    
-    // Get all filtered IDs from currentScoringData (which contains all loaded data)
-    // Re-apply current filter
-    const idFilter = document.getElementById('scoreSearchId')?.value.toLowerCase();
-    const productFilter = document.getElementById('scoreSearchProduct')?.value.toLowerCase();
-    const questionFilter = document.getElementById('scoreSearchQuestion')?.value.toLowerCase();
-    const statusFilter = document.getElementById('scoreSearchStatus')?.value;
-    const useCache = document.getElementById('useCacheCb') ? document.getElementById('useCacheCb').checked : true;
-    
-    const filteredData = currentScoringData.filter(item => {
-        if (idFilter && !String(item.kb_id || item.id).toLowerCase().includes(idFilter)) return false;
-        if (productFilter && !String(item.product_name || '').toLowerCase().includes(productFilter)) return false;
-        if (questionFilter && !String(item.question_content || '').toLowerCase().includes(questionFilter)) return false;
-        if (statusFilter && item.status !== statusFilter) return false;
-        if (useCache && item.status === 'scored') return false;
-        return true;
-    });
+	    if (isScoringInProgress() || isScoringPaused()) {
+	        alert('当前已有评分任务正在进行，请等待完成后再发起新的评分。');
+	        return;
+	    }
+	    
+	    // Get all filtered IDs from currentScoringData (which contains all loaded data)
+	    // Re-apply current filter
+	    const filters = getScoringFilterValues();
+	    const useCache = document.getElementById('useCacheCb') ? document.getElementById('useCacheCb').checked : true;
+	    
+	    const filteredData = currentScoringData.filter(item => {
+	        if (!scoringItemMatchesFilters(item, filters)) return false;
+	        if (useCache && item.status === 'scored') return false;
+	        return true;
+	    });
     const actionLabel = useCache ? '评分未缓存项' : '全量评分';
     
     if (filteredData.length === 0) {
@@ -13099,14 +15214,24 @@ function updateScoringStats() {
     if (!statsEl) return;
     
     const total = currentScoringData.length;
-    const scored = currentScoringData.filter(i => i.status === 'scored').length;
-    const avg = scored ? (currentScoringData.reduce((acc, i) => acc + (i.total_score || 0), 0) / scored).toFixed(1) : 0;
+    const scoredItems = currentScoringData.filter(i => i.status === 'scored');
+    const scored = scoredItems.length;
+    const scoredTotal = scoredItems.reduce((acc, item) => acc + (getScoringItemTotalScore(item) || 0), 0);
+    const avg = scored ? (scoredTotal / scored).toFixed(1) : '0.0';
+    const selected = selectedScoringRows ? selectedScoringRows.size : 0;
     const progressText = getScoringProgressText();
-    const progressHtml = progressText ? ` | <span class="text-primary">${escapeHtml(progressText)}</span>` : '';
+    const progressHtml = progressText ? `<span class="scoring-progress-inline">${escapeHtml(progressText)}</span>` : '';
     const errorText = getScoringErrorSummaryText();
-    const errorHtml = errorText ? ` | <span class="text-danger" title="${escapeHtml(errorText)}">最近错误: ${escapeHtml(errorText)}</span>` : '';
+    const errorHtml = errorText ? `<span class="scoring-error-inline" title="${escapeHtml(errorText)}">最近错误: ${escapeHtml(errorText)}</span>` : '';
     
-    statsEl.innerHTML = `总数: <b>${total}</b> | 已评: <b>${scored}</b> | 平均分: <b>${avg}</b>${progressHtml}${errorHtml}`;
+    statsEl.innerHTML = `
+        <span class="scoring-stat-pill">总数 <b>${total}</b></span>
+        <span class="scoring-stat-pill">已评 <b>${scored}</b></span>
+        <span class="scoring-stat-pill is-accent">平均分 <b>${avg}</b></span>
+        ${selected ? `<span class="scoring-stat-pill is-selected">已选 <b>${selected}</b></span>` : ''}
+        ${progressHtml}
+        ${errorHtml}
+    `;
 }
 
 
@@ -14873,7 +16998,6 @@ window.addEventListener('DOMContentLoaded', async () => {
         // Initial load (main app page)
         switchTab('kbView');
         await loadKBProductCategoryChips();
-        loadKBTable();
       } else {
         showLogin(true);
       }
@@ -14911,11 +17035,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   scheduleWorkbenchSidebarHeightUpdate();
   applyWorkbenchLayoutHotfix();
 
-  // Bind Tab Events
-  ['kbView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'modificationsView', 'archiveView', 'smartMappingView'].forEach(id => {
-      const btn = document.getElementById('tab-' + id);
-      if (btn) btn.addEventListener('click', () => switchTab(id));
-  });
+  // Tab buttons already call switchTab inline in the HTML.
 
   // 初始化修改记录表头排序（问题编号 / 问题）
   initModSortHeaders();
@@ -14933,10 +17053,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     'matrixSearchId',
     'matrixSearchQuestion',
     'matrixSearchAnswer',
-    'scoreSearchId',
-    'scoreSearchProduct',
-    'scoreSearchQuestion',
-    // Mod search
+	    'scoreSearchId',
+	    'scoreSearchProduct',
+	    'scoreSearchQuestion',
+	    'scoreSearchMinTotal',
+	    'scoreSearchMaxTotal',
+	    // Mod search
     'modSearchId',
     'modSearchProduct',
     'modSearchQuestion',
@@ -15266,6 +17388,29 @@ function __kbAnswerGetTuiEl() {
     return document.getElementById('answerTuiEditor');
 }
 
+function __kbAnswerRefreshLayout() {
+    const wrap = __kbAnswerGetTuiWrap();
+    const el = __kbAnswerGetTuiEl();
+    if (wrap) {
+        wrap.style.minHeight = '0';
+        wrap.style.height = '';
+    }
+    if (el) {
+        el.style.minHeight = '0';
+        el.style.height = '';
+    }
+    if (__kbAnswerTui && typeof __kbAnswerTui.setHeight === 'function') {
+        try { __kbAnswerTui.setHeight('100%'); } catch {}
+    }
+}
+
+function __kbAnswerScheduleLayoutRefresh() {
+    __kbAnswerRefreshLayout();
+    try { requestAnimationFrame(__kbAnswerRefreshLayout); } catch {}
+    try { requestAnimationFrame(() => requestAnimationFrame(__kbAnswerRefreshLayout)); } catch {}
+    setTimeout(__kbAnswerRefreshLayout, 80);
+}
+
 function __kbAnswerEnsureTui() {
     if (__kbAnswerTui) return __kbAnswerTui;
     const el = __kbAnswerGetTuiEl();
@@ -15289,6 +17434,7 @@ function __kbAnswerEnsureTui() {
             __kbAnswerSyncToTextarea({ emit: true });
         }, 120);
     });
+    try { __kbAnswerScheduleLayoutRefresh(); } catch {}
     return __kbAnswerTui;
 }
 
@@ -15315,6 +17461,7 @@ function __kbAnswerSetMarkdown(md, _opts = {}) {
     if (tui) {
         try { tui.setMarkdown(text); } catch {}
     }
+    try { __kbAnswerScheduleLayoutRefresh(); } catch {}
 }
 
 function __kbAnswerInsertText(text) {
