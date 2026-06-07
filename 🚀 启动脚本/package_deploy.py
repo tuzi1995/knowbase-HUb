@@ -38,6 +38,7 @@ def package_project():
         "scoring_logic.py",
         "llm_score_evaluator.py",
         "requirements.txt",
+        "产品说明书.md",
         
         # Configs
         "scoring_config.json",
@@ -65,6 +66,7 @@ def package_project():
     archive_name_overrides = {
         "启动服务.bat": "start_service.bat",
         "KB1知识库评分工具.bat": "kb1_score_tool.bat",
+        "产品说明书.md": "product_manual.md",
     }
 
     # Directories to include recursively

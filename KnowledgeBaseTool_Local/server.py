@@ -79,6 +79,20 @@ os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)  # Ensure SQLite folder ex
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + _DB_PATH.replace('\\', '/')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+def _resolve_product_manual_path():
+    env_path = os.environ.get('KMATRIX_PRODUCT_MANUAL_PATH', '').strip()
+    candidates = []
+    if env_path:
+        candidates.append(env_path if os.path.isabs(env_path) else os.path.join(_BASE_DIR, env_path))
+    candidates.extend([
+        os.path.join(_BASE_DIR, '产品说明书.md'),
+        os.path.join(_BASE_DIR, 'product_manual.md'),
+    ])
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
 _SM_LOCK = threading.Lock()
 _SM_BASELINE_CACHE = {}
 _SM_JOBS = {}
@@ -504,8 +518,8 @@ def status():
 @app.route('/api/product_manual', methods=['GET'])
 @login_required
 def product_manual():
-    manual_path = os.path.join(_BASE_DIR, '产品说明书.md')
-    if not os.path.exists(manual_path):
+    manual_path = _resolve_product_manual_path()
+    if not manual_path:
         return jsonify({'success': False, 'message': '产品说明书文件不存在'}), 404
     try:
         with open(manual_path, 'r', encoding='utf-8') as f:
