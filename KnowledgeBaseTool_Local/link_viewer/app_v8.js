@@ -241,6 +241,69 @@ let kbShowSelectedOnly = false;
 let dangerConfirmResolver = null;
 let kbEditCloseConfirmResolver = null;
 
+const KB_EMBED_MESSAGE_SOURCE = 'kmatrix-kb-edit';
+let kbEditEmbedRequest = null;
+let kbEditEmbedSaved = false;
+
+function getKbEditEmbedRequest() {
+    try {
+        const params = new URLSearchParams(window.location.search || '');
+        const mode = String(params.get('embed') || params.get('mode') || '').trim();
+        if (mode !== 'kb-edit') return null;
+        const id = String(params.get('id') || params.get('kb_id') || params.get('question_wiki_id') || '').trim();
+        const create = ['1', 'true', 'yes'].includes(String(params.get('create') || '').toLowerCase());
+        if (!id && !create) return null;
+        const changeSource = String(params.get('change_source') || params.get('source_module') || '').trim() || 'badcase标注工作台';
+        return { id, create, changeSource };
+    } catch {
+        return null;
+    }
+}
+
+function postKbEditEmbedMessage(type, detail = {}) {
+    if (!kbEditEmbedRequest || !window.parent || window.parent === window) return;
+    try {
+        window.parent.postMessage({
+            source: KB_EMBED_MESSAGE_SOURCE,
+            type,
+            ...detail,
+        }, '*');
+    } catch {
+        // Cross-window notifications are best-effort only.
+    }
+}
+
+async function fetchKbEditEmbedItem(id) {
+    const res = await api(`/kb/data_v2?id=${encodeURIComponent(id)}`);
+    const data = Array.isArray(res?.data) ? res.data : [];
+    if (!res?.success || data.length === 0) {
+        throw new Error(res?.message || '未找到该 ID 对应的数据');
+    }
+    return data[0];
+}
+
+async function openKbEditEmbedRequest() {
+    if (!kbEditEmbedRequest) return false;
+    document.body.classList.add('kb-edit-embed-mode');
+    kbEditEmbedSaved = false;
+    try {
+        if (kbEditEmbedRequest.create) {
+            await openKBEditModal();
+        } else {
+            const item = await fetchKbEditEmbedItem(kbEditEmbedRequest.id);
+            await openKBEditModal(kbEditEmbedRequest.id, { item });
+        }
+        postKbEditEmbedMessage('ready', { kbId: kbEditEmbedRequest.id || '' });
+        return true;
+    } catch (e) {
+        const message = e?.message || String(e);
+        postKbEditEmbedMessage('error', { kbId: kbEditEmbedRequest.id || '', message });
+        if (typeof showToast === 'function') showToast(message, 'error', 0);
+        else alert(message);
+        return false;
+    }
+}
+
 // ==========================================
 // 分页预加载缓存系统
 // ==========================================
@@ -9620,6 +9683,37 @@ function __kbEditCollectDigest() {
     };
 }
 
+const KB_EDIT_EMBED_LOG_FIELDS = [
+    'question',
+    'answer',
+    'product_name',
+    'product_category_name',
+    'question_type',
+    'answer_type',
+    'similar_questions',
+    'keyword_list',
+    'image_urls',
+    'video_urls',
+    'file_urls',
+    'if_bm25',
+    'link_type',
+    'link_url',
+];
+
+function __kbEditBuildSavedDiffs() {
+    if (!__kbEditInitialDigest) return [];
+    const current = __kbEditCollectDigest();
+    return KB_EDIT_EMBED_LOG_FIELDS.flatMap(field => {
+        if (!Object.prototype.hasOwnProperty.call(current, field) && !Object.prototype.hasOwnProperty.call(__kbEditInitialDigest, field)) {
+            return [];
+        }
+        const oldValue = String(__kbEditInitialDigest[field] ?? '');
+        const newValue = String(current[field] ?? '');
+        if (oldValue === newValue) return [];
+        return [{ field, oldValue, newValue }];
+    });
+}
+
 function __kbEditStatusText(status, isCreateMode = false) {
     if (isCreateMode) return '新增中';
     const value = String(status || 'unadjusted').trim();
@@ -9684,6 +9778,227 @@ function __kbEditRenderPreviewText(id, value, emptyText) {
     el.classList.toggle('kb-preview-empty', !text);
 }
 
+function __kbEditTokenizePreviewDiff(text) {
+    const source = String(text ?? '');
+    if (source.length > 1800) return _tokenizeForDiff(source);
+    const tokens = [];
+    const re = /(\s+|[\u4e00-\u9fff]|[A-Za-z0-9_]+|[^\s\u4e00-\u9fffA-Za-z0-9_])/g;
+    let match;
+    while ((match = re.exec(source)) !== null) {
+        tokens.push(match[0]);
+    }
+    return tokens;
+}
+
+function __kbEditRenderPreviewDiffHtml(beforeValue, afterValue) {
+    const beforeText = String(beforeValue ?? '');
+    const afterText = String(afterValue ?? '');
+    if (beforeText === afterText) return _escapeHtml(afterText);
+    const ops = _buildDiffOps(
+        __kbEditTokenizePreviewDiff(beforeText),
+        __kbEditTokenizePreviewDiff(afterText)
+    );
+    let html = '';
+    for (let i = 0; i < ops.length; i++) {
+        const cur = ops[i];
+        if (cur.type === 'equal') {
+            html += _escapeHtml(cur.value);
+            continue;
+        }
+        if (cur.type === 'delete') {
+            const del = [];
+            while (i < ops.length && ops[i].type === 'delete') {
+                del.push(ops[i].value);
+                i++;
+            }
+            const ins = [];
+            while (i < ops.length && ops[i].type === 'insert') {
+                ins.push(ops[i].value);
+                i++;
+            }
+            i--;
+            const delText = del.join('');
+            const insText = ins.join('');
+            if (delText) {
+                html += `<span class="kb-preview-diff-del">${_escapeHtml(delText)}</span>`;
+            }
+            if (insText) {
+                html += `<span class="kb-preview-diff-add">${_escapeHtml(insText)}</span>`;
+            }
+            continue;
+        }
+        if (cur.type === 'insert') {
+            const ins = [];
+            while (i < ops.length && ops[i].type === 'insert') {
+                ins.push(ops[i].value);
+                i++;
+            }
+            i--;
+            const insText = ins.join('');
+            if (insText) html += `<span class="kb-preview-diff-add">${_escapeHtml(insText)}</span>`;
+        }
+    }
+    return html;
+}
+
+function __kbEditGetInitialValue(key) {
+    if (!__kbEditInitialDigest) return '';
+    return String(__kbEditInitialDigest[key] ?? '');
+}
+
+function __kbEditRenderPreviewTextDiff(id, key, value, emptyText) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const text = String(value || '').trim();
+    if (!text && !__kbEditGetInitialValue(key).trim()) {
+        el.textContent = emptyText;
+        el.classList.add('kb-preview-empty');
+        return;
+    }
+    el.classList.toggle('kb-preview-empty', !text && !__kbEditGetInitialValue(key).trim());
+    el.innerHTML = __kbEditRenderPreviewDiffHtml(__kbEditGetInitialValue(key), text);
+}
+
+function __kbEditBuildPreviewItemMap(items) {
+    const map = new Map();
+    (Array.isArray(items) ? items : []).forEach((item) => {
+        const text = String(item ?? '').trim();
+        if (!text) return;
+        const key = text.toLowerCase();
+        const entry = map.get(key) || { text, count: 0 };
+        entry.count += 1;
+        map.set(key, entry);
+    });
+    return map;
+}
+
+function __kbEditGetPreviewListDiff(beforeItems, afterItems) {
+    const beforeMap = __kbEditBuildPreviewItemMap(beforeItems);
+    const afterMap = __kbEditBuildPreviewItemMap(afterItems);
+    const used = new Map();
+    const rows = [];
+    (Array.isArray(afterItems) ? afterItems : []).forEach((item) => {
+        const text = String(item ?? '').trim();
+        if (!text) return;
+        const key = text.toLowerCase();
+        const beforeCount = beforeMap.get(key)?.count || 0;
+        const usedCount = used.get(key) || 0;
+        rows.push({ text, state: usedCount < beforeCount ? 'same' : 'add' });
+        used.set(key, usedCount + 1);
+    });
+    beforeMap.forEach((entry, key) => {
+        const afterCount = afterMap.get(key)?.count || 0;
+        const deletedCount = Math.max(0, entry.count - afterCount);
+        for (let i = 0; i < deletedCount; i++) {
+            rows.push({ text: entry.text, state: 'delete' });
+        }
+    });
+    return rows;
+}
+
+function __kbEditRenderPreviewChipsDiff(id, key, items, emptyText = '未填写', options = {}) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const currentList = Array.isArray(items) ? items.filter(Boolean) : [];
+    const initialList = __kbEditSplitPreviewList(__kbEditGetInitialValue(key), options);
+    const rows = __kbEditGetPreviewListDiff(initialList, currentList);
+    if (!rows.length) {
+        el.innerHTML = `<span class="kb-preview-empty">${_escapeHtml(emptyText)}</span>`;
+        return;
+    }
+    const shown = rows.slice(0, 18);
+    const more = rows.length > shown.length ? `<span class="kb-preview-chip">+${rows.length - shown.length}</span>` : '';
+    el.innerHTML = shown.map(({ text, state }) => {
+        const stateClass = state === 'add' ? ' is-added' : (state === 'delete' ? ' is-deleted' : '');
+        return `<span class="kb-preview-chip${stateClass}" title="${_escapeHtml(text)}">${_escapeHtml(text)}</span>`;
+    }).join('') + more;
+}
+
+function __kbEditBm25Label(value) {
+    return String(value).toLowerCase() === 'true' ? '是' : '否';
+}
+
+function __kbEditBuildPreviewAttrs(digest) {
+    return [
+        { key: 'question_type', label: '问题类型', before: __kbEditGetInitialValue('question_type'), after: String(digest.question_type || '') },
+        { key: 'answer_type', label: '答案类型', before: __kbEditGetInitialValue('answer_type'), after: String(digest.answer_type || '') },
+        { key: 'if_bm25', label: 'BM25', before: __kbEditBm25Label(__kbEditGetInitialValue('if_bm25')), after: __kbEditBm25Label(digest.if_bm25) }
+    ].filter(item => item.before || item.after || item.key === 'if_bm25');
+}
+
+function __kbEditRenderPreviewAttrs(digest) {
+    const el = document.getElementById('kbEditPreviewAttrs');
+    if (!el) return;
+    const attrs = __kbEditBuildPreviewAttrs(digest);
+    if (!attrs.length) {
+        el.innerHTML = '<span class="kb-preview-empty">未设置属性</span>';
+        return;
+    }
+    el.innerHTML = attrs.map(attr => {
+        const changed = String(attr.before ?? '') !== String(attr.after ?? '');
+        const cls = changed ? ' kb-preview-attr-chip is-modified' : '';
+        const valueHtml = changed
+            ? __kbEditRenderPreviewDiffHtml(attr.before, attr.after)
+            : _escapeHtml(attr.after || '-');
+        return `<span class="kb-preview-chip${cls}">${_escapeHtml(attr.label)}：${valueHtml}</span>`;
+    }).join('');
+}
+
+function __kbEditBuildPreviewResourceEntries(digest) {
+    const linkType = String(digest.link_type || '').trim();
+    const entries = [];
+    [
+        ['image_urls', '图片'],
+        ['video_urls', '视频'],
+        ['file_urls', '文件']
+    ].forEach(([field, kind]) => {
+        __kbEditSplitPreviewList(digest[field], { isUrlList: true }).forEach(url => {
+            entries.push({ key: `${field}:${String(url).toLowerCase()}`, field, kind, url, kindSource: kind });
+        });
+    });
+    __kbEditSplitPreviewList(digest.link_url, { isUrlList: true }).forEach(url => {
+        entries.push({
+            key: `link_url:${String(url).toLowerCase()}`,
+            field: 'link_url',
+            kind: linkType || '外链',
+            url,
+            kindSource: linkType || '外链'
+        });
+    });
+    return entries;
+}
+
+function __kbEditRenderPreviewResourceRows(digest) {
+    const initial = __kbEditInitialDigest || {};
+    const beforeEntries = __kbEditBuildPreviewResourceEntries(initial);
+    const afterEntries = __kbEditBuildPreviewResourceEntries(digest);
+    const beforeMap = new Map(beforeEntries.map(entry => [entry.key, entry]));
+    const afterMap = new Map(afterEntries.map(entry => [entry.key, entry]));
+    const rows = afterEntries.map(entry => ({
+        ...entry,
+        state: beforeMap.has(entry.key) ? 'same' : 'add',
+        beforeKind: beforeMap.get(entry.key)?.kind || entry.kind
+    }));
+    beforeEntries.forEach(entry => {
+        if (!afterMap.has(entry.key)) rows.push({ ...entry, state: 'delete', beforeKind: entry.kind });
+    });
+
+    const beforeLinkType = String(initial.link_type || '').trim();
+    const afterLinkType = String(digest.link_type || '').trim();
+    if (beforeLinkType !== afterLinkType && !beforeEntries.some(e => e.field === 'link_url') && !afterEntries.some(e => e.field === 'link_url')) {
+        rows.push({
+            key: 'link_type',
+            field: 'link_type',
+            kind: '外链类型',
+            beforeKind: '外链类型',
+            url: afterLinkType,
+            beforeUrl: beforeLinkType,
+            state: beforeLinkType && afterLinkType ? 'modify' : (afterLinkType ? 'add' : 'delete')
+        });
+    }
+    return rows;
+}
+
 function __kbEditIsPreviewChanged(key) {
     if (!__kbEditInitialDigest) return false;
     const current = __kbEditCollectDigest();
@@ -9699,25 +10014,36 @@ function __kbEditIsPreviewChanged(key) {
 function __kbEditRenderPreviewResources(digest) {
     const el = document.getElementById('kbEditPreviewResources');
     if (!el) return;
-    const groups = [
-        ['图片', __kbEditSplitPreviewList(digest.image_urls, { isUrlList: true })],
-        ['视频', __kbEditSplitPreviewList(digest.video_urls, { isUrlList: true })],
-        ['文件', __kbEditSplitPreviewList(digest.file_urls, { isUrlList: true })],
-        [digest.link_type || '外链', __kbEditSplitPreviewList(digest.link_url, { isUrlList: true })]
-    ];
-    const rows = [];
-    groups.forEach(([kind, urls]) => {
-        urls.forEach(url => {
-            const href = /^https?:\/\//i.test(url) ? url : `http://${url}`;
-            rows.push(`
-                <div class="kb-preview-resource-row">
-                    <span class="kb-preview-resource-kind">${_escapeHtml(kind)}</span>
-                    <a href="${_escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${_escapeHtml(url)}">${_escapeHtml(url)}</a>
+    const rows = __kbEditRenderPreviewResourceRows(digest);
+    if (!rows.length) {
+        el.innerHTML = '<span class="kb-preview-empty">暂无资源链接</span>';
+        return;
+    }
+    el.innerHTML = rows.map(row => {
+        const stateClass = row.state === 'add' ? ' is-added' : (row.state === 'delete' ? ' is-deleted' : (row.state === 'modify' ? ' is-modified' : ''));
+        const kindHtml = row.field === 'link_url' && String(row.beforeKind || '') !== String(row.kind || '')
+            ? __kbEditRenderPreviewDiffHtml(row.beforeKind, row.kind)
+            : _escapeHtml(row.kind || row.beforeKind || '外链');
+        if (row.field === 'link_type') {
+            return `
+                <div class="kb-preview-resource-row${stateClass}">
+                    <span class="kb-preview-resource-kind">${kindHtml}</span>
+                    <span class="kb-preview-resource-text">${__kbEditRenderPreviewDiffHtml(row.beforeUrl || '', row.url || '') || '-'}</span>
                 </div>
-            `);
-        });
-    });
-    el.innerHTML = rows.join('') || '<span class="kb-preview-empty">暂无资源链接</span>';
+            `;
+        }
+        const url = String(row.url || '').trim();
+        const href = /^https?:\/\//i.test(url) ? url : `http://${url}`;
+        const urlHtml = row.state === 'delete'
+            ? `<span class="kb-preview-resource-text kb-preview-diff-del">${_escapeHtml(url)}</span>`
+            : `<a href="${_escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${_escapeHtml(url)}">${_escapeHtml(url)}</a>`;
+        return `
+            <div class="kb-preview-resource-row${stateClass}">
+                <span class="kb-preview-resource-kind">${kindHtml}</span>
+                ${urlHtml}
+            </div>
+        `;
+    }).join('');
 }
 
 function __kbEditSyncPreviewChangedState() {
@@ -9750,18 +10076,14 @@ function __kbEditRenderPreview() {
     const previewTemplateWrap = document.getElementById('kbEditPreviewTemplateRefWrap');
     if (previewTemplateWrap) previewTemplateWrap.style.display = __kbEditIsCreateMode ? '' : 'none';
 
-    __kbEditRenderPreviewChips('kbEditPreviewCategory', __kbEditSplitPreviewList(digest.product_category_name), '未选择分类');
-    __kbEditRenderPreviewChips('kbEditPreviewProducts', __kbEditSplitPreviewList(digest.product_name), '未选择型号');
-    __kbEditRenderPreviewChips('kbEditPreviewTags', __kbEditSplitPreviewList(digest.kb_tags_input), '未设置标签');
-    __kbEditRenderPreviewChips('kbEditPreviewAttrs', [
-        digest.question_type ? `问题类型：${digest.question_type}` : '',
-        digest.answer_type ? `答案类型：${digest.answer_type}` : '',
-        `BM25：${String(digest.if_bm25).toLowerCase() === 'true' ? '是' : '否'}`
-    ].filter(Boolean), '未设置属性');
+    __kbEditRenderPreviewChipsDiff('kbEditPreviewCategory', 'product_category_name', __kbEditSplitPreviewList(digest.product_category_name), '未选择分类');
+    __kbEditRenderPreviewChipsDiff('kbEditPreviewProducts', 'product_name', __kbEditSplitPreviewList(digest.product_name), '未选择型号');
+    __kbEditRenderPreviewChipsDiff('kbEditPreviewTags', 'kb_tags_input', __kbEditSplitPreviewList(digest.kb_tags_input), '未设置标签');
+    __kbEditRenderPreviewAttrs(digest);
 
-    __kbEditRenderPreviewText('kbEditPreviewQuestion', digest.question, '暂无问题内容');
-    __kbEditRenderPreviewChips('kbEditPreviewSimilarQuestions', __kbEditSplitPreviewList(digest.similar_questions), '未设置相似问');
-    __kbEditRenderPreviewText('kbEditPreviewAnswer', digest.answer, '暂无答案内容');
+    __kbEditRenderPreviewTextDiff('kbEditPreviewQuestion', 'question', digest.question, '暂无问题内容');
+    __kbEditRenderPreviewChipsDiff('kbEditPreviewSimilarQuestions', 'similar_questions', __kbEditSplitPreviewList(digest.similar_questions), '未设置相似问');
+    __kbEditRenderPreviewTextDiff('kbEditPreviewAnswer', 'answer', digest.answer, '暂无答案内容');
     __kbEditRenderPreviewResources(digest);
     __kbEditSyncPreviewChangedState();
 }
@@ -9937,6 +10259,9 @@ function __kbEditBuildSubmitPayload() {
     });
     if (typeof data.link_url === 'string') data.link_url = data.link_url.trim();
     if (typeof data.link_type === 'string') data.link_type = data.link_type.trim();
+    if (kbEditEmbedRequest?.changeSource && !data.change_source && !data.source_module) {
+        data.change_source = kbEditEmbedRequest.changeSource;
+    }
     if (__kbEditQualityContext) {
         data.change_source = '管控中心';
         data.quality_task_id = __kbEditQualityContext.task_id;
@@ -10676,6 +11001,10 @@ function closeKBEditModal(options = {}) {
             modal.style.display = 'none';
         }
         __kbEditQualityContext = null;
+        postKbEditEmbedMessage('closed', {
+            kbId: kbEditEmbedRequest?.id || __kbEditDraftContextId || '',
+            saved: kbEditEmbedSaved,
+        });
     };
 
     if (!force && __kbEditHasUnsavedChanges()) {
@@ -11844,6 +12173,8 @@ function __kbParseTagNames(input) {
 
 async function saveKBItem() {
     const { data, tagNames } = __kbEditBuildSubmitPayload();
+    const savedDiffs = __kbEditBuildSavedDiffs();
+    const remoteUpdateTimeBefore = String((__kbEditCurrentPreviewItem || {}).update_time || '').trim();
     
     const btn = document.getElementById('saveKBItemBtn');
     __kbEditSaving = true;
@@ -11910,6 +12241,14 @@ async function saveKBItem() {
         __kbEditTouched = false;
         __kbEditInitialDigest = __kbEditCollectDigest();
         __kbEditClearDraft(__kbEditDraftContextId);
+        kbEditEmbedSaved = true;
+        postKbEditEmbedMessage('saved', {
+            kbId: savedWikiId,
+            noChange: !!res.no_change,
+            diffs: savedDiffs,
+            remoteUpdateTimeBefore,
+            remoteUpdateTimeAfter: String(res.update_time || res.current_update_time || '').trim(),
+        });
         const qualityContext = __kbEditQualityContext;
         closeKBEditModal({ force: true });
         // 保存后必须清空分页缓存，否则会继续命中旧数据导致“预览未更新”。
@@ -16986,6 +17325,11 @@ function enableAllTableColumnResize() {
 // Initialization
 // ==========================================
 window.addEventListener('DOMContentLoaded', async () => {
+  kbEditEmbedRequest = getKbEditEmbedRequest();
+  if (kbEditEmbedRequest) {
+    document.body.classList.add('kb-edit-embed-mode');
+  }
+
   // Check Login
   try {
       const status = await api('/status');
@@ -16994,6 +17338,11 @@ window.addEventListener('DOMContentLoaded', async () => {
         const userEl = document.getElementById('currentUser');
         if (userEl) userEl.textContent = currentUser;
         showLogin(false);
+
+        if (kbEditEmbedRequest) {
+          await openKbEditEmbedRequest();
+          return;
+        }
         
         // Initial load (main app page)
         switchTab('kbView');

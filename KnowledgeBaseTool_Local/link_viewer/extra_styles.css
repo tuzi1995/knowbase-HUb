@@ -3399,6 +3399,56 @@ select.form-control {
     font-weight: 680 !important;
 }
 
+#kbEditModal .kb-preview-diff-add {
+    display: inline;
+    border-radius: 4px;
+    background: #dcfce7;
+    color: #166534;
+    padding: 0 2px;
+    font-weight: 750;
+}
+
+#kbEditModal .kb-preview-diff-del,
+#kbEditModal .kb-preview-chip.is-deleted,
+#kbEditModal .kb-preview-resource-row.is-deleted .kb-preview-resource-text {
+    border-radius: 4px;
+    background: #fee4e2;
+    color: #b42318;
+    padding: 0 2px;
+    text-decoration: line-through;
+    text-decoration-thickness: 1.5px;
+}
+
+#kbEditModal .kb-preview-chip.is-added {
+    border-color: #bbf7d0 !important;
+    background: #dcfce7 !important;
+    color: #166534 !important;
+}
+
+#kbEditModal .kb-preview-chip.is-deleted {
+    border-color: #fecaca !important;
+    background: #fee4e2 !important;
+    color: #b42318 !important;
+    padding: 4px 8px !important;
+    opacity: 0.92;
+}
+
+#kbEditModal .kb-preview-chip.is-modified,
+#kbEditModal .kb-preview-resource-row.is-modified .kb-preview-resource-kind {
+    border-color: #fed7aa !important;
+    background: #fff7ed !important;
+    color: #9a3412 !important;
+}
+
+#kbEditModal .kb-preview-resource-row.is-added a,
+#kbEditModal .kb-preview-resource-row.is-added .kb-preview-resource-text {
+    border-radius: 4px;
+    background: #dcfce7;
+    color: #166534;
+    padding: 0 2px;
+    font-weight: 750;
+}
+
 #kbEditModal .kb-preview-resource-kind {
     border-radius: 7px !important;
     background: var(--kb-edit-green-soft) !important;
@@ -4318,5 +4368,91 @@ select.form-control {
     #kbEditModal .ai-answer-compare-grid {
         grid-template-columns: 1fr;
         overflow: visible;
+    }
+}
+
+body.kb-edit-embed-mode {
+    overflow: hidden;
+    background: #f4f7fb;
+}
+
+body.kb-edit-embed-mode #mainContent {
+    display: none !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal.modal.is-open {
+    align-items: stretch !important;
+    justify-content: center !important;
+    inset: 0 !important;
+    padding: 0 !important;
+    background: #f4f7fb !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-edit-modal-content {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100vh !important;
+    max-height: 100vh !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-edit-modal-body {
+    padding: 0 !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-edit-workbench {
+    grid-template-columns: minmax(176px, 0.5fr) minmax(760px, 2.65fr) minmax(210px, 0.58fr) !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-edit-preview-pane,
+body.kb-edit-embed-mode #kbEditModal .kb-edit-side-pane {
+    padding: 10px !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-edit-main-pane {
+    gap: 8px !important;
+    padding: 10px 12px !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-edit-main-pane .kb-edit-top-grid {
+    padding: 8px 10px !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-question-panel {
+    padding: 10px 12px !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-question-textarea {
+    height: 58px !important;
+    min-height: 52px !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-answer-panel {
+    padding: 10px 12px !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .markdown-editor-container.kb-markdown-editor {
+    min-height: 420px !important;
+}
+
+body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
+    margin: 6px 12px 10px !important;
+}
+
+@media (max-width: 1320px) {
+    body.kb-edit-embed-mode #kbEditModal .kb-edit-workbench {
+        grid-template-columns: minmax(156px, 0.42fr) minmax(640px, 2.45fr) minmax(184px, 0.5fr) !important;
+    }
+}
+
+@media (max-width: 1080px) {
+    body.kb-edit-embed-mode #kbEditModal .kb-edit-workbench {
+        grid-template-columns: minmax(130px, 0.32fr) minmax(520px, 2.3fr) minmax(148px, 0.38fr) !important;
+    }
+
+    body.kb-edit-embed-mode #kbEditModal .markdown-editor-container.kb-markdown-editor {
+        min-height: 360px !important;
     }
 }

@@ -18,6 +18,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 from datetime import datetime
+from urllib.parse import urlparse
 from flask import Flask, request, jsonify, send_from_directory, send_file, Response, stream_with_context
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func, or_, desc, asc, case, text
@@ -75,6 +76,7 @@ CORS(app, supports_credentials=True, origins=_get_cors_allowed_origins())
 app.config['SECRET_KEY'] = os.environ.get('KMATRIX_SECRET_KEY', 'dev-only-change-me')
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _DB_PATH = os.path.join(_BASE_DIR, 'instance', 'data.db')
+BADCASE_WORKBENCH_SOURCE = 'badcase标注工作台'
 os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)  # Ensure SQLite folder exists
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + _DB_PATH.replace('\\', '/')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -3661,6 +3663,28 @@ def _attach_change_meta(record, meta):
     except Exception:
         return record
 
+def _request_from_port(port):
+    target = str(port)
+    for header in ('Origin', 'Referer'):
+        raw = str(request.headers.get(header) or '').strip()
+        if not raw:
+            continue
+        try:
+            if urlparse(raw).port == int(target):
+                return True
+        except Exception:
+            if f':{target}' in raw:
+                return True
+    return False
+
+def _resolve_kb_change_source(payload):
+    explicit = str((payload or {}).get('change_source') or (payload or {}).get('source_module') or '').strip()
+    if explicit:
+        return explicit
+    if _request_from_port(8083):
+        return BADCASE_WORKBENCH_SOURCE
+    return '知识库管理'
+
 def _convert_array_fields_to_json(record_or_records):
     """
     将修改记录中的数组字段转换为 JSON 字符串，以匹配 PostgreSQL 的 jsonb 类型。
@@ -4330,7 +4354,7 @@ def _mod_operation_match(op_val, wanted):
 def update_kb_item():
     raw_payload = request.get_json(silent=True) or {}
     base_update_time = str(raw_payload.get('base_update_time') or '').strip()
-    change_source = str(raw_payload.get('change_source') or raw_payload.get('source_module') or '').strip() or '知识库管理'
+    change_source = _resolve_kb_change_source(raw_payload)
     data = raw_payload
     client = get_supabase_client()
     if not client:
