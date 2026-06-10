@@ -2294,6 +2294,41 @@ def _ai_default_prompts():
             "结构要求（强约束 + 软容错）：answer 必须包含 ### 结构化正文 与 ### 扩写问答对（按此顺序）；模块顺序固定但允许缺失跳过；问答对目标 3-5 组，若不足 3 组需在 notes 说明原因。\n"
             "变量：{{task}} {{question}} {{answer}} {{urls}}"
         ),
+        'answer_requirement': (
+            "你是客服知识库 FAQ 答案定向优化助手。\n"
+            "当前 task=requirement。你的任务是根据“优化需求”对原答案做定向优化。\n\n"
+            "输入数据：\n"
+            "- question：{{question}}\n"
+            "- answer：{{answer}}\n"
+            "- optimization_requirement：{{optimization_requirement}}\n"
+            "- urls：{{urls}}\n\n"
+            "处理规则（严格遵守）：\n"
+            "1) 优化需求是本次修改的主要依据，必须逐条落实到 refined_answer。\n"
+            "2) 允许使用原答案和优化需求中明确给出的信息；不得编造产品能力、操作路径、按钮名称、限制条件或承诺。\n"
+            "3) 保留原答案中仍然正确、必要的信息；删除或改写会造成混淆、重复、口语化或与优化需求冲突的表达。\n"
+            "4) 如果优化需求要求拆分场景、澄清概念、补充限制说明、替换措辞，必须在答案中明确体现。\n"
+            "5) 输出内容应适合作为知识库 FAQ 正文，面向用户，表达清晰、准确、可执行。\n"
+            "6) 保持 Markdown 格式；不要输出解释过程。\n\n"
+            "异常处理：\n"
+            "- 如果优化需求为空、模糊到无法执行，notes 写为「【需二次修订】：请补充明确的优化需求」。\n"
+            "- 如果优化需求包含疑似需要人工确认的事实，notes 写为「【需二次修订】：请人工确认 XXX」；refined_answer 不要编造未确认内容。\n"
+            "- 无异常时 notes 可简短说明主要修改点，或返回 null。\n\n"
+            "输出要求（严格遵循）：\n"
+            "你必须只输出合法 JSON（不要输出 Markdown 代码块，不要输出任何额外文本）：\n"
+            "{\n"
+            "  \"original_answer\": string,\n"
+            "  \"refined_answer\": string,\n"
+            "  \"notes\": string|null,\n"
+            "  \"answer\": string,\n"
+            "  \"urls\": string[]|null\n"
+            "}\n\n"
+            "字段要求：\n"
+            "- original_answer：原始 answer 原文。\n"
+            "- refined_answer：按优化需求处理后的答案正文。\n"
+            "- answer：必须与 refined_answer 完全一致。\n"
+            "- urls：如无新增或调整，返回 null。\n"
+            "变量：{{task}} {{question}} {{answer}} {{optimization_requirement}} {{urls}}"
+        ),
         'similar': (
             "你是一个企业知识库的编辑助手。请基于 question 生成 3-5 条相似问题，表述要多样。\n"
             "输出必须为严格 JSON：\n"
@@ -2328,6 +2363,7 @@ def _save_ai_prompts_to_prompt_folder(config):
             'answer_fault': 'ai_answer_fault_prompt.txt',
             'answer_usage': 'ai_answer_usage_prompt.txt',
             'answer_feature': 'ai_answer_feature_prompt.txt',
+            'answer_requirement': 'ai_answer_requirement_prompt.txt',
             'similar': 'ai_similar_prompt.txt',
         }
 
@@ -2371,6 +2407,7 @@ def _ai_pick_prompt(area, task, prompts, defaults):
             'fault': 'answer_fault',
             'usage': 'answer_usage',
             'feature': 'answer_feature',
+            'requirement': 'answer_requirement',
         }
         k = key_map.get((task or '').strip())
         if k:
@@ -2644,6 +2681,11 @@ def ai_optimize_stream():
 
             question = str(inputs.get('question') or '')
             answer = str(inputs.get('answer') or '')
+            optimization_requirement = str(
+                inputs.get('optimization_requirement')
+                or inputs.get('optimizationRequirement')
+                or ''
+            )
             urls = inputs.get('urls')
             if isinstance(urls, str):
                 urls = [u.strip() for u in re.split(r"[,，\n]", urls) if u.strip()]
@@ -2672,6 +2714,7 @@ def ai_optimize_stream():
                 'task': task,
                 'question': question,
                 'answer': answer,
+                'optimization_requirement': optimization_requirement,
                 'urls': urls,
                 'target_min': payload.get('target_min', 0.75),
                 'target_max': payload.get('target_max', 0.85),
@@ -2706,6 +2749,8 @@ def ai_optimize_stream():
                 if not isinstance(out_q, str) or not out_q.strip():
                     ok = False
             elif area == 'answer':
+                if not isinstance(obj.get('answer'), str) and isinstance(obj.get('refined_answer'), str):
+                    obj['answer'] = obj.get('refined_answer')
                 out_a = obj.get('answer')
                 if not isinstance(out_a, str) or not out_a.strip():
                     ok = False
@@ -2727,7 +2772,7 @@ def ai_optimize_stream():
                 return
 
             # 答案类任务：统一输出 original_answer / refined_answer / notes / answer
-            if area == 'answer' and (task or '').strip() in ('structure', 'fault', 'usage', 'feature'):
+            if area == 'answer' and (task or '').strip() in ('structure', 'fault', 'usage', 'feature', 'requirement'):
                 try:
                     orig_ans = answer
                 except Exception:
@@ -2794,6 +2839,11 @@ def ai_optimize():
 
         question = str(inputs.get('question') or '')
         answer = str(inputs.get('answer') or '')
+        optimization_requirement = str(
+            inputs.get('optimization_requirement')
+            or inputs.get('optimizationRequirement')
+            or ''
+        )
         urls = inputs.get('urls')
         if isinstance(urls, str):
             urls = [u.strip() for u in re.split(r"[,，\n]", urls) if u.strip()]
@@ -2822,6 +2872,7 @@ def ai_optimize():
             'task': task,
             'question': question,
             'answer': answer,
+            'optimization_requirement': optimization_requirement,
             'urls': urls,
             'target_min': payload.get('target_min', 0.75),
             'target_max': payload.get('target_max', 0.85),
@@ -2929,6 +2980,8 @@ def ai_optimize():
                     ok = False
             elif area == 'answer':
                 # 答案区：允许前端根据 task 走不同模板/策略，但输出必须始终包含非空 answer
+                if not isinstance(obj.get('answer'), str) and isinstance(obj.get('refined_answer'), str):
+                    obj['answer'] = obj.get('refined_answer')
                 out_a = obj.get('answer')
                 if not isinstance(out_a, str) or not out_a.strip():
                     ok = False
@@ -2955,7 +3008,7 @@ def ai_optimize():
             return jsonify({'success': False, 'message': 'AI 输出解析失败', 'raw': last_raw}), 500
 
         # 答案类任务：统一输出 original_answer / refined_answer / notes / answer
-        if area == 'answer' and (task or '').strip() in ('structure', 'fault', 'usage', 'feature'):
+        if area == 'answer' and (task or '').strip() in ('structure', 'fault', 'usage', 'feature', 'requirement'):
             try:
                 orig_ans = answer
             except Exception:
@@ -3153,7 +3206,7 @@ def get_kb_data():
             ids = [x for x in ids if not (x in seen or seen.add(x))]
 
     if ids:
-        id_field = 'question_wiki_id' if table_name == 'knowledge_base_v1' else 'id'
+        id_field = 'question_wiki_id'
         all_numeric = True
         for x in ids:
             if not str(x).isdigit():
@@ -11587,6 +11640,114 @@ def _kb_import_column_mapping():
         'product_name': 'product_name',
         'Product': 'product_name'
     }
+
+def _dedupe_kb_compare_ids(raw_ids):
+    ids = []
+    duplicates = []
+    seen = set()
+    for value in raw_ids or []:
+        kid = str(value or '').strip().replace('\ufeff', '')
+        if not kid:
+            continue
+        if kid.lower() in ('id', 'wikiid', 'wiki_id', 'question_wiki_id') or kid in ('问题编号', '问题ID', '问题id'):
+            continue
+        if not re.match(r'^(ICWIKI[A-Za-z0-9_-]+|[A-Za-z0-9_-]{8,})$', kid, re.I):
+            continue
+        if kid in seen:
+            duplicates.append(kid)
+            continue
+        seen.add(kid)
+        ids.append(kid)
+    return ids, duplicates
+
+def _extract_kb_compare_ids_from_text(text, allow_generic=True):
+    raw = str(text or '')
+    direct_ids = re.findall(r'ICWIKI[A-Za-z0-9_-]+', raw, flags=re.I)
+    if direct_ids:
+        return _dedupe_kb_compare_ids(direct_ids)
+    if not allow_generic:
+        return [], []
+    parts = re.split(r'[\s,，;；、|"\']+', raw)
+    return _dedupe_kb_compare_ids(parts)
+
+def _extract_kb_compare_ids_from_df(df):
+    if df is None or getattr(df, 'empty', True):
+        return [], []
+
+    id_column_names = {'id', 'wikiid', 'wiki_id', 'question_wiki_id', '问题编号', '问题id', '问题ID'}
+    candidate_cols = [
+        col for col in df.columns
+        if str(col or '').strip() in id_column_names
+        or str(col or '').strip().lower() in id_column_names
+    ]
+
+    if candidate_cols:
+        values = []
+        for col in candidate_cols:
+            values.extend(df[col].tolist())
+        return _dedupe_kb_compare_ids(values)
+
+    text = '\n'.join(
+        str(v)
+        for v in df.fillna('').astype(str).to_numpy().flatten().tolist()
+        if str(v).strip()
+    )
+    ids, duplicates = _extract_kb_compare_ids_from_text(text, allow_generic=False)
+    if ids:
+        return ids, duplicates
+
+    first_col = df.columns[0] if len(df.columns) else None
+    if first_col is not None:
+        return _dedupe_kb_compare_ids(df[first_col].tolist())
+    return [], []
+
+@app.route('/api/kb/compare/parse_ids', methods=['POST'])
+@login_required
+def kb_compare_parse_ids():
+    try:
+        file = request.files.get('file')
+        if not file:
+            return jsonify({'success': False, 'message': '请选择文件'}), 400
+
+        filename = secure_filename(file.filename or 'ids')
+        lower = filename.lower()
+
+        if lower.endswith(('.txt', '.csv')):
+            data = file.read()
+            text = ''
+            for enc in ('utf-8-sig', 'utf-8', 'gbk'):
+                try:
+                    text = data.decode(enc)
+                    break
+                except Exception:
+                    continue
+            ids, duplicates = _extract_kb_compare_ids_from_text(text, allow_generic=True)
+        elif lower.endswith(('.xlsx', '.xls')):
+            sheets = pd.read_excel(file, sheet_name=None, dtype=str)
+            ids = []
+            duplicates = []
+            seen = set()
+            for df in (sheets or {}).values():
+                sheet_ids, sheet_dups = _extract_kb_compare_ids_from_df(df)
+                for kid in sheet_ids:
+                    if kid in seen:
+                        duplicates.append(kid)
+                    else:
+                        seen.add(kid)
+                        ids.append(kid)
+                duplicates.extend(sheet_dups)
+        else:
+            return jsonify({'success': False, 'message': '仅支持 txt / csv / xlsx / xls'}), 400
+
+        return jsonify({
+            'success': True,
+            'ids': ids,
+            'duplicateIds': duplicates,
+            'count': len(ids)
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 
 @app.route('/api/kb/import', methods=['POST'])

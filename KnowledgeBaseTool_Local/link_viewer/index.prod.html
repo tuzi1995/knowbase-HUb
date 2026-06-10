@@ -382,6 +382,7 @@
               <div class="workbench-nav-group" data-nav-group="核心数据">
                 <div class="workbench-nav-group-title">核心数据</div>
                 <button onclick="switchTab('kbView')" class="tab-modern workbench-nav-btn active" id="tab-kbView">知识库管理</button>
+                <button onclick="switchTab('kbCompareView')" class="tab-modern workbench-nav-btn" id="tab-kbCompareView">知识对比</button>
                 <button onclick="switchTab('matrixView')" class="tab-modern workbench-nav-btn" id="tab-matrixView">机型矩阵管理</button>
                 <button onclick="switchTab('linkView')" class="tab-modern workbench-nav-btn" id="tab-linkView">多媒体预览</button>
               </div>
@@ -449,6 +450,7 @@
                     <button onclick="loadKBTable()" class="action-btn btn-secondary-outline">🔄 刷新数据</button>
                     <button onclick="openExportModal()" class="action-btn btn-secondary-outline">📤 导出数据</button>
                     <button id="kbPreviewSelectedBtn" class="action-btn btn-secondary-outline">👁️ 仅预览勾选</button>
+                    <button id="kbCompareSelectedBtn" onclick="openKBCompareFromSelection()" class="action-btn btn-secondary-outline">🔍 对比选中</button>
                     <button onclick="showRevisionModal()" class="success-btn btn-success-solid" title="将所有修改中/删除中的状态重置为未调整">✅ 已完成修订</button>
                     <button onclick="deleteSelectedKBItems()" class="danger-btn btn-danger-solid">🗑️ 删除选中</button>
                     <button onclick="switchTab('dataSettingsView')" class="action-btn btn-secondary-outline">⚙️ 数据设置</button>
@@ -599,6 +601,87 @@
                 </div>
             </div>
         </div>
+      </div>
+
+      <div id="kbCompareView" class="d-none">
+          <div class="kb-section kb-compare-section">
+            <div class="gov-summary-panel kb-compare-hero">
+                <div>
+                    <div class="kb-compare-title">知识对比</div>
+                    <div class="text-muted kb-compare-desc">按 ID 批量导入知识库记录，完成匹配校验、字段差异与合并草稿。</div>
+                </div>
+                <div class="action-bar kb-compare-actions">
+                    <button onclick="runKBCompareImport()" class="primary-btn btn-primary-gradient">开始对比</button>
+                    <button id="kbCompareGenerateDraftBtn" onclick="generateKBCompareMergeDraft()" class="primary-btn btn-primary-gradient" disabled>生成合并草稿</button>
+                    <button onclick="clearKBCompareWorkspace()" class="action-btn btn-secondary-outline">清空</button>
+                    <button onclick="switchTab('kbView')" class="action-btn btn-secondary-outline">返回知识库</button>
+                </div>
+            </div>
+
+            <div class="kb-compare-layout" id="kbCompareLayout">
+                <section class="kb-compare-import-panel" id="kbCompareImportPanel">
+                    <div class="kb-compare-panel-head">
+                        <div>
+                            <h3>导入 ID</h3>
+                            <p id="kbCompareImportMeta">支持换行、逗号、空格、CSV 文本。也可以从知识库管理勾选后跳转带入。</p>
+                        </div>
+                        <div class="kb-compare-import-tools">
+                            <div class="kb-compare-source-switch" aria-label="对比数据源">
+                                <label><input type="radio" name="kbCompareTable" value="knowledge_base_v1" checked> 此刻库</label>
+                                <label><input type="radio" name="kbCompareTable" value="knowledge_base_v1_t1"> 前刻库</label>
+                            </div>
+                            <button type="button" id="kbCompareImportToggleBtn" onclick="toggleKBCompareImportCollapsed()" class="action-btn btn-sm">收起</button>
+                        </div>
+                    </div>
+
+                    <div class="kb-compare-import-body" id="kbCompareImportBody">
+                        <textarea id="kbCompareIdInput" class="input-modern kb-compare-id-input" rows="8" placeholder="粘贴 Wiki ID，例如：&#10;ICWIKI202510210009&#10;ICWIKI202409030002&#10;ICWIKI202404232078"></textarea>
+
+                        <div class="kb-compare-import-actions">
+                            <input type="file" id="kbCompareFileInput" accept=".txt,.csv,.xlsx,.xls" class="d-none" onchange="handleKBCompareFileImport(this.files && this.files[0])">
+                            <button type="button" onclick="document.getElementById('kbCompareFileInput')?.click()" class="action-btn btn-secondary-outline">导入 Excel/CSV</button>
+                        </div>
+
+                        <div id="kbCompareValidation" class="kb-compare-validation">
+                            <div class="kb-compare-empty">请先导入 ID 并点击开始对比。</div>
+                        </div>
+                    </div>
+
+                    <div class="kb-compare-summary-shell">
+                        <div class="kb-compare-panel-head kb-compare-summary-head">
+                            <div>
+                                <h3>差异摘要</h3>
+                                <p id="kbCompareResultMeta">等待导入 ID。</p>
+                            </div>
+                            <div class="kb-compare-result-tools">
+                                <label class="kb-compare-toggle">
+                                    <input type="checkbox" id="kbCompareOnlyDiffs" checked onchange="renderKBCompareResults()">
+                                    只看差异字段
+                                </label>
+                                <label class="kb-compare-toggle">
+                                    <input type="checkbox" id="kbCompareShowMetaFields" onchange="renderKBCompareResults()">
+                                    显示元数据
+                                </label>
+                            </div>
+                        </div>
+
+                        <div id="kbCompareSummary" class="kb-compare-summary">
+                            <div class="kb-compare-empty">暂无对比结果。</div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="kb-compare-result-panel">
+                    <div id="kbCompareDetail" class="kb-compare-detail">
+                        <div class="kb-compare-empty">点击摘要中的字段查看详细对比。</div>
+                    </div>
+
+                    <div id="kbCompareMergeDraft" class="kb-compare-merge-draft">
+                        <div class="kb-compare-empty">生成合并草稿后，将展示要编辑的主 ID、建议删除的 ID 与字段采用值。</div>
+                    </div>
+                </section>
+            </div>
+          </div>
       </div>
 
 
@@ -2241,10 +2324,11 @@
                                 <div class="kb-toolbar-dropdown" id="aiAnswerDropdown">
                                     <button type="button" class="action-btn btn-sm" onclick="toggleToolbarDropdown('aiAnswerDropdown')">AI处理 ▾</button>
                                     <div class="kb-toolbar-menu">
-                                        <button type="button" class="kb-toolbar-item" onclick="aiAnswerAction('structure'); closeAllToolbarDropdowns()">通用处理</button>
-                                        <button type="button" class="kb-toolbar-item" onclick="aiAnswerAction('fault'); closeAllToolbarDropdowns()">故障类处理</button>
-                                        <button type="button" class="kb-toolbar-item" onclick="aiAnswerAction('usage'); closeAllToolbarDropdowns()">使用类处理</button>
-                                        <button type="button" class="kb-toolbar-item" onclick="aiAnswerAction('feature'); closeAllToolbarDropdowns()">功能类处理</button>
+                                        <button type="button" id="aiAnswerBtnStructure" data-ai-answer-task="structure" class="kb-toolbar-item" onclick="aiAnswerAction('structure'); closeAllToolbarDropdowns()">通用处理</button>
+                                        <button type="button" id="aiAnswerBtnFault" data-ai-answer-task="fault" class="kb-toolbar-item" onclick="aiAnswerAction('fault'); closeAllToolbarDropdowns()">故障类处理</button>
+                                        <button type="button" id="aiAnswerBtnUsage" data-ai-answer-task="usage" class="kb-toolbar-item" onclick="aiAnswerAction('usage'); closeAllToolbarDropdowns()">使用类处理</button>
+                                        <button type="button" id="aiAnswerBtnFeature" data-ai-answer-task="feature" class="kb-toolbar-item" onclick="aiAnswerAction('feature'); closeAllToolbarDropdowns()">功能类处理</button>
+                                        <button type="button" id="aiAnswerBtnRequirement" data-ai-answer-task="requirement" class="kb-toolbar-item" onclick="openAiAnswerRequirementModal(); closeAllToolbarDropdowns()">按需求优化答案</button>
                                     </div>
                                 </div>
 
@@ -2434,6 +2518,27 @@
     </div>
   </div>
 
+  <!-- AI Answer Requirement Modal -->
+  <div id="aiAnswerRequirementModal" class="modal">
+    <div class="modal-content ai-requirement-modal-content" style="width: 640px; max-width: 92vw;">
+        <div class="modal-header">
+            <h3>按需求优化答案</h3>
+            <button class="close-modal-btn" onclick="closeAiAnswerRequirementModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label" for="aiAnswerRequirementInput">优化需求</label>
+                <textarea id="aiAnswerRequirementInput" rows="8" class="font-mono" style="width: 100%; min-height: 180px; resize: vertical; line-height: 1.6;" placeholder="输入本次答案优化要求，例如：拆分两个场景；明确不支持直接删除单个房间；补充禁区不会从地图移除房间。"></textarea>
+                <div id="aiAnswerRequirementStatus" class="form-hint ai-requirement-status" style="min-height: 18px; margin-top: 6px; color: #b45309;"></div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" onclick="closeAiAnswerRequirementModal()" class="action-btn">取消</button>
+            <button type="button" onclick="submitAiAnswerRequirement()" class="primary-btn">生成优化答案</button>
+        </div>
+    </div>
+  </div>
+
   <!-- API Config Modal -->
   <div id="apiConfigModal" class="modal">
     <div class="modal-content">
@@ -2465,10 +2570,10 @@
                 <div class="form-group">
                     <label class="form-label">答案区 Prompt 模板（拆分更快更稳）:</label>
                     <div class="form-hint" style="font-size: 12px; color: #777; margin-top: 6px; margin-bottom: 10px;">
-                        系统会根据按钮类型自动选择对应模板：通用/故障/使用/功能。支持变量：{{task}} {{question}} {{answer}} {{urls}}
+                        系统会根据按钮类型自动选择对应模板：通用/故障/使用/功能/按需求。支持变量：{{task}} {{question}} {{answer}} {{urls}} {{optimization_requirement}}
                     </div>
                     <div style="display:flex; justify-content:flex-end; margin-bottom: 10px;">
-                        <button type="button" class="action-btn btn-sm" onclick="copyAnswerPrompts()">一键复制答案区4个模板</button>
+                        <button type="button" class="action-btn btn-sm" onclick="copyAnswerPrompts()">一键复制答案区5个模板</button>
                     </div>
                     <label class="form-label" style="font-size: 13px; opacity: 0.9;">通用处理（structure）</label>
                     <textarea id="aiPromptAnswerStructureInput" rows="10" class="font-mono" placeholder="用于：通用处理（structure）">你是知识库结构化处理专家，核心聚焦结构化处理，不进行任何标签化操作。
@@ -2619,6 +2724,47 @@
   "urls": string[]|null,
   "notes": string|null
 }</textarea>
+
+                    <div style="height: 10px;"></div>
+                    <label class="form-label" style="font-size: 13px; opacity: 0.9;">按需求优化答案（requirement）</label>
+                    <textarea id="aiPromptAnswerRequirementInput" rows="10" class="font-mono" placeholder="用于：按需求优化答案（requirement）">你是客服知识库 FAQ 答案定向优化助手。
+
+当前 task=requirement。你的任务是根据“优化需求”对原答案做定向优化。
+
+输入数据：
+- question：{{question}}
+- answer：{{answer}}
+- optimization_requirement：{{optimization_requirement}}
+- urls：{{urls}}
+
+处理规则（严格遵守）：
+1) 优化需求是本次修改的主要依据，必须逐条落实到 refined_answer。
+2) 允许使用原答案和优化需求中明确给出的信息；不得编造产品能力、操作路径、按钮名称、限制条件或承诺。
+3) 保留原答案中仍然正确、必要的信息；删除或改写会造成混淆、重复、口语化或与优化需求冲突的表达。
+4) 如果优化需求要求拆分场景、澄清概念、补充限制说明、替换措辞，必须在答案中明确体现。
+5) 输出内容应适合作为知识库 FAQ 正文，面向用户，表达清晰、准确、可执行。
+6) 保持 Markdown 格式；不要输出解释过程。
+
+异常处理：
+- 如果优化需求为空、模糊到无法执行，notes 写为「【需二次修订】：请补充明确的优化需求」。
+- 如果优化需求包含疑似需要人工确认的事实，notes 写为「【需二次修订】：请人工确认 XXX」；refined_answer 不要编造未确认内容。
+- 无异常时 notes 可简短说明主要修改点，或返回 null。
+
+输出要求（严格遵循）：
+你必须只输出合法 JSON（不要输出 Markdown 代码块，不要输出任何额外文本）：
+{
+  "original_answer": string,
+  "refined_answer": string,
+  "notes": string|null,
+  "answer": string,
+  "urls": string[]|null
+}
+
+字段要求：
+- original_answer：原始 answer 原文。
+- refined_answer：按优化需求处理后的答案正文。
+- answer：必须与 refined_answer 完全一致。
+- urls：如无新增或调整，返回 null。</textarea>
 
                     <!-- legacy single template (compat) -->
                     <textarea id="aiPromptAnswerInput" rows="1" class="font-mono" style="display:none;"></textarea>

@@ -241,6 +241,22 @@ let kbShowSelectedOnly = false;
 let dangerConfirmResolver = null;
 let kbEditCloseConfirmResolver = null;
 
+let kbCompareState = {
+    table: 'knowledge_base_v1',
+    ids: [],
+    duplicateIds: [],
+    missingIds: [],
+    rows: [],
+    fieldSummaries: [],
+    activeFieldKey: '',
+    baseRowId: '',
+    fieldChoices: {},
+    mergeDraft: null,
+    importCollapsed: false,
+    source: 'manual',
+    loading: false
+};
+
 const KB_EMBED_MESSAGE_SOURCE = 'kmatrix-kb-edit';
 let kbEditEmbedRequest = null;
 let kbEditEmbedSaved = false;
@@ -534,16 +550,24 @@ function setupKBTagDropdown() {
 
 function updateKBPreviewSelectedButton() {
     const btn = document.getElementById('kbPreviewSelectedBtn');
-    if (!btn) return;
     const n = selectedKBRows.size;
-    if (kbShowSelectedOnly) {
-        btn.classList.add('is-active');
-        btn.textContent = n > 0 ? `👁️ 显示全部 (${n})` : '👁️ 显示全部';
-        btn.title = '取消仅预览勾选';
-    } else {
-        btn.classList.remove('is-active');
-        btn.textContent = n > 0 ? `👁️ 仅预览勾选 (${n})` : '👁️ 仅预览勾选';
-        btn.title = '仅显示已勾选的数据';
+    if (btn) {
+        if (kbShowSelectedOnly) {
+            btn.classList.add('is-active');
+            btn.textContent = n > 0 ? `👁️ 显示全部 (${n})` : '👁️ 显示全部';
+            btn.title = '取消仅预览勾选';
+        } else {
+            btn.classList.remove('is-active');
+            btn.textContent = n > 0 ? `👁️ 仅预览勾选 (${n})` : '👁️ 仅预览勾选';
+            btn.title = '仅显示已勾选的数据';
+        }
+    }
+
+    const compareBtn = document.getElementById('kbCompareSelectedBtn');
+    if (compareBtn) {
+        compareBtn.textContent = n > 0 ? `🔍 对比选中 (${n})` : '🔍 对比选中';
+        compareBtn.disabled = n < 2;
+        compareBtn.title = n < 2 ? '请至少勾选 2 条数据进行对比' : `对比已勾选的 ${n} 条数据`;
     }
 }
 
@@ -963,6 +987,11 @@ const TAB_META = {
         group: '核心数据',
         description: '维护 V1 / V1T-1 知识库内容，支持搜索、编辑、导出与同步。',
     },
+    kbCompareView: {
+        title: '知识对比',
+        group: '核心数据',
+        description: '按 ID 批量导入记录，完成匹配校验、差异摘要与字段详细对比。',
+    },
     matrixView: {
         title: '机型矩阵管理',
         group: '核心数据',
@@ -1156,7 +1185,7 @@ function scheduleWorkbenchSidebarHeightUpdate() {
 function normalizeWorkbenchViews() {
     const viewsWrap = document.querySelector('.workbench-views');
     if (!viewsWrap) return;
-    const viewIds = ['kbView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const viewIds = ['kbView', 'kbCompareView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
     viewIds.forEach(id => {
         const el = document.getElementById(id);
         if (el && el.parentElement !== viewsWrap) viewsWrap.appendChild(el);
@@ -1165,7 +1194,7 @@ function normalizeWorkbenchViews() {
 
 function switchTab(tabId) {
     normalizeWorkbenchViews();
-    const tabs = ['kbView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const tabs = ['kbView', 'kbCompareView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
     const viewsWrap = document.querySelector('.workbench-views');
     const isQualityControlCenter = tabId === 'controlCenterView';
     [
@@ -1225,6 +1254,8 @@ function switchTab(tabId) {
         if (typeof loadLinks === 'function') loadLinks({ reuse: true });
     } else if (tabId === 'kbView') {
         if (typeof loadKBTable === 'function') loadKBTable(kbCurrentPage || 1);
+    } else if (tabId === 'kbCompareView') {
+        if (typeof renderKBCompareResults === 'function') renderKBCompareResults();
     } else if (tabId === 'scoringView') {
         if (typeof isScoringInProgress === 'function' && isScoringInProgress()) {
             if (typeof renderScoringTable === 'function') renderScoringTable(true);
@@ -8886,6 +8917,972 @@ function toggleKBSelectAll() {
     }
 }
 
+const KB_COMPARE_FIELDS = [
+    { key: 'question', label: '问题', field: 'question', type: 'text', group: '内容' },
+    { key: 'answer', label: '答案', field: 'answer', type: 'text', group: '内容' },
+    { key: 'similar_questions', label: '相似问题', field: 'similar_questions', type: 'list', group: '内容' },
+    { key: 'product_name', label: '产品型号', field: 'product_name', type: 'list', group: '适用范围' },
+    { key: 'product_category_name', label: '产品分类', field: 'product_category_name', type: 'list', group: '适用范围' },
+    { key: 'question_type', label: '问题类型', field: 'question_type', type: 'scalar', group: '类型' },
+    { key: 'answer_type', label: '答案类型', field: 'answer_type', type: 'scalar', group: '类型' },
+    { key: 'if_bm25', label: 'BM25', field: 'if_bm25', type: 'bool', group: '治理' },
+    { key: 'error_list', label: '错误列表', field: 'error_list', type: 'list', group: '治理' },
+    { key: 'keyword_list', label: '关键词', field: 'keyword_list', type: 'list', group: '治理' },
+    { key: 'kb_tags', label: '标签', field: 'kb_tags', type: 'list', group: '治理' },
+    { key: 'image_urls', label: '图片链接', field: 'image_urls', type: 'urlList', group: '链接' },
+    { key: 'video_urls', label: '视频链接', field: 'video_urls', type: 'urlList', group: '链接' },
+    { key: 'file_urls', label: '文件链接', field: 'file_urls', type: 'urlList', group: '链接' },
+    { key: 'link_type', label: '外链类型', field: 'link_type', type: 'scalar', group: '链接' },
+    { key: 'link_url', label: '外部链接', field: 'link_url', type: 'urlList', group: '链接' },
+    { key: 'update_time', label: '更新时间', field: 'update_time', type: 'scalar', group: '元数据', meta: true }
+];
+
+const KB_COMPARE_EDIT_FIELD_MAP = {
+    question: 'question',
+    answer: 'answer',
+    similar_questions: 'similar_questions',
+    product_name: 'product_name',
+    product_category_name: 'product_category_name',
+    question_type: 'question_type',
+    answer_type: 'answer_type',
+    if_bm25: 'if_bm25',
+    keyword_list: 'keyword_list',
+    kb_tags: 'kb_tags_input',
+    image_urls: 'image_urls',
+    video_urls: 'video_urls',
+    file_urls: 'file_urls',
+    link_type: 'link_type',
+    link_url: 'link_url'
+};
+
+const KB_COMPARE_DEFAULT_MERGE_FIELDS = new Set([
+    'similar_questions',
+    'product_name',
+    'product_category_name',
+    'keyword_list',
+    'kb_tags',
+    'image_urls',
+    'video_urls',
+    'file_urls',
+    'link_url'
+]);
+
+function getSelectedKBTable() {
+    const checked = document.querySelector('input[name="kbTable"]:checked');
+    return checked ? checked.value : 'knowledge_base_v1';
+}
+
+function getKBCompareTable() {
+    const checked = document.querySelector('input[name="kbCompareTable"]:checked');
+    return checked ? checked.value : 'knowledge_base_v1';
+}
+
+function setKBCompareTable(table) {
+    const value = table === 'knowledge_base_v1_t1' ? 'knowledge_base_v1_t1' : 'knowledge_base_v1';
+    document.querySelectorAll('input[name="kbCompareTable"]').forEach(input => {
+        input.checked = input.value === value;
+    });
+    kbCompareState.table = value;
+}
+
+function getKBCompareRowId(row) {
+    return String(row?.question_wiki_id || row?.id || '').trim();
+}
+
+function kbCompareJsString(value) {
+    return _escapeAttr(JSON.stringify(String(value ?? '')).replace(/</g, '\\u003C'));
+}
+
+function parseKBCompareIds(text) {
+    const raw = String(text || '');
+    const directMatches = raw.match(/ICWIKI[A-Za-z0-9_-]+/gi);
+    const parts = directMatches && directMatches.length
+        ? directMatches
+        : raw.split(/[\s,，;；、|"'“”‘’\[\](){}<>]+/);
+    const ids = [];
+    const duplicates = [];
+    const seen = new Set();
+    parts.forEach(part => {
+        const id = String(part || '').trim().replace(/^\ufeff/, '');
+        if (!id) return;
+        if (/^(id|wikiid|wiki_id|question_wiki_id|问题编号)$/i.test(id)) return;
+        if (!/^ICWIKI[A-Za-z0-9_-]+$/i.test(id) && !/^[A-Za-z0-9_-]{8,}$/.test(id)) return;
+        if (seen.has(id)) {
+            duplicates.push(id);
+            return;
+        }
+        seen.add(id);
+        ids.push(id);
+    });
+    return { ids, duplicates };
+}
+
+function getKBCompareFieldItems(row, field) {
+    const value = row ? row[field.field] : '';
+    if (field.key === 'product_name') {
+        const normalized = normalizeProductsListText(value);
+        return parseSmartListValue(normalized, { splitOnAsciiComma: true });
+    }
+    if (field.type === 'urlList') {
+        return parseSmartListValue(value, {
+            splitOnAsciiComma: true,
+            splitOnChineseCommaWhenUrlList: true,
+            isUrlList: true
+        });
+    }
+    return parseSmartListValue(value, { splitOnAsciiComma: true });
+}
+
+function getKBCompareFieldDisplay(row, field) {
+    const value = row ? row[field.field] : '';
+    if (field.type === 'bool') {
+        const s = String(value ?? '').trim().toLowerCase();
+        return (value === true || value === 1 || s === 'true' || s === '1') ? '是' : '否';
+    }
+    if (field.type === 'list' || field.type === 'urlList') {
+        return getKBCompareFieldItems(row, field).join('\n');
+    }
+    if (field.key === 'update_time' && value) {
+        try { return new Date(value).toLocaleString(); } catch {}
+    }
+    if (value === null || value === undefined || value === '') return '';
+    if (typeof value === 'object') {
+        try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+    }
+    return String(value);
+}
+
+function getKBCompareFieldNorm(row, field) {
+    if (field.type === 'list' || field.type === 'urlList') {
+        return getKBCompareFieldItems(row, field)
+            .map(v => String(v || '').trim().toLowerCase())
+            .filter(Boolean)
+            .sort()
+            .join('\n');
+    }
+    return getKBCompareFieldDisplay(row, field).replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function buildKBCompareFieldSummaries(rows) {
+    const safeRows = Array.isArray(rows) ? rows : [];
+    return KB_COMPARE_FIELDS.map(field => {
+        const values = safeRows.map(row => ({
+            id: getKBCompareRowId(row),
+            norm: getKBCompareFieldNorm(row, field),
+            display: getKBCompareFieldDisplay(row, field)
+        }));
+        const counts = new Map();
+        values.forEach(v => counts.set(v.norm, (counts.get(v.norm) || 0) + 1));
+        const distinctCount = counts.size;
+        let majorityNorm = '';
+        let majorityCount = -1;
+        counts.forEach((count, norm) => {
+            if (count > majorityCount) {
+                majorityNorm = norm;
+                majorityCount = count;
+            }
+        });
+        const hasDiff = distinctCount > 1;
+        const affectedCount = hasDiff
+            ? values.filter(v => v.norm !== majorityNorm).length || safeRows.length
+            : 0;
+        return {
+            ...field,
+            values,
+            hasDiff,
+            distinctCount,
+            affectedCount
+        };
+    });
+}
+
+function getKBCompareVisibleSummaries() {
+    const summaries = kbCompareState.fieldSummaries || [];
+    const onlyDiffs = document.getElementById('kbCompareOnlyDiffs')?.checked !== false;
+    const showMeta = document.getElementById('kbCompareShowMetaFields')?.checked === true;
+    return summaries.filter(s => (showMeta || !s.meta) && (!onlyDiffs || s.hasDiff));
+}
+
+function getKBCompareBaseRow() {
+    const rows = kbCompareState.rows || [];
+    if (!rows.length) return null;
+    const id = String(kbCompareState.baseRowId || '').trim();
+    return rows.find(row => getKBCompareRowId(row) === id) || rows[0];
+}
+
+function ensureKBCompareBaseRow() {
+    const rows = kbCompareState.rows || [];
+    if (!rows.length) {
+        kbCompareState.baseRowId = '';
+        return null;
+    }
+    const current = getKBCompareBaseRow();
+    kbCompareState.baseRowId = getKBCompareRowId(current);
+    return current;
+}
+
+function isKBCompareEditableField(field) {
+    return !!field && !field.meta && Object.prototype.hasOwnProperty.call(KB_COMPARE_EDIT_FIELD_MAP, field.key);
+}
+
+function getKBCompareFieldEditValue(row, field) {
+    if (!row || !field) return '';
+    if (field.type === 'bool') {
+        const value = row[field.field];
+        const s = String(value ?? '').trim().toLowerCase();
+        return (value === true || value === 1 || s === 'true' || s === '1' || s === '是') ? 'true' : 'false';
+    }
+    if (field.type === 'list' || field.type === 'urlList') {
+        return getKBCompareFieldItems(row, field).join('\n');
+    }
+    const value = row[field.field];
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'object') {
+        try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+    }
+    return String(value);
+}
+
+function normalizeKBCompareDraftValue(value, field) {
+    if (!field) return String(value ?? '').trim();
+    if (field.type === 'list' || field.type === 'urlList') {
+        return parseSmartListValue(value, {
+            splitOnAsciiComma: true,
+            splitOnChineseCommaWhenUrlList: field.type === 'urlList',
+            isUrlList: field.type === 'urlList'
+        })
+            .map(v => String(v || '').trim().toLowerCase())
+            .filter(Boolean)
+            .sort()
+            .join('\n');
+    }
+    if (field.type === 'bool') {
+        const s = String(value ?? '').trim().toLowerCase();
+        return (s === 'true' || s === '1' || s === '是') ? 'true' : 'false';
+    }
+    return String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function getKBCompareMergedFieldItems(field) {
+    const rows = kbCompareState.rows || [];
+    const items = [];
+    const seen = new Set();
+    rows.forEach(row => {
+        getKBCompareFieldItems(row, field).forEach(item => {
+            const label = String(item || '').trim();
+            if (!label) return;
+            const key = label.toLowerCase();
+            if (seen.has(key)) return;
+            seen.add(key);
+            items.push(label);
+        });
+    });
+    return items;
+}
+
+function getKBCompareChosenRow(field) {
+    const rows = kbCompareState.rows || [];
+    const choiceId = String(kbCompareState.fieldChoices?.[field?.key] || '').trim();
+    return choiceId ? rows.find(row => getKBCompareRowId(row) === choiceId) || null : null;
+}
+
+function buildKBCompareDraftField(field, baseRow) {
+    const rows = kbCompareState.rows || [];
+    const baseId = getKBCompareRowId(baseRow);
+    const chosenRow = getKBCompareChosenRow(field);
+    let value = '';
+    let displayValue = '';
+    let sourceId = '';
+    let sourceLabel = '';
+    let mode = 'base';
+
+    if (chosenRow) {
+        sourceId = getKBCompareRowId(chosenRow);
+        value = getKBCompareFieldEditValue(chosenRow, field);
+        displayValue = getKBCompareFieldDisplay(chosenRow, field);
+        sourceLabel = sourceId === baseId ? '主记录' : `来自 ${sourceId}`;
+        mode = 'chosen';
+    } else if (KB_COMPARE_DEFAULT_MERGE_FIELDS.has(field.key)) {
+        const mergedItems = getKBCompareMergedFieldItems(field);
+        value = mergedItems.join('\n');
+        displayValue = value;
+        sourceLabel = '合并全部记录';
+        mode = 'merge';
+    } else {
+        let sourceRow = baseRow;
+        value = getKBCompareFieldEditValue(baseRow, field);
+        displayValue = getKBCompareFieldDisplay(baseRow, field);
+        if (!String(value || '').trim()) {
+            sourceRow = rows.find(row => String(getKBCompareFieldEditValue(row, field) || '').trim()) || baseRow;
+            value = getKBCompareFieldEditValue(sourceRow, field);
+            displayValue = getKBCompareFieldDisplay(sourceRow, field);
+        }
+        sourceId = getKBCompareRowId(sourceRow);
+        sourceLabel = sourceId === baseId ? '主记录' : `补空来自 ${sourceId}`;
+        mode = sourceId === baseId ? 'base' : 'fallback';
+    }
+
+    const baseValue = getKBCompareFieldEditValue(baseRow, field);
+    const changed = normalizeKBCompareDraftValue(value, field) !== normalizeKBCompareDraftValue(baseValue, field);
+    return {
+        key: field.key,
+        label: field.label,
+        group: field.group || '',
+        formField: KB_COMPARE_EDIT_FIELD_MAP[field.key],
+        mode,
+        sourceId,
+        sourceLabel,
+        value,
+        displayValue,
+        baseValue,
+        baseDisplayValue: getKBCompareFieldDisplay(baseRow, field),
+        changed,
+        manuallyChosen: !!chosenRow
+    };
+}
+
+function buildKBCompareMergeDraft() {
+    const rows = kbCompareState.rows || [];
+    const baseRow = ensureKBCompareBaseRow();
+    if (!baseRow || rows.length < 2) return null;
+    const editId = getKBCompareRowId(baseRow);
+    const deleteIds = rows.map(getKBCompareRowId).filter(id => id && id !== editId);
+    const fields = KB_COMPARE_FIELDS
+        .filter(isKBCompareEditableField)
+        .map(field => buildKBCompareDraftField(field, baseRow));
+    const digest = {
+        question_wiki_id: editId,
+        product_category_name: '',
+        question_type: '',
+        if_bm25: 'false',
+        question: '',
+        answer: '',
+        answer_type: '',
+        product_name: '',
+        similar_questions: '',
+        keyword_list: '',
+        image_urls: '',
+        video_urls: '',
+        file_urls: '',
+        link_type: '',
+        link_url: '',
+        kb_tags_input: ''
+    };
+    fields.forEach(field => {
+        if (field.formField) digest[field.formField] = field.value;
+    });
+    const unsupportedFields = (kbCompareState.fieldSummaries || [])
+        .filter(field => field.hasDiff && !field.meta && !isKBCompareEditableField(field))
+        .map(field => ({ key: field.key, label: field.label, group: field.group || '' }));
+    return {
+        table: kbCompareState.table,
+        tableLabel: kbCompareState.table === 'knowledge_base_v1_t1' ? '前刻库' : '此刻库',
+        editId,
+        deleteIds,
+        sourceIds: rows.map(getKBCompareRowId).filter(Boolean),
+        createdAt: Date.now(),
+        fields,
+        digest,
+        unsupportedFields
+    };
+}
+
+function renderKBCompareValidation() {
+    const el = document.getElementById('kbCompareValidation');
+    if (!el) return;
+    const ids = kbCompareState.ids || [];
+    const rows = kbCompareState.rows || [];
+    const missing = kbCompareState.missingIds || [];
+    const duplicates = kbCompareState.duplicateIds || [];
+
+    if (kbCompareState.loading) {
+        el.innerHTML = '<div class="kb-compare-empty">正在匹配 ID...</div>';
+        return;
+    }
+    if (!ids.length && !rows.length) {
+        el.innerHTML = '<div class="kb-compare-empty">请先导入 ID 并点击开始对比。</div>';
+        return;
+    }
+
+    const foundIds = rows.map(getKBCompareRowId).filter(Boolean);
+    const renderChips = (items, className, emptyText) => {
+        if (!items.length) return `<span class="kb-compare-muted">${escapeHtml(emptyText)}</span>`;
+        return items.map(id => `<span class="kb-compare-id-chip ${className}">${escapeHtml(id)}</span>`).join('');
+    };
+
+    el.innerHTML = `
+        <div class="kb-compare-stat-grid">
+            <div class="kb-compare-stat"><span>导入 ID</span><strong>${ids.length}</strong></div>
+            <div class="kb-compare-stat is-success"><span>已匹配</span><strong>${foundIds.length}</strong></div>
+            <div class="kb-compare-stat ${missing.length ? 'is-warning' : ''}"><span>未找到</span><strong>${missing.length}</strong></div>
+            <div class="kb-compare-stat ${duplicates.length ? 'is-warning' : ''}"><span>重复 ID</span><strong>${duplicates.length}</strong></div>
+        </div>
+        <div class="kb-compare-validation-group">
+            <div class="kb-compare-validation-label">已匹配</div>
+            <div class="kb-compare-chip-list">${renderChips(foundIds, 'is-found', '暂无')}</div>
+        </div>
+        <div class="kb-compare-validation-group">
+            <div class="kb-compare-validation-label">未找到</div>
+            <div class="kb-compare-chip-list">${renderChips(missing, 'is-missing', '无')}</div>
+        </div>
+        <div class="kb-compare-validation-group">
+            <div class="kb-compare-validation-label">重复输入</div>
+            <div class="kb-compare-chip-list">${renderChips(duplicates, 'is-duplicate', '无')}</div>
+        </div>
+    `;
+}
+
+function renderKBCompareFrame() {
+    const rows = kbCompareState.rows || [];
+    const missing = kbCompareState.missingIds || [];
+    const duplicates = kbCompareState.duplicateIds || [];
+    const layout = document.getElementById('kbCompareLayout');
+    const panel = document.getElementById('kbCompareImportPanel');
+    const body = document.getElementById('kbCompareImportBody');
+    const toggleBtn = document.getElementById('kbCompareImportToggleBtn');
+    const importMeta = document.getElementById('kbCompareImportMeta');
+    const draftBtn = document.getElementById('kbCompareGenerateDraftBtn');
+
+    if (layout) layout.classList.toggle('is-import-collapsed', !!kbCompareState.importCollapsed);
+    if (panel) panel.classList.toggle('is-collapsed', !!kbCompareState.importCollapsed);
+    if (body) body.classList.toggle('d-none', !!kbCompareState.importCollapsed);
+    if (toggleBtn) toggleBtn.textContent = kbCompareState.importCollapsed ? '展开' : '收起';
+    if (importMeta) {
+        importMeta.textContent = rows.length
+            ? `已匹配 ${rows.length} 条，未找到 ${missing.length} 条，重复 ${duplicates.length} 条。`
+            : '支持换行、逗号、空格、CSV 文本。也可以从知识库管理勾选后跳转带入。';
+    }
+    if (draftBtn) {
+        draftBtn.disabled = rows.length < 2 || kbCompareState.loading;
+        draftBtn.title = rows.length < 2 ? '请至少匹配 2 条记录后生成合并草稿' : '按当前主记录和字段采用值生成合并草稿';
+    }
+}
+
+function renderKBCompareSummary() {
+    const el = document.getElementById('kbCompareSummary');
+    const meta = document.getElementById('kbCompareResultMeta');
+    if (!el) return;
+    const rows = kbCompareState.rows || [];
+    const summaries = kbCompareState.fieldSummaries || [];
+    const visible = getKBCompareVisibleSummaries();
+    const tableLabel = kbCompareState.table === 'knowledge_base_v1_t1' ? '前刻库' : '此刻库';
+
+    if (meta) {
+        const diffCount = summaries.filter(s => s.hasDiff && !s.meta).length;
+        const metaDiffCount = summaries.filter(s => s.hasDiff && s.meta).length;
+        meta.textContent = rows.length
+            ? `${tableLabel}，已匹配 ${rows.length} 条，发现 ${diffCount} 个业务差异字段${metaDiffCount ? `，元数据差异 ${metaDiffCount} 个` : ''}。`
+            : '等待导入 ID。';
+    }
+
+    if (!rows.length) {
+        el.innerHTML = '<div class="kb-compare-empty">暂无对比结果。</div>';
+        return;
+    }
+    if (!visible.length) {
+        el.innerHTML = '<div class="kb-compare-empty">当前记录在已纳入字段上没有差异。</div>';
+        return;
+    }
+
+    el.innerHTML = `
+        <div class="kb-compare-summary-table-wrap">
+            <table class="kb-compare-summary-table">
+                <thead>
+                    <tr>
+                        <th>字段</th>
+                        <th>状态</th>
+                        <th>差异值</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${visible.map(s => `
+                        <tr class="${s.key === kbCompareState.activeFieldKey ? 'is-active' : ''}">
+                            <td>${escapeHtml(s.label)}</td>
+                            <td>${s.hasDiff ? '<span class="kb-compare-badge is-diff">有差异</span>' : '<span class="kb-compare-badge">一致</span>'}</td>
+                            <td>${s.distinctCount}</td>
+                            <td><button type="button" class="action-btn btn-sm" onclick="setKBCompareActiveField(${kbCompareJsString(s.key)})">查看</button></td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+function getKBCompareSharedItemMap(field) {
+    const rows = kbCompareState.rows || [];
+    const counts = new Map();
+    const labels = new Map();
+    rows.forEach(row => {
+        const seen = new Set();
+        getKBCompareFieldItems(row, field).forEach(item => {
+            const label = String(item || '').trim();
+            if (!label) return;
+            const key = label.toLowerCase();
+            if (seen.has(key)) return;
+            seen.add(key);
+            counts.set(key, (counts.get(key) || 0) + 1);
+            if (!labels.has(key)) labels.set(key, label);
+        });
+    });
+    return { counts, labels, rowCount: rows.length };
+}
+
+function renderKBCompareListValue(row, field) {
+    const items = getKBCompareFieldItems(row, field);
+    if (!items.length) return '<span class="kb-compare-muted">-</span>';
+    const shared = getKBCompareSharedItemMap(field);
+    return `<div class="kb-compare-value-chips">${
+        items.map(item => {
+            const label = String(item || '').trim();
+            const key = label.toLowerCase();
+            const count = shared.counts.get(key) || 0;
+            let cls = 'is-partial';
+            if (count >= shared.rowCount) cls = 'is-shared';
+            else if (count === 1) cls = 'is-unique';
+            if (field.type === 'urlList') {
+                const href = /^https?:\/\//i.test(label) ? label : `http://${label}`;
+                return `<a class="kb-compare-value-chip ${cls}" href="${_escapeAttr(href)}" target="_blank" title="${_escapeAttr(label)}">${escapeHtml(label)}</a>`;
+            }
+            return `<span class="kb-compare-value-chip ${cls}" title="${_escapeAttr(label)}">${escapeHtml(label)}</span>`;
+        }).join('')
+    }</div>`;
+}
+
+function renderKBCompareTextValue(row, field, baseText) {
+    const text = getKBCompareFieldDisplay(row, field);
+    if (!text) return '<span class="kb-compare-muted">-</span>';
+    if (String(text) === String(baseText || '')) {
+        return `<div class="kb-compare-text-value">${escapeHtml(text)}</div>`;
+    }
+    if (String(text).length > 4000 || String(baseText || '').length > 4000) {
+        return `<div class="kb-compare-text-value">${escapeHtml(text)}</div>`;
+    }
+    const diff = _renderDiff(baseText || '', text);
+    return `<div class="kb-compare-text-value">${diff.afterHtml || escapeHtml(text)}</div>`;
+}
+
+function renderKBCompareDetail() {
+    const el = document.getElementById('kbCompareDetail');
+    if (!el) return;
+    const rows = kbCompareState.rows || [];
+    if (!rows.length) {
+        el.innerHTML = '<div class="kb-compare-empty">点击摘要中的字段查看详细对比。</div>';
+        return;
+    }
+
+    const visibleSummaries = getKBCompareVisibleSummaries();
+    let field = visibleSummaries.find(s => s.key === kbCompareState.activeFieldKey);
+    if (!field) field = visibleSummaries.find(s => s.hasDiff) || visibleSummaries[0];
+    if (!field) {
+        el.innerHTML = '<div class="kb-compare-empty">当前筛选条件下暂无字段可对比。</div>';
+        return;
+    }
+    kbCompareState.activeFieldKey = field.key;
+
+    const baseRow = ensureKBCompareBaseRow() || rows[0];
+    const baseId = getKBCompareRowId(baseRow);
+    const baseText = getKBCompareFieldDisplay(baseRow, field);
+    const chosenId = String(kbCompareState.fieldChoices?.[field.key] || '').trim();
+    const editable = isKBCompareEditableField(field);
+    const cards = rows.map((row, index) => {
+        const id = getKBCompareRowId(row);
+        const question = String(row.question || '').trim();
+        const valueHtml = (field.type === 'list' || field.type === 'urlList')
+            ? renderKBCompareListValue(row, field)
+            : (field.type === 'text'
+                ? renderKBCompareTextValue(row, field, baseText)
+                : `<div class="kb-compare-text-value">${escapeHtml(getKBCompareFieldDisplay(row, field) || '-')}</div>`);
+        const diffClass = getKBCompareFieldNorm(row, field) === getKBCompareFieldNorm(baseRow, field) ? '' : 'is-different';
+        const isBase = id === baseId;
+        const isChosen = editable && chosenId === id;
+        return `
+            <article class="kb-compare-detail-card ${diffClass} ${isBase ? 'is-base' : ''} ${isChosen ? 'is-chosen' : ''}">
+                <div class="kb-compare-detail-card-head">
+                    <div>
+                        <div class="kb-compare-card-id-row">
+                            <button type="button" class="kb-compare-id-link" onclick="searchKBById(${kbCompareJsString(id)})">${escapeHtml(id || `记录 ${index + 1}`)}</button>
+                            ${isBase ? '<span class="kb-compare-badge is-base">主记录</span>' : ''}
+                            ${isChosen ? '<span class="kb-compare-badge is-choice">采用值</span>' : ''}
+                        </div>
+                        <div class="kb-compare-question" title="${_escapeAttr(question)}">${escapeHtml(question || '-')}</div>
+                    </div>
+                    <div class="kb-compare-card-actions">
+                        ${isBase ? '' : `<button type="button" class="action-btn btn-sm" onclick="setKBCompareBaseRow(${kbCompareJsString(id)})">设为主记录</button>`}
+                        ${editable ? `<button type="button" class="action-btn btn-sm" onclick="setKBCompareFieldChoice(${kbCompareJsString(field.key)}, ${kbCompareJsString(id)})">${isChosen ? '已采用' : '采用此值'}</button>` : ''}
+                    </div>
+                </div>
+                <div class="kb-compare-detail-value">${valueHtml}</div>
+            </article>
+        `;
+    }).join('');
+
+    el.innerHTML = `
+        <div class="kb-compare-detail-head">
+            <div>
+                <h3>${escapeHtml(field.label)}</h3>
+                <p>${field.hasDiff ? `发现 ${field.distinctCount} 种取值，涉及 ${field.affectedCount}/${rows.length} 条记录。当前主记录：${baseId || '-'}` : `该字段在当前记录中一致。当前主记录：${baseId || '-'}`}</p>
+            </div>
+            <div class="kb-compare-legend">
+                <span><i class="legend-dot is-shared"></i>共有</span>
+                <span><i class="legend-dot is-partial"></i>部分共有</span>
+                <span><i class="legend-dot is-unique"></i>单条独有</span>
+            </div>
+        </div>
+        <div class="kb-compare-detail-grid">${cards}</div>
+    `;
+}
+
+function renderKBCompareDraftValue(value, limit = 220) {
+    const text = String(value || '').trim();
+    if (!text) return '<span class="kb-compare-muted">-</span>';
+    const short = text.length > limit ? `${text.slice(0, limit)}...` : text;
+    return `<div class="kb-compare-draft-value" title="${_escapeAttr(text)}">${escapeHtml(short)}</div>`;
+}
+
+function renderKBCompareMergeDraft() {
+    const el = document.getElementById('kbCompareMergeDraft');
+    if (!el) return;
+    const rows = kbCompareState.rows || [];
+    const draft = kbCompareState.mergeDraft;
+    if (!rows.length) {
+        el.innerHTML = '<div class="kb-compare-empty">生成合并草稿后，将展示要编辑的主 ID、建议删除的 ID 与字段采用值。</div>';
+        return;
+    }
+    if (!draft) {
+        el.innerHTML = '<div class="kb-compare-empty">确认主记录与字段采用值后，点击“生成合并草稿”。</div>';
+        return;
+    }
+
+    const changedFields = draft.fields.filter(field => field.changed);
+    const deleteRows = draft.deleteIds.length
+        ? draft.deleteIds.map(id => `<span class="kb-compare-id-chip is-duplicate">${escapeHtml(id)}</span>`).join('')
+        : '<span class="kb-compare-muted">无</span>';
+    const unsupported = draft.unsupportedFields.length
+        ? `<div class="kb-compare-draft-warning">以下差异字段当前不会自动填入编辑弹窗：${draft.unsupportedFields.map(f => escapeHtml(f.label)).join('、')}</div>`
+        : '';
+
+    el.innerHTML = `
+        <div class="kb-compare-draft-head">
+            <div>
+                <h3>合并草稿</h3>
+                <p>编辑 ${escapeHtml(draft.editId)}，建议删除 ${draft.deleteIds.length} 条，字段变更 ${changedFields.length} 项。</p>
+            </div>
+            <button type="button" class="primary-btn btn-primary-gradient" onclick="openKBCompareDraftEditor()">打开编辑主记录</button>
+        </div>
+        <div class="kb-compare-draft-ops">
+            <div class="kb-compare-draft-op">
+                <span>编辑 ID</span>
+                <button type="button" class="kb-compare-id-link" onclick="searchKBById(${kbCompareJsString(draft.editId)})">${escapeHtml(draft.editId)}</button>
+            </div>
+            <div class="kb-compare-draft-op">
+                <span>删除建议</span>
+                <div class="kb-compare-chip-list">${deleteRows}</div>
+            </div>
+        </div>
+        ${unsupported}
+        <div class="kb-compare-summary-table-wrap kb-compare-draft-table-wrap">
+            <table class="kb-compare-summary-table kb-compare-draft-table">
+                <thead>
+                    <tr>
+                        <th>字段</th>
+                        <th>采用策略</th>
+                        <th>来源</th>
+                        <th>写入状态</th>
+                        <th>草稿值</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${draft.fields.map(field => `
+                        <tr class="${field.changed ? 'is-active' : ''}">
+                            <td>${escapeHtml(field.label)}</td>
+                            <td>${field.manuallyChosen ? '手动采用' : field.mode === 'merge' ? '合并取并集' : field.mode === 'fallback' ? '主记录补空' : '沿用主记录'}</td>
+                            <td>${escapeHtml(field.sourceLabel || '-')}</td>
+                            <td>${field.changed ? '<span class="kb-compare-badge is-diff">将更新</span>' : '<span class="kb-compare-badge">不变</span>'}</td>
+                            <td>${renderKBCompareDraftValue(field.displayValue || field.value)}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+function renderKBCompareResults() {
+    renderKBCompareFrame();
+    renderKBCompareValidation();
+    renderKBCompareSummary();
+    renderKBCompareDetail();
+    renderKBCompareMergeDraft();
+}
+
+async function fetchKBCompareRows(table, ids) {
+    const all = [];
+    const batchSize = 80;
+    for (let i = 0; i < ids.length; i += batchSize) {
+        const batch = ids.slice(i, i + batchSize);
+        const params = new URLSearchParams({
+            table,
+            page: '1',
+            pageSize: String(Math.max(batch.length, 1)),
+            ids: batch.join(','),
+            sortBy: 'question_wiki_id',
+            sortDir: 'asc'
+        });
+        const res = await api(`/kb/data?${params.toString()}`);
+        if (res && res.error) throw new Error(res.error);
+        if (res && res.success && Array.isArray(res.data)) all.push(...res.data);
+        else if (Array.isArray(res)) all.push(...res);
+    }
+
+    const byId = new Map();
+    all.forEach(row => {
+        const id = getKBCompareRowId(row);
+        if (id && !byId.has(id)) byId.set(id, row);
+    });
+    return ids.map(id => byId.get(id)).filter(Boolean);
+}
+
+async function runKBCompareImport() {
+    const input = document.getElementById('kbCompareIdInput');
+    const parsed = parseKBCompareIds(input ? input.value : '');
+    if (parsed.ids.length < 2) {
+        if (typeof showToast === 'function') showToast('请至少导入 2 个有效 ID', 'warning');
+        else alert('请至少导入 2 个有效 ID');
+        return;
+    }
+
+    const table = getKBCompareTable();
+    kbCompareState = {
+        ...kbCompareState,
+        table,
+        ids: parsed.ids,
+        duplicateIds: parsed.duplicates,
+        missingIds: [],
+        rows: [],
+        fieldSummaries: [],
+        activeFieldKey: '',
+        baseRowId: '',
+        fieldChoices: {},
+        mergeDraft: null,
+        loading: true
+    };
+    renderKBCompareResults();
+
+    try {
+        const rows = await fetchKBCompareRows(table, parsed.ids);
+        const foundSet = new Set(rows.map(getKBCompareRowId).filter(Boolean));
+        const missing = parsed.ids.filter(id => !foundSet.has(id));
+        const summaries = buildKBCompareFieldSummaries(rows);
+        const firstDiff = summaries.find(s => s.hasDiff && !s.meta) || summaries.find(s => s.hasDiff) || summaries[0];
+        const baseRow = rows[0] || null;
+        kbCompareState = {
+            ...kbCompareState,
+            rows,
+            missingIds: missing,
+            fieldSummaries: summaries,
+            activeFieldKey: firstDiff ? firstDiff.key : '',
+            baseRowId: baseRow ? getKBCompareRowId(baseRow) : '',
+            fieldChoices: {},
+            mergeDraft: null,
+            importCollapsed: rows.length > 0,
+            loading: false
+        };
+    } catch (e) {
+        kbCompareState = { ...kbCompareState, loading: false };
+        if (typeof showToast === 'function') showToast('对比失败: ' + (e?.message || String(e)), 'error');
+        else alert('对比失败: ' + (e?.message || String(e)));
+    }
+
+    renderKBCompareResults();
+}
+
+function setKBCompareActiveField(fieldKey) {
+    kbCompareState.activeFieldKey = String(fieldKey || '');
+    renderKBCompareResults();
+}
+
+function setKBCompareBaseRow(rowId) {
+    const id = String(rowId || '').trim();
+    const exists = (kbCompareState.rows || []).some(row => getKBCompareRowId(row) === id);
+    if (!exists) return;
+    kbCompareState.baseRowId = id;
+    kbCompareState.mergeDraft = null;
+    renderKBCompareResults();
+}
+
+function setKBCompareFieldChoice(fieldKey, rowId) {
+    const key = String(fieldKey || '').trim();
+    const id = String(rowId || '').trim();
+    const field = (kbCompareState.fieldSummaries || []).find(s => s.key === key);
+    const exists = (kbCompareState.rows || []).some(row => getKBCompareRowId(row) === id);
+    if (!field || !exists || !isKBCompareEditableField(field)) return;
+    kbCompareState.fieldChoices = { ...(kbCompareState.fieldChoices || {}), [key]: id };
+    kbCompareState.mergeDraft = null;
+    renderKBCompareResults();
+}
+
+function toggleKBCompareImportCollapsed(force) {
+    kbCompareState.importCollapsed = typeof force === 'boolean' ? force : !kbCompareState.importCollapsed;
+    renderKBCompareResults();
+}
+
+function generateKBCompareMergeDraft() {
+    const draft = buildKBCompareMergeDraft();
+    if (!draft) {
+        if (typeof showToast === 'function') showToast('请至少匹配 2 条记录后生成合并草稿', 'warning');
+        return;
+    }
+    kbCompareState.mergeDraft = draft;
+    renderKBCompareResults();
+    const el = document.getElementById('kbCompareMergeDraft');
+    try { el?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch {}
+    if (typeof showToast === 'function') showToast('已生成合并草稿', 'success');
+}
+
+function applyKBCompareDraftDigestToEditor(digest) {
+    const form = document.getElementById('kbEditForm');
+    if (!form || !digest) return;
+    if (typeof __kbEditRestoreDraftDigest === 'function') {
+        __kbEditRestoreDraftDigest(digest);
+    }
+    __kbEditTouched = true;
+    if (typeof __kbEditRefreshDirtyState === 'function') __kbEditRefreshDirtyState();
+    if (typeof __kbEditScheduleDraftSave === 'function') __kbEditScheduleDraftSave();
+}
+
+async function openKBCompareDraftEditor() {
+    const draft = kbCompareState.mergeDraft || buildKBCompareMergeDraft();
+    if (!draft) {
+        if (typeof showToast === 'function') showToast('请先生成合并草稿', 'warning');
+        return;
+    }
+    if (draft.table !== 'knowledge_base_v1') {
+        if (typeof showToast === 'function') showToast('前刻库仅用于对比，请切换到此刻库后再打开编辑', 'warning');
+        else alert('前刻库仅用于对比，请切换到此刻库后再打开编辑');
+        return;
+    }
+    const baseRow = (kbCompareState.rows || []).find(row => getKBCompareRowId(row) === draft.editId);
+    await openKBEditModal(draft.editId, { item: baseRow || null });
+    setTimeout(() => applyKBCompareDraftDigestToEditor(draft.digest), 0);
+}
+
+function clearKBCompareWorkspace() {
+    kbCompareState = {
+        table: getKBCompareTable(),
+        ids: [],
+        duplicateIds: [],
+        missingIds: [],
+        rows: [],
+        fieldSummaries: [],
+        activeFieldKey: '',
+        baseRowId: '',
+        fieldChoices: {},
+        mergeDraft: null,
+        importCollapsed: false,
+        source: 'manual',
+        loading: false
+    };
+    const input = document.getElementById('kbCompareIdInput');
+    if (input) input.value = '';
+    const fileInput = document.getElementById('kbCompareFileInput');
+    if (fileInput) fileInput.value = '';
+    renderKBCompareResults();
+}
+
+async function handleKBCompareFileImport(file) {
+    if (!file) return;
+    try {
+        const form = new FormData();
+        form.append('file', file);
+        const resp = await fetch(API_BASE + '/kb/compare/parse_ids', {
+            method: 'POST',
+            body: form,
+            credentials: 'same-origin'
+        });
+        if (resp.status === 401) {
+            showLogin(true);
+            throw new Error('Unauthorized');
+        }
+        const data = await resp.json();
+        if (!data || !data.success) {
+            throw new Error(data?.message || '解析文件失败');
+        }
+        const ids = Array.isArray(data.ids) ? data.ids : [];
+        const input = document.getElementById('kbCompareIdInput');
+        if (input) input.value = ids.join('\n');
+        const duplicateIds = Array.isArray(data.duplicateIds) ? data.duplicateIds : [];
+        kbCompareState = {
+            ...kbCompareState,
+            ids,
+            duplicateIds,
+            missingIds: [],
+            rows: [],
+            fieldSummaries: [],
+            activeFieldKey: '',
+            baseRowId: '',
+            fieldChoices: {},
+            mergeDraft: null,
+            importCollapsed: false,
+            loading: false
+        };
+        renderKBCompareResults();
+        if (typeof showToast === 'function') showToast(`已读取 ${ids.length} 个 ID`, ids.length ? 'success' : 'warning');
+    } catch (e) {
+        const lower = String(file.name || '').toLowerCase();
+        if (lower.endsWith('.txt') || lower.endsWith('.csv')) {
+            try {
+                const text = await file.text();
+                const input = document.getElementById('kbCompareIdInput');
+                if (input) input.value = text;
+                const parsed = parseKBCompareIds(text);
+                if (typeof showToast === 'function') showToast(`已读取 ${parsed.ids.length} 个 ID`, parsed.ids.length ? 'success' : 'warning');
+                return;
+            } catch {}
+        }
+        if (typeof showToast === 'function') showToast('读取文件失败: ' + (e?.message || String(e)), 'error');
+        else alert('读取文件失败: ' + (e?.message || String(e)));
+    }
+}
+
+function copyKBCompareFoundIds() {
+    const ids = (kbCompareState.rows || []).map(getKBCompareRowId).filter(Boolean);
+    if (!ids.length) {
+        if (typeof showToast === 'function') showToast('暂无已匹配 ID 可复制', 'warning');
+        return;
+    }
+    copyToClipboard(ids.join('\n'));
+}
+
+function openKBCompareFromSelection() {
+    const ids = Array.from(selectedKBRows).map(id => String(id || '').trim()).filter(Boolean);
+    if (ids.length < 2) {
+        if (typeof showToast === 'function') showToast('请至少勾选 2 条数据进行对比', 'warning');
+        else alert('请至少勾选 2 条数据进行对比');
+        return;
+    }
+    setKBCompareTable(getSelectedKBTable());
+    const input = document.getElementById('kbCompareIdInput');
+    if (input) input.value = ids.join('\n');
+    kbCompareState.source = 'selection';
+    switchTab('kbCompareView');
+    setTimeout(() => runKBCompareImport(), 0);
+}
+
+window.setKBCompareActiveField = setKBCompareActiveField;
+window.setKBCompareBaseRow = setKBCompareBaseRow;
+window.setKBCompareFieldChoice = setKBCompareFieldChoice;
+window.toggleKBCompareImportCollapsed = toggleKBCompareImportCollapsed;
+window.generateKBCompareMergeDraft = generateKBCompareMergeDraft;
+window.openKBCompareDraftEditor = openKBCompareDraftEditor;
+window.runKBCompareImport = runKBCompareImport;
+window.clearKBCompareWorkspace = clearKBCompareWorkspace;
+window.handleKBCompareFileImport = handleKBCompareFileImport;
+window.copyKBCompareFoundIds = copyKBCompareFoundIds;
+window.openKBCompareFromSelection = openKBCompareFromSelection;
+window.renderKBCompareResults = renderKBCompareResults;
+
 // 创建防抖版本的搜索函数
 const debouncedLoadKBTable = debounce((page = 1) => {
     loadKBTable(page);
@@ -11424,7 +12421,7 @@ function aiAnswerCancelDraft() {
 window.aiAnswerCancelDraft = aiAnswerCancelDraft;
 
 function __aiSetAnswerButtonsLoading(isLoading, activeTask = null) {
-    const ids = ['aiAnswerBtnStructure', 'aiAnswerBtnFault', 'aiAnswerBtnUsage', 'aiAnswerBtnFeature'];
+    const ids = ['aiAnswerBtnStructure', 'aiAnswerBtnFault', 'aiAnswerBtnUsage', 'aiAnswerBtnFeature', 'aiAnswerBtnRequirement'];
     ids.forEach(id => {
         const btn = document.getElementById(id);
         if (!btn) return;
@@ -11442,6 +12439,44 @@ function __aiSetAnswerButtonsLoading(isLoading, activeTask = null) {
         }
     });
 }
+
+function openAiAnswerRequirementModal() {
+    const modal = document.getElementById('aiAnswerRequirementModal');
+    const input = document.getElementById('aiAnswerRequirementInput');
+    const status = document.getElementById('aiAnswerRequirementStatus');
+    if (!modal || !input) return;
+    if (status) status.textContent = '';
+    modal.style.display = 'block';
+    setTimeout(() => input.focus(), 0);
+}
+window.openAiAnswerRequirementModal = openAiAnswerRequirementModal;
+
+function closeAiAnswerRequirementModal() {
+    const modal = document.getElementById('aiAnswerRequirementModal');
+    if (modal) modal.style.display = 'none';
+}
+window.closeAiAnswerRequirementModal = closeAiAnswerRequirementModal;
+
+function submitAiAnswerRequirement() {
+    const input = document.getElementById('aiAnswerRequirementInput');
+    const status = document.getElementById('aiAnswerRequirementStatus');
+    const requirement = String(input?.value || '').trim();
+    if (!requirement) {
+        if (status) status.textContent = '请先填写本次答案优化需求。';
+        if (input) input.focus();
+        return;
+    }
+    if (status) status.textContent = '';
+    closeAiAnswerRequirementModal();
+    aiAnswerAction('requirement', { optimization_requirement: requirement });
+}
+window.submitAiAnswerRequirement = submitAiAnswerRequirement;
+
+document.addEventListener('click', (e) => {
+    const modal = document.getElementById('aiAnswerRequirementModal');
+    if (!modal || modal.style.display === 'none') return;
+    if (e.target === modal) closeAiAnswerRequirementModal();
+});
 
 function openFeedbackModal(title, message) {
     const modal = document.getElementById('feedbackModal');
@@ -11477,12 +12512,14 @@ async function copyAnswerPrompts() {
     const fault = get('aiPromptAnswerFaultInput');
     const usage = get('aiPromptAnswerUsageInput');
     const feature = get('aiPromptAnswerFeatureInput');
+    const requirement = get('aiPromptAnswerRequirementInput');
 
     const content =
         "【通用处理（structure）】\n" + structure + "\n\n" +
         "【故障类处理（fault）】\n" + fault + "\n\n" +
         "【使用类处理（usage）】\n" + usage + "\n\n" +
-        "【功能类处理（feature）】\n" + feature + "\n";
+        "【功能类处理（feature）】\n" + feature + "\n\n" +
+        "【按需求优化答案（requirement）】\n" + requirement + "\n";
 
     if (!content.trim()) {
         openFeedbackModal('复制失败', '没有可复制的内容');
@@ -11640,7 +12677,7 @@ function aiQuestionTypeAction() {
 }
 window.aiQuestionTypeAction = aiQuestionTypeAction;
 
-function aiAnswerAction(task) {
+function aiAnswerAction(task, options = {}) {
     (async () => {
         const form = __aiGetKbEditForm();
         if (!form) return;
@@ -11648,6 +12685,12 @@ function aiAnswerAction(task) {
         const aEl = form.elements['answer'];
         const fileUrlsEl = form.elements['file_urls'];
         if (!aEl) return;
+        const t = String(task || '').trim();
+        const optimizationRequirement = String(options?.optimization_requirement || '').trim();
+        if (t === 'requirement' && !optimizationRequirement) {
+            openAiAnswerRequirementModal();
+            return;
+        }
         try { __kbAnswerSyncToTextarea({ emit: false }); } catch {}
         const originalAnswerBeforeAi = String(aEl.value || '');
 
@@ -11657,14 +12700,15 @@ function aiAnswerAction(task) {
         __aiAnswerHideCompare();
 
         __aiSetMetrics('aiAnswerStatus', 'AI 处理中...');
-        __aiSetAnswerButtonsLoading(true, task);
+        __aiSetAnswerButtonsLoading(true, t);
         __aiStreamPreviewReset();
         __aiStreamPreviewSetVisible(true);
         try {
-            const finalEvt = await __aiOptimizeStream('answer', task, {
+            const finalEvt = await __aiOptimizeStream('answer', t, {
                 question: qEl?.value || '',
                 answer: aEl.value || '',
-                urls: __aiGetUrlsList(form)
+                urls: __aiGetUrlsList(form),
+                optimization_requirement: optimizationRequirement
             }, {}, (evt) => {
                 if (!evt || !evt.type) return;
                 if (evt.type === 'delta' && typeof evt.text === 'string') {
@@ -11684,8 +12728,7 @@ function aiAnswerAction(task) {
             const data = res.data || {};
             __aiSetMetrics('aiAnswerStatus', '已完成');
 
-            const t = String(task || '').trim();
-            const isJsonTask = (t === 'structure' || t === 'fault' || t === 'usage' || t === 'feature');
+            const isJsonTask = (t === 'structure' || t === 'fault' || t === 'usage' || t === 'feature' || t === 'requirement');
             if (isJsonTask) {
                 const payload = {
                     original_answer: (typeof data.original_answer === 'string') ? data.original_answer : originalAnswerBeforeAi,
@@ -15766,6 +16809,19 @@ async function openAiConfigModal() {
                 "输出必须为严格 JSON：{\"answer\": string, \"urls\": string[]|null, \"notes\": string|null}。\n" +
                 "结构要求（强约束 + 软容错）：answer 必须包含 ### 结构化正文 与 ### 扩写问答对；模块顺序固定但允许缺失跳过；问答对目标 3-5 组，若不足 3 组需在 notes 说明原因。\n" +
                 "变量：{{task}} {{question}} {{answer}} {{urls}}",
+            answer_requirement:
+                "你是客服知识库 FAQ 答案定向优化助手。\n" +
+                "当前 task=requirement。你的任务是根据“优化需求”对原答案做定向优化。\n" +
+                "输入数据：\n" +
+                "- question：{{question}}\n" +
+                "- answer：{{answer}}\n" +
+                "- optimization_requirement：{{optimization_requirement}}\n" +
+                "- urls：{{urls}}\n" +
+                "处理规则：优化需求是本次修改的主要依据，必须逐条落实；允许使用原答案和优化需求中明确给出的信息；不得编造产品能力、操作路径、按钮名称、限制条件或承诺；保留原答案中仍然正确、必要的信息；删除或改写会造成混淆、重复、口语化或与优化需求冲突的表达；如果优化需求要求拆分场景、澄清概念、补充限制说明、替换措辞，必须明确体现。\n" +
+                "输出应适合作为知识库 FAQ 正文，保持 Markdown 格式，不输出解释过程。\n" +
+                "输出必须为严格 JSON：{\"original_answer\": string, \"refined_answer\": string, \"notes\": string|null, \"answer\": string, \"urls\": string[]|null}。\n" +
+                "字段要求：original_answer 为原始 answer；refined_answer 为按优化需求处理后的答案正文；answer 必须与 refined_answer 完全一致；urls 无新增或调整时返回 null。\n" +
+                "变量：{{task}} {{question}} {{answer}} {{optimization_requirement}} {{urls}}",
             // legacy fallback key, kept for older UI/server logic
             answer: "",
             similar:
@@ -15793,6 +16849,7 @@ async function openAiConfigModal() {
             const aFaultEl = document.getElementById('aiPromptAnswerFaultInput');
             const aUsageEl = document.getElementById('aiPromptAnswerUsageInput');
             const aFeatureEl = document.getElementById('aiPromptAnswerFeatureInput');
+            const aRequirementEl = document.getElementById('aiPromptAnswerRequirementInput');
             const sEl = document.getElementById('aiPromptSimilarInput');
             if (qEl) qEl.value = (prompts.question || '').trim() || defaultPrompts.question;
 
@@ -15801,13 +16858,15 @@ async function openAiConfigModal() {
             const savedFault = (prompts.answer_fault || '').trim();
             const savedUsage = (prompts.answer_usage || '').trim();
             const savedFeature = (prompts.answer_feature || '').trim();
-            const hasAnySavedAnswerPrompt = !!(savedStructure || savedFault || savedUsage || savedFeature || legacy);
+            const savedRequirement = (prompts.answer_requirement || '').trim();
+            const hasAnySavedAnswerPrompt = !!(savedStructure || savedFault || savedUsage || savedFeature || savedRequirement || legacy);
 
             // 答案区：以“已保存/正在录入”为主，仅在从未配置过时才自动填充推荐模板
             if (aStructureEl) aStructureEl.value = hasAnySavedAnswerPrompt ? (savedStructure || legacy) : defaultPrompts.answer_structure;
             if (aFaultEl) aFaultEl.value = hasAnySavedAnswerPrompt ? (savedFault || legacy) : defaultPrompts.answer_fault;
             if (aUsageEl) aUsageEl.value = hasAnySavedAnswerPrompt ? (savedUsage || legacy) : defaultPrompts.answer_usage;
             if (aFeatureEl) aFeatureEl.value = hasAnySavedAnswerPrompt ? (savedFeature || legacy) : defaultPrompts.answer_feature;
+            if (aRequirementEl) aRequirementEl.value = hasAnySavedAnswerPrompt ? (savedRequirement || defaultPrompts.answer_requirement) : defaultPrompts.answer_requirement;
             if (aLegacyEl) aLegacyEl.value = legacy;
 
             if (sEl) sEl.value = (prompts.similar || '').trim() || defaultPrompts.similar;
@@ -15836,6 +16895,7 @@ async function saveApiConfig() {
     const aiPromptAnswerFault = (document.getElementById('aiPromptAnswerFaultInput')?.value || '').trim();
     const aiPromptAnswerUsage = (document.getElementById('aiPromptAnswerUsageInput')?.value || '').trim();
     const aiPromptAnswerFeature = (document.getElementById('aiPromptAnswerFeatureInput')?.value || '').trim();
+    const aiPromptAnswerRequirement = (document.getElementById('aiPromptAnswerRequirementInput')?.value || '').trim();
     // legacy single template (compat): store as answer too
     const aiPromptAnswer = aiPromptAnswerStructure;
     const aiPromptSimilar = (document.getElementById('aiPromptSimilarInput')?.value || '').trim();
@@ -15858,6 +16918,7 @@ async function saveApiConfig() {
                 answer_fault: aiPromptAnswerFault,
                 answer_usage: aiPromptAnswerUsage,
                 answer_feature: aiPromptAnswerFeature,
+                answer_requirement: aiPromptAnswerRequirement,
                 similar: aiPromptSimilar
             },
             question_type_config_json: questionTypeConfigJson
