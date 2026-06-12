@@ -9396,14 +9396,26 @@ function renderKBCompareSummary() {
                     </tr>
                 </thead>
                 <tbody>
-                    ${visible.map(s => `
-                        <tr class="${s.key === kbCompareState.activeFieldKey ? 'is-active' : ''}">
-                            <td>${escapeHtml(s.label)}</td>
+                    ${visible.map(s => {
+                        const action = `setKBCompareActiveField(${kbCompareJsString(s.key)})`;
+                        const rowClass = [
+                            'kb-compare-summary-row',
+                            s.key === kbCompareState.activeFieldKey ? 'is-active' : '',
+                            s.hasDiff ? 'has-diff' : ''
+                        ].filter(Boolean).join(' ');
+                        return `
+                        <tr class="${rowClass}" onclick="${action}" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();${action}}">
+                            <td>
+                                <div class="kb-compare-field-cell">
+                                    <strong>${escapeHtml(s.label)}</strong>
+                                    <span>${escapeHtml(s.group || (s.meta ? '元数据' : '字段'))}${s.meta ? ' / 元数据' : ''}</span>
+                                </div>
+                            </td>
                             <td>${s.hasDiff ? '<span class="kb-compare-badge is-diff">有差异</span>' : '<span class="kb-compare-badge">一致</span>'}</td>
-                            <td>${s.distinctCount}</td>
-                            <td><button type="button" class="action-btn btn-sm" onclick="setKBCompareActiveField(${kbCompareJsString(s.key)})">查看</button></td>
+                            <td><span class="kb-compare-count-pill">${s.distinctCount}</span></td>
+                            <td><button type="button" class="action-btn btn-sm kb-compare-row-action" onclick="event.stopPropagation();${action}">查看</button></td>
                         </tr>
-                    `).join('')}
+                    `}).join('')}
                 </tbody>
             </table>
         </div>
@@ -9497,10 +9509,13 @@ function renderKBCompareDetail() {
         const diffClass = getKBCompareFieldNorm(row, field) === getKBCompareFieldNorm(baseRow, field) ? '' : 'is-different';
         const isBase = id === baseId;
         const isChosen = editable && chosenId === id;
+        const isDifferent = !!diffClass;
+        const valueStatus = isBase ? '主记录基准' : (isDifferent ? '与主记录不同' : '与主记录一致');
         return `
             <article class="kb-compare-detail-card ${diffClass} ${isBase ? 'is-base' : ''} ${isChosen ? 'is-chosen' : ''}">
                 <div class="kb-compare-detail-card-head">
-                    <div>
+                    <div class="kb-compare-card-main">
+                        <span class="kb-compare-record-kicker">记录 ${index + 1}</span>
                         <div class="kb-compare-card-id-row">
                             <button type="button" class="kb-compare-id-link" onclick="searchKBById(${kbCompareJsString(id)})">${escapeHtml(id || `记录 ${index + 1}`)}</button>
                             ${isBase ? '<span class="kb-compare-badge is-base">主记录</span>' : ''}
@@ -9509,6 +9524,7 @@ function renderKBCompareDetail() {
                         <div class="kb-compare-question" title="${_escapeAttr(question)}">${escapeHtml(question || '-')}</div>
                     </div>
                     <div class="kb-compare-card-actions">
+                        <span class="kb-compare-value-status ${isDifferent ? 'is-different' : 'is-same'}">${valueStatus}</span>
                         ${isBase ? '' : `<button type="button" class="action-btn btn-sm" onclick="setKBCompareBaseRow(${kbCompareJsString(id)})">设为主记录</button>`}
                         ${editable ? `<button type="button" class="action-btn btn-sm" onclick="setKBCompareFieldChoice(${kbCompareJsString(field.key)}, ${kbCompareJsString(id)})">${isChosen ? '已采用' : '采用此值'}</button>` : ''}
                     </div>
@@ -9517,12 +9533,21 @@ function renderKBCompareDetail() {
             </article>
         `;
     }).join('');
+    const decisionHint = editable
+        ? (chosenId
+            ? `已手动采用 ${chosenId}`
+            : (KB_COMPARE_DEFAULT_MERGE_FIELDS.has(field.key) ? '默认合并取并集' : '默认沿用主记录'))
+        : '仅用于校验';
 
     el.innerHTML = `
         <div class="kb-compare-detail-head">
             <div>
                 <h3>${escapeHtml(field.label)}</h3>
                 <p>${field.hasDiff ? `发现 ${field.distinctCount} 种取值，涉及 ${field.affectedCount}/${rows.length} 条记录。当前主记录：${baseId || '-'}` : `该字段在当前记录中一致。当前主记录：${baseId || '-'}`}</p>
+                <div class="kb-compare-field-meta">
+                    <span>${escapeHtml(field.group || '字段')}</span>
+                    <span>${escapeHtml(decisionHint)}</span>
+                </div>
             </div>
             <div class="kb-compare-legend">
                 <span><i class="legend-dot is-shared"></i>共有</span>
@@ -9569,7 +9594,31 @@ function renderKBCompareMergeDraft() {
                 <h3>合并草稿</h3>
                 <p>编辑 ${escapeHtml(draft.editId)}，建议删除 ${draft.deleteIds.length} 条，字段变更 ${changedFields.length} 项。</p>
             </div>
-            <button type="button" class="primary-btn btn-primary-gradient" onclick="openKBCompareDraftEditor()">打开编辑主记录</button>
+            <div class="kb-compare-draft-action-stack">
+                <button type="button" class="primary-btn btn-primary-gradient" onclick="openKBCompareDraftEditor()">打开编辑主记录</button>
+            </div>
+        </div>
+        <div class="kb-compare-decision-grid">
+            <div class="kb-compare-decision-card is-edit">
+                <span>编辑主记录</span>
+                <strong>${escapeHtml(draft.editId)}</strong>
+                <small>${escapeHtml(draft.tableLabel)}</small>
+            </div>
+            <div class="kb-compare-decision-card is-delete">
+                <span>建议删除</span>
+                <strong>${draft.deleteIds.length}</strong>
+                <small>条重复记录</small>
+            </div>
+            <div class="kb-compare-decision-card is-change">
+                <span>将更新</span>
+                <strong>${changedFields.length}</strong>
+                <small>个字段</small>
+            </div>
+            <div class="kb-compare-decision-card ${draft.unsupportedFields.length ? 'is-review' : 'is-stable'}">
+                <span>未自动填入</span>
+                <strong>${draft.unsupportedFields.length}</strong>
+                <small>个字段</small>
+            </div>
         </div>
         <div class="kb-compare-draft-ops">
             <div class="kb-compare-draft-op">
@@ -9595,9 +9644,14 @@ function renderKBCompareMergeDraft() {
                 </thead>
                 <tbody>
                     ${draft.fields.map(field => `
-                        <tr class="${field.changed ? 'is-active' : ''}">
-                            <td>${escapeHtml(field.label)}</td>
-                            <td>${field.manuallyChosen ? '手动采用' : field.mode === 'merge' ? '合并取并集' : field.mode === 'fallback' ? '主记录补空' : '沿用主记录'}</td>
+                        <tr class="${field.changed ? 'is-pending' : ''}">
+                            <td>
+                                <div class="kb-compare-field-cell">
+                                    <strong>${escapeHtml(field.label)}</strong>
+                                    <span>${escapeHtml(field.group || '字段')}</span>
+                                </div>
+                            </td>
+                            <td><span class="kb-compare-strategy-chip is-${escapeHtml(field.mode)}">${field.manuallyChosen ? '手动采用' : field.mode === 'merge' ? '合并取并集' : field.mode === 'fallback' ? '主记录补空' : '沿用主记录'}</span></td>
                             <td>${escapeHtml(field.sourceLabel || '-')}</td>
                             <td>${field.changed ? '<span class="kb-compare-badge is-diff">将更新</span>' : '<span class="kb-compare-badge">不变</span>'}</td>
                             <td>${renderKBCompareDraftValue(field.displayValue || field.value)}</td>
@@ -10735,7 +10789,8 @@ function __kbEditSplitPreviewList(value, opts = {}) {
         isUrlList: !!opts.isUrlList
     });
     if (!opts.isUrlList) {
-        items = items.flatMap(v => String(v || '').split(/[,\n，]+/));
+        // 仅按半角逗号/换行二次拆分；全角逗号 ，是句中标点，不拆（与 parseSmartListValue 规则一致）
+        items = items.flatMap(v => String(v || '').split(/[,\n]+/));
     }
     const seen = new Set();
     return items

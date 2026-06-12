@@ -3092,6 +3092,41 @@ def ai_optimize():
         # 捕获所有异常，返回 JSON，避免 Flask 默认 HTML 错误页
         return jsonify({'success': False, 'message': f'AI 调用异常: {str(e)}'}), 500
 
+def _split_text_list_value(raw, *, is_url_list=False):
+    """与前端 parseSmartListValue(splitOnAsciiComma=True) 保持一致的列表拆分规则。
+
+    规则要点（重要）：
+    - 文本类字段（相似问/关键词/错误码等）：只按【换行】和【半角逗号 ,】拆分。
+      全角逗号 ，是句子内部的正常标点，不作为分隔符，整句视为一个元素。
+    - URL 类字段：在出现 >=2 个 url-like 片段时，才允许按全角逗号 ，拆分，
+      以兼容历史上用中文逗号拼接多个链接的写法。
+
+    例：
+        "检测到基站内部异常，请插拔电源重试"   -> ["检测到基站内部异常，请插拔电源重试"]   (1 条)
+        "检测到基站内部异常,请插拔电源重试"     -> ["检测到基站内部异常", "请插拔电源重试"] (2 条)
+    """
+    s = str(raw or '').strip()
+    if not s:
+        return []
+
+    # 换行优先：有换行时按行拆分
+    if '\n' in s or '\r' in s:
+        return [x.strip() for x in re.split(r'\r?\n', s) if x and x.strip()]
+
+    # 半角逗号：文本字段的分隔符
+    if ',' in s:
+        return [x.strip() for x in s.split(',') if x and x.strip()]
+
+    # URL 字段才允许用全角逗号拆分（且需 >=2 个 url-like 片段）
+    if is_url_list and '，' in s:
+        rough = [x.strip() for x in s.split('，') if x and x.strip()]
+        url_like = sum(1 for t in rough if re.match(r'^(https?://|www\.)', t, flags=re.I))
+        if url_like >= 2:
+            return rough
+
+    # 否则整体作为一个元素（全角逗号保留在句子内）
+    return [s]
+
 def _parse_similar_questions(v):
     if v is None:
         return []
@@ -3124,7 +3159,7 @@ def _parse_similar_questions(v):
                 pass
         out = []
         seen = set()
-        for part in re.split(r'[\n\r]+|[,，;；、/\t]+', raw):
+        for part in _split_text_list_value(raw):
             val = str(part or '').strip()
             if val and val not in seen:
                 out.append(val)
@@ -4445,7 +4480,7 @@ def update_kb_item():
                         cleaned = [str(v).strip() for v in parsed if v is not None and str(v).strip() and str(v).strip().lower() != 'null']
                     else:
                         val_clean = s.replace('[', '').replace(']', '').replace('"', '').replace("'", "")
-                        parts = re.split(r'[,，\n]', val_clean)
+                        parts = _split_text_list_value(val_clean, is_url_list=(col in ('image_urls', 'video_urls', 'file_urls')))
                         final_list = [x.strip() for x in parts if x.strip() and x.strip().lower() != 'null']
                         cleaned = final_list if final_list else None
             else:
@@ -11945,7 +11980,7 @@ def kb_import():
                                 cleaned = [str(v).strip() for v in parsed if v is not None and str(v).strip() and str(v).strip().lower() != 'null']
                             else:
                                 val_clean = s.replace('[', '').replace(']', '').replace('"', '').replace("'", "")
-                                parts = re.split(r'[,，\n]', val_clean)
+                                parts = _split_text_list_value(val_clean, is_url_list=(col in ('image_urls', 'video_urls', 'file_urls')))
                                 final_list = [p.strip() for p in parts if p.strip() and p.strip().lower() != 'null']
                                 cleaned = final_list if final_list else None
                     else:
@@ -12632,7 +12667,7 @@ def kb_check_duplicates():
                                 obj = json.loads(raw)
                                 parts = obj if isinstance(obj, list) else [obj]
                             except Exception:
-                                parts = re.split(r'[\n,，]', raw)
+                                parts = _split_text_list_value(raw, is_url_list=(field_name in ('image_urls', 'video_urls', 'file_urls')))
                         norm_parts = []
                         for x in parts or []:
                             if x is None:
@@ -12779,8 +12814,8 @@ def kb_item_upsert():
                     pass # Keep as string or convert to list if possible?
                     # If it's a string, try to split by comma or newline
                     if isinstance(data[col], str):
-                         # Split by \n or , or Chinese comma
-                         parts = re.split(r'[\n,，]', data[col])
+                         # 文本字段只按换行/半角逗号拆分；全角逗号保留为句内标点
+                         parts = _split_text_list_value(data[col], is_url_list=(col in ('image_urls', 'video_urls', 'file_urls')))
                          data[col] = [x.strip() for x in parts if x.strip()]
         
         if 'link_url' in data:
