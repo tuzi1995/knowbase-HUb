@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 
 # 基础路径
-BASE_DIR = Path("/Users/guoying/AI建设和学习/One/KnowBase Hub")
+BASE_DIR = Path("/Users/guoying/AI建设和学习/One/knowbase_hub_8085")
 
 # 分类规则
 CATEGORIES = {

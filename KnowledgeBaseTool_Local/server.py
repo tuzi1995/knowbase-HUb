@@ -17162,13 +17162,17 @@ if __name__ == '__main__':
         s.close()
         print(f"\n{'='*50}")
         print(f" 服务已启动！请使用以下地址访问：")
-        print(f" 本机访问: http://localhost:8085")
-        print(f" 局域网共享访问: http://{local_ip}:8085")
+        server_port = int(os.environ.get('KMATRIX_BACKEND_PORT', '8085'))
+        server_host = os.environ.get('KMATRIX_BACKEND_HOST', '0.0.0.0')
+        print(f" 本机访问: http://localhost:{server_port}")
+        print(f" 局域网共享访问: http://{local_ip}:{server_port}")
         print(f" (请确保其他电脑连接了同一个 WiFi/局域网)")
         print(f"{'='*50}\n")
     except:
         local_ip = '0.0.0.0'
+        server_port = int(os.environ.get('KMATRIX_BACKEND_PORT', '8085'))
+        server_host = os.environ.get('KMATRIX_BACKEND_HOST', '0.0.0.0')
         
     # Important: do NOT use Flask debug reloader for background jobs.
     # debug=True + reloader will restart the process and in-memory _NHF_JOBS will be lost.
-    app.run(port=8085, host='0.0.0.0', debug=False, use_reloader=False)
+    app.run(port=server_port, host=server_host, debug=False, use_reloader=False)

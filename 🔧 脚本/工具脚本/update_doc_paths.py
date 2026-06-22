@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 
-BASE_DIR = Path("/Users/guoying/AI建设和学习/One/KnowBase Hub")
+BASE_DIR = Path("/Users/guoying/AI建设和学习/One/knowbase_hub_8085")
 
 # 脚本文件映射：旧路径 -> 新路径
 SCRIPT_MAPPINGS = {

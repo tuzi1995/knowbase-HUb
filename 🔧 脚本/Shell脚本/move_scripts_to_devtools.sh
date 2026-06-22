@@ -3,7 +3,7 @@
 
 set -e
 
-BASE_DIR="/Users/guoying/AI建设和学习/One/KnowBase Hub"
+BASE_DIR="/Users/guoying/AI建设和学习/One/knowbase_hub_8085"
 PROJECT_DIR="$BASE_DIR/KnowledgeBaseTool_Local"
 DEVTOOLS_DIR="$PROJECT_DIR/DevTools"
 

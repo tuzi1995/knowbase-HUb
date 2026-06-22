@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 
-DEVTOOLS_DIR = Path("/Users/guoying/AI建设和学习/One/KnowBase Hub/KnowledgeBaseTool_Local/DevTools")
+DEVTOOLS_DIR = Path("/Users/guoying/AI建设和学习/One/knowbase_hub_8085/KnowledgeBaseTool_Local/DevTools")
 
 def fix_script_imports(file_path):
     """修复单个脚本的导入路径"""
