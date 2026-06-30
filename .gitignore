@@ -45,3 +45,11 @@ KnowledgeBaseTool_Local/DevTools/debug_insert.py
 KnowledgeBaseTool_Local/DevTools/test_fetch_limit.py
 KnowledgeBaseTool_Local/DevTools/test_supabase_select.py
 KnowledgeBaseTool_Local/DevTools/verify_setup.py
+
+dist/
+build/
+.cache/
+backend/data/
+*.xlsx
+*.xls
+*.pkl

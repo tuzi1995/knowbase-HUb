@@ -5274,3 +5274,15 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
         min-height: 360px !important;
     }
 }
+
+.kb-table th,
+.kb-table td,
+.qc-table th,
+.qc-table td {
+    font-size: 15.4px;
+}
+
+#smWorkbenchTable th,
+#smWorkbenchTable td {
+    font-size: 14.3px;
+}

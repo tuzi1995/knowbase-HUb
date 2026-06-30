@@ -43,6 +43,11 @@ try:
 except Exception:
     Image = None
 
+
+def canonical_download_name(data_type, ext='xlsx', step='s01', tool='kb8085'):
+    suffix = str(ext or 'xlsx').lstrip('.')
+    return f"{datetime.now().strftime('%Y%m%d')}_{step}_{tool}_{data_type}_v1.{suffix}"
+
 # 本地 PostgreSQL 支持
 try:
     import psycopg2
@@ -1479,7 +1484,7 @@ def export_product_catalog_xlsx():
     return send_file(
         io.BytesIO(output.getvalue()),
         as_attachment=True,
-        download_name=f'型号库导出_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+        download_name=canonical_download_name('product_catalog'),
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
 
@@ -1532,7 +1537,7 @@ def export_model_mappings_excel():
         return send_file(
             io.BytesIO(output.getvalue()),
             as_attachment=True,
-            download_name=f'机型分类映射导出_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+            download_name=canonical_download_name('model_mapping'),
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     except Exception as e:
@@ -1949,7 +1954,7 @@ def export_scoring_data():
         return Response(
             output.getvalue().encode('utf-8-sig'),
             mimetype="text/csv",
-            headers={"Content-disposition": "attachment; filename=scoring_export.csv"}
+            headers={"Content-disposition": f"attachment; filename={canonical_download_name('scoring', 'csv')}"}
         )
         
     except Exception as e:
@@ -5399,7 +5404,7 @@ def export_kb_modifications_raw():
         return send_file(
             output,
             as_attachment=True,
-            download_name=f'修改记录原始导出_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
+            download_name=canonical_download_name('kb_edit_log', 'csv'),
             mimetype='text/csv'
         )
     except Exception as e:
@@ -5499,7 +5504,7 @@ def export_kb_modifications_smart_merge():
             return send_file(
                 output,
                 as_attachment=True,
-                download_name=f'智能合并导出_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+                download_name=canonical_download_name('kb_merge'),
                 mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
 
@@ -5514,7 +5519,7 @@ def export_kb_modifications_smart_merge():
             return send_file(
                 output,
                 as_attachment=True,
-                download_name=f'智能合并导出_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+                download_name=canonical_download_name('kb_merge'),
                 mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
 
@@ -5634,7 +5639,7 @@ def export_kb_modifications_smart_merge():
         return send_file(
             output,
             as_attachment=True,
-            download_name=f'智能合并导出_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+            download_name=canonical_download_name('kb_merge'),
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     except Exception as e:
@@ -5905,7 +5910,7 @@ def export_ops_excel(kind):
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)
-    fname = f"操作库_{'APP' if kind=='app' else '产品'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    fname = canonical_download_name('ops_library')
     return send_file(bio, as_attachment=True, download_name=fname, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
@@ -5942,7 +5947,7 @@ def download_ops_import_template(kind):
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)
-    fname = f"操作库导入模板_{'APP' if kind=='app' else '产品'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    fname = canonical_download_name('ops_template')
     return send_file(
         bio,
         as_attachment=True,
@@ -6440,7 +6445,7 @@ def export_archive(batch_id):
     return send_file(
         output,
         as_attachment=True,
-        download_name=f'归档导出_{batch_id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
+        download_name=canonical_download_name('archive', 'csv'),
         mimetype='text/csv'
     )
 
@@ -7517,7 +7522,7 @@ def export_governance_filtered_route():
         return send_file(
             output,
             as_attachment=True,
-            download_name=f'知识库治理筛选结果_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+            download_name=canonical_download_name('kb_diagnosis'),
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     except Exception as e:
@@ -9131,7 +9136,7 @@ def quality_tasks_export_route():
         return send_file(
             output,
             as_attachment=True,
-            download_name=f'管控中心任务_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+            download_name=canonical_download_name('quality_task'),
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     except Exception as e:
@@ -11598,7 +11603,7 @@ def kb_template():
         return send_file(
             output,
             as_attachment=True,
-            download_name='knowledge_base_template.xlsx',
+            download_name=canonical_download_name('kb_template'),
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     except Exception as e:
@@ -13235,7 +13240,7 @@ def kb_export():
             return send_file(
                 output,
                 as_attachment=True,
-                download_name=f'kb_export_empty.csv',
+                download_name=canonical_download_name('kb_export', 'csv'),
                 mimetype='text/csv'
             )
             
@@ -13263,7 +13268,7 @@ def kb_export():
         return send_file(
             output,
             as_attachment=True,
-            download_name=f'kb_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
+            download_name=canonical_download_name('kb_export', 'csv'),
             mimetype='text/csv'
         )
     except Exception as e:
@@ -13678,7 +13683,7 @@ def sm_download_template():
         return send_file(
             output,
             as_attachment=True,
-            download_name=f'智能映射对比模板_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+            download_name=canonical_download_name('smart_mapping_template'),
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     except Exception as e:
@@ -13789,7 +13794,7 @@ def sm_export_excel():
     return send_file(
         output,
         as_attachment=True,
-        download_name=f'智能映射对比结果_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx',
+        download_name=canonical_download_name('smart_mapping'),
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
 
@@ -15766,7 +15771,7 @@ def export_matrix_data():
                 
         output.seek(0)
         
-        filename = f'ProductMatrix_Export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+        filename = canonical_download_name('product_matrix')
         return send_file(
             output,
             as_attachment=True,

@@ -4,6 +4,13 @@
 // ==========================================
 const API_BASE = '/api';
 
+function canonicalDownloadName(dataType, ext = 'xlsx', step = 's01', tool = 'kb8085') {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const week = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+  return `${week}_${step}_${tool}_${dataType}_v1.${String(ext).replace(/^\./, '')}`;
+}
+
 // ==========================================
 // 防抖函数 - 优化性能
 // ==========================================
@@ -2759,7 +2766,7 @@ async function smExportResult() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `智能映射对比结果_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.xlsx`;
+        a.download = canonicalDownloadName('smart_mapping');
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -3913,9 +3920,7 @@ function exportLinkData() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  const fileName = `多媒体预览_导出_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.csv`;
+  const fileName = canonicalDownloadName('kb_export', 'csv');
   a.download = fileName;
   document.body.appendChild(a);
   a.click();
@@ -5211,7 +5216,7 @@ async function exportGovernanceFilteredExcel() {
         const url = window.URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = `知识库治理筛选结果_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.xlsx`;
+        link.download = canonicalDownloadName('kb_diagnosis');
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -5304,7 +5309,7 @@ function downloadGovernanceTemplate() {
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "recall_data_template.csv");
+    link.setAttribute("download", canonicalDownloadName('kb_template', 'csv'));
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -6468,7 +6473,7 @@ async function qcExportTasks() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `管控中心任务_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.xlsx`;
+        a.download = canonicalDownloadName('quality_task');
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -7811,17 +7816,17 @@ window.copyModRow = copyModRow;
 
 function exportRawModifications() {
     const params = new URLSearchParams(_buildModFilterParams());
-    downloadByUrl(`${API_BASE}/kb/modifications/export_raw?${params.toString()}`);
+    downloadByUrl(`${API_BASE}/kb/modifications/export_raw?${params.toString()}`, canonicalDownloadName('kb_edit_log', 'csv'));
 }
 window.exportRawModifications = exportRawModifications;
 
 function smartMergeExportModifications() {
     const params = new URLSearchParams(_buildModFilterParams());
-    downloadByUrl(`${API_BASE}/kb/modifications/smart_merge_export?${params.toString()}`);
+    downloadByUrl(`${API_BASE}/kb/modifications/smart_merge_export?${params.toString()}`, canonicalDownloadName('kb_merge'));
 }
 window.smartMergeExportModifications = smartMergeExportModifications;
 
-async function downloadByUrl(url) {
+async function downloadByUrl(url, fallbackName = '') {
     try {
         const resp = await fetch(url, { method: 'GET', credentials: 'include' });
         if (!resp.ok) {
@@ -7839,7 +7844,7 @@ async function downloadByUrl(url) {
         const href = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = href;
-        if (filename) a.download = filename;
+        a.download = filename || fallbackName || '';
         a.style.display = 'none';
         document.body.appendChild(a);
         a.click();
@@ -10410,7 +10415,7 @@ function downloadTemplate() {
     // and handles browser behavior better
     const link = document.createElement('a');
     link.href = API_BASE + '/kb/template';
-    link.setAttribute('download', 'knowledge_base_template.xlsx');
+    link.setAttribute('download', canonicalDownloadName('kb_template'));
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -17324,7 +17329,7 @@ async function exportProductCatalogXlsx() {
         if (!res.ok) throw new Error(res.statusText || '导出失败');
         const blob = await res.blob();
         const disposition = res.headers.get('Content-Disposition');
-        let name = `型号库导出_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.xlsx`;
+        let name = canonicalDownloadName('product_catalog');
         if (disposition) {
             const m = disposition.match(/filename[*]?=(?:UTF-8'')?["']?([^"'\s]+)/i);
             if (m && m[1]) {
@@ -17357,7 +17362,7 @@ async function exportProductCatalogModelListXlsx() {
         if (!res.ok) throw new Error(res.statusText || '导出失败');
         const blob = await res.blob();
         const disposition = res.headers.get('Content-Disposition');
-        let name = `型号清单_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.xlsx`;
+        let name = canonicalDownloadName('product_catalog');
         if (disposition) {
             const m = disposition.match(/filename[*]?=(?:UTF-8'')?["']?([^"'\s]+)/i);
             if (m && m[1]) {
@@ -18198,7 +18203,7 @@ function exportModelMappingsJson() {
                 }
                 const blob = await res.blob();
                 const disposition = res.headers.get('Content-Disposition');
-                let name = `model-mappings_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.xlsx`;
+                let name = canonicalDownloadName('model_mapping');
                 if (disposition) {
                     const m = disposition.match(/filename[*]?=(?:UTF-8'')?["']?([^"'\s]+)/i);
                     if (m && m[1]) name = m[1].replace(/^.*[/\\]/, '').replace(/["']/g, '').trim();
@@ -19225,9 +19230,16 @@ async function downloadOpsImportTemplate() {
             throw new Error(t || `HTTP ${resp.status}`);
         }
         const blob = await resp.blob();
+        const cd = resp.headers.get('content-disposition') || '';
+        let filename = canonicalDownloadName('ops_template');
+        const m1 = cd.match(/filename\\*=UTF-8''([^;]+)/i);
+        const m2 = cd.match(/filename=\"?([^\";]+)\"?/i);
+        if (m1 && m1[1]) filename = decodeURIComponent(m1[1]);
+        else if (m2 && m2[1]) filename = m2[1];
         const href = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = href;
+        a.download = filename;
         a.style.display = 'none';
         document.body.appendChild(a);
         a.click();
