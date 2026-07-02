@@ -4735,10 +4735,11 @@ def update_kb_item():
 @app.route('/api/kb/delete', methods=['POST'])
 @login_required
 def delete_kb_item():
-    data = request.json
+    data = request.json or {}
     ids = data.get('ids', [])
     if not ids:
         return jsonify({'success': False, 'message': 'No IDs provided'}), 400
+    change_source = str(data.get('change_source') or data.get('source_module') or '').strip() or '知识库管理'
 
     client = get_supabase_client()
     if not client:
@@ -4797,7 +4798,7 @@ def delete_kb_item():
                 after_obj = None
                 changed_fields = _compute_mod_changed_fields(before_obj, after_obj)
                 _attach_change_meta(mod_rec, {
-                    'source': '知识库管理',
+                    'source': change_source,
                     'before': before_obj,
                     'after': after_obj,
                     'changed_fields': changed_fields
@@ -5417,7 +5418,8 @@ def _is_matrix_source(source_val):
 
 def _is_kb_source(source_val):
     s = str(source_val or '')
-    return (not _is_matrix_source(s)) and ('知识库' in s or '智能映射' in s or not s)
+    # Non-matrix modification sources still represent KB content changes.
+    return not _is_matrix_source(s)
 
 def _get_field_from_mod(it, field):
     after = it.get('after') if isinstance(it, dict) else None

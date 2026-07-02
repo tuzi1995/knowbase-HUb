@@ -261,7 +261,11 @@ let kbCompareState = {
     mergeDraft: null,
     importCollapsed: false,
     source: 'manual',
-    loading: false
+    loading: false,
+    submittingDraft: false,
+    selectedDraftFields: null,
+    selectedDraftDeletes: null,
+    submitResult: null
 };
 
 const KB_EMBED_MESSAGE_SOURCE = 'kmatrix-kb-edit';
@@ -9571,6 +9575,77 @@ function renderKBCompareDraftValue(value, limit = 220) {
     return `<div class="kb-compare-draft-value" title="${_escapeAttr(text)}">${escapeHtml(short)}</div>`;
 }
 
+function ensureKBCompareDraftSelection(draft) {
+    if (!draft) return;
+    const fieldKeys = (draft.fields || []).map(field => String(field.key || '').trim()).filter(Boolean);
+    const deleteIds = (draft.deleteIds || []).map(id => String(id || '').trim()).filter(Boolean);
+    const currentFieldSet = kbCompareState.selectedDraftFields instanceof Set
+        ? kbCompareState.selectedDraftFields
+        : new Set(fieldKeys);
+    const currentDeleteSet = kbCompareState.selectedDraftDeletes instanceof Set
+        ? kbCompareState.selectedDraftDeletes
+        : new Set(deleteIds);
+
+    kbCompareState.selectedDraftFields = new Set(fieldKeys.filter(key => currentFieldSet.has(key)));
+    kbCompareState.selectedDraftDeletes = new Set(deleteIds.filter(id => currentDeleteSet.has(id)));
+}
+
+function getKBCompareDraftSelection(draft) {
+    ensureKBCompareDraftSelection(draft);
+    const fieldSet = kbCompareState.selectedDraftFields || new Set();
+    const deleteSet = kbCompareState.selectedDraftDeletes || new Set();
+    const fields = (draft?.fields || []).filter(field => fieldSet.has(String(field.key || '').trim()));
+    const deleteIds = (draft?.deleteIds || []).filter(id => deleteSet.has(String(id || '').trim()));
+    return { fields, deleteIds };
+}
+
+function resetKBCompareDraftSelection(draft) {
+    kbCompareState.selectedDraftFields = new Set((draft?.fields || []).map(field => String(field.key || '').trim()).filter(Boolean));
+    kbCompareState.selectedDraftDeletes = new Set((draft?.deleteIds || []).map(id => String(id || '').trim()).filter(Boolean));
+}
+
+function toggleKBCompareDraftField(fieldKey, checked) {
+    const draft = kbCompareState.mergeDraft;
+    ensureKBCompareDraftSelection(draft);
+    const key = String(fieldKey || '').trim();
+    if (!key) return;
+    if (checked) kbCompareState.selectedDraftFields.add(key);
+    else kbCompareState.selectedDraftFields.delete(key);
+    kbCompareState.submitResult = null;
+    renderKBCompareMergeDraft();
+}
+
+function toggleKBCompareDraftDelete(deleteId, checked) {
+    const draft = kbCompareState.mergeDraft;
+    ensureKBCompareDraftSelection(draft);
+    const id = String(deleteId || '').trim();
+    if (!id) return;
+    if (checked) kbCompareState.selectedDraftDeletes.add(id);
+    else kbCompareState.selectedDraftDeletes.delete(id);
+    kbCompareState.submitResult = null;
+    renderKBCompareMergeDraft();
+}
+
+function toggleKBCompareDraftFields(checked) {
+    const draft = kbCompareState.mergeDraft;
+    if (!draft) return;
+    kbCompareState.selectedDraftFields = checked
+        ? new Set((draft.fields || []).map(field => String(field.key || '').trim()).filter(Boolean))
+        : new Set();
+    kbCompareState.submitResult = null;
+    renderKBCompareMergeDraft();
+}
+
+function toggleKBCompareDraftDeletes(checked) {
+    const draft = kbCompareState.mergeDraft;
+    if (!draft) return;
+    kbCompareState.selectedDraftDeletes = checked
+        ? new Set((draft.deleteIds || []).map(id => String(id || '').trim()).filter(Boolean))
+        : new Set();
+    kbCompareState.submitResult = null;
+    renderKBCompareMergeDraft();
+}
+
 function renderKBCompareMergeDraft() {
     const el = document.getElementById('kbCompareMergeDraft');
     if (!el) return;
@@ -9585,24 +9660,61 @@ function renderKBCompareMergeDraft() {
         return;
     }
 
+    ensureKBCompareDraftSelection(draft);
     const changedFields = draft.fields.filter(field => field.changed);
+    const selection = getKBCompareDraftSelection(draft);
+    const selectedChangedFields = selection.fields.filter(field => field.changed);
+    const fieldKeys = (draft.fields || []).map(field => String(field.key || '').trim()).filter(Boolean);
+    const selectedFieldCount = selection.fields.length;
+    const selectedDeleteCount = selection.deleteIds.length;
+    const allFieldsChecked = fieldKeys.length > 0 && selectedFieldCount === fieldKeys.length;
+    const someFieldsChecked = selectedFieldCount > 0 && selectedFieldCount < fieldKeys.length;
+    const allDeletesChecked = draft.deleteIds.length > 0 && selectedDeleteCount === draft.deleteIds.length;
+    const someDeletesChecked = selectedDeleteCount > 0 && selectedDeleteCount < draft.deleteIds.length;
+    const submitResult = kbCompareState.submitResult;
+    const isSubmitting = !!kbCompareState.submittingDraft;
+    const canSubmitDraft = draft.table === 'knowledge_base_v1' && !isSubmitting && (selectedChangedFields.length > 0 || selectedDeleteCount > 0);
+    const fieldSelectAllAttrs = [
+        allFieldsChecked ? 'checked' : '',
+        someFieldsChecked ? 'data-indeterminate="true"' : ''
+    ].filter(Boolean).join(' ');
+    const deleteSelectAllAttrs = [
+        allDeletesChecked ? 'checked' : '',
+        someDeletesChecked ? 'data-indeterminate="true"' : ''
+    ].filter(Boolean).join(' ');
     const deleteRows = draft.deleteIds.length
-        ? draft.deleteIds.map(id => `<span class="kb-compare-id-chip is-duplicate">${escapeHtml(id)}</span>`).join('')
+        ? draft.deleteIds.map(id => {
+            const safeId = String(id || '').trim();
+            const checked = kbCompareState.selectedDraftDeletes.has(safeId) ? 'checked' : '';
+            return `
+                <label class="kb-compare-draft-check-chip">
+                    <input type="checkbox" ${checked} onchange="toggleKBCompareDraftDelete(${kbCompareJsString(safeId)}, this.checked)">
+                    <span class="kb-compare-id-chip is-duplicate">${escapeHtml(safeId)}</span>
+                </label>
+            `;
+        }).join('')
         : '<span class="kb-compare-muted">无</span>';
     const unsupported = draft.unsupportedFields.length
         ? `<div class="kb-compare-draft-warning">以下差异字段当前不会自动填入编辑弹窗：${draft.unsupportedFields.map(f => escapeHtml(f.label)).join('、')}</div>`
         : '';
+    const submitStatus = submitResult
+        ? `<div class="kb-compare-draft-status is-${submitResult.success ? 'success' : 'error'}">${escapeHtml(submitResult.message || '')}</div>`
+        : (draft.table === 'knowledge_base_v1'
+            ? `<div class="kb-compare-draft-status">当前选中 ${selectedChangedFields.length} 个字段变更、${selectedDeleteCount} 条删除建议；提交后只把选中项写入修改记录，未选项保留在草稿中继续调整。</div>`
+            : '<div class="kb-compare-draft-status is-warning">前刻库仅用于对比，不能直接提交落地。</div>');
 
     el.innerHTML = `
         <div class="kb-compare-draft-head">
             <div>
                 <h3>合并草稿</h3>
-                <p>编辑 ${escapeHtml(draft.editId)}，建议删除 ${draft.deleteIds.length} 条，字段变更 ${changedFields.length} 项。</p>
+                <p>编辑 ${escapeHtml(draft.editId)}，建议删除 ${draft.deleteIds.length} 条，字段变更 ${changedFields.length} 项；已选择提交 ${selectedChangedFields.length} 项字段变更、${selectedDeleteCount} 条删除建议。</p>
             </div>
             <div class="kb-compare-draft-action-stack">
                 <button type="button" class="primary-btn btn-primary-gradient" onclick="openKBCompareDraftEditor()">打开编辑主记录</button>
+                <button type="button" class="primary-btn btn-primary-gradient" onclick="submitKBCompareMergeDraft()" ${canSubmitDraft ? '' : 'disabled'}>${isSubmitting ? '提交中...' : '提交到修改记录'}</button>
             </div>
         </div>
+        ${submitStatus}
         <div class="kb-compare-decision-grid">
             <div class="kb-compare-decision-card is-edit">
                 <span>编辑主记录</span>
@@ -9611,13 +9723,13 @@ function renderKBCompareMergeDraft() {
             </div>
             <div class="kb-compare-decision-card is-delete">
                 <span>建议删除</span>
-                <strong>${draft.deleteIds.length}</strong>
-                <small>条重复记录</small>
+                <strong>${selectedDeleteCount}/${draft.deleteIds.length}</strong>
+                <small>已选择 / 全部</small>
             </div>
             <div class="kb-compare-decision-card is-change">
                 <span>将更新</span>
-                <strong>${changedFields.length}</strong>
-                <small>个字段</small>
+                <strong>${selectedChangedFields.length}/${changedFields.length}</strong>
+                <small>已选择 / 差异字段</small>
             </div>
             <div class="kb-compare-decision-card ${draft.unsupportedFields.length ? 'is-review' : 'is-stable'}">
                 <span>未自动填入</span>
@@ -9631,7 +9743,13 @@ function renderKBCompareMergeDraft() {
                 <button type="button" class="kb-compare-id-link" onclick="searchKBById(${kbCompareJsString(draft.editId)})">${escapeHtml(draft.editId)}</button>
             </div>
             <div class="kb-compare-draft-op">
-                <span>删除建议</span>
+                <div class="kb-compare-draft-select-head">
+                    <label class="kb-compare-draft-checkbox">
+                        <input type="checkbox" ${deleteSelectAllAttrs} onchange="toggleKBCompareDraftDeletes(this.checked)" ${draft.deleteIds.length ? '' : 'disabled'}>
+                        <span>删除建议</span>
+                    </label>
+                    <small>${selectedDeleteCount}/${draft.deleteIds.length}</small>
+                </div>
                 <div class="kb-compare-chip-list">${deleteRows}</div>
             </div>
         </div>
@@ -9640,6 +9758,9 @@ function renderKBCompareMergeDraft() {
             <table class="kb-compare-summary-table kb-compare-draft-table">
                 <thead>
                     <tr>
+                        <th class="kb-compare-draft-select-col">
+                            <input type="checkbox" ${fieldSelectAllAttrs} onchange="toggleKBCompareDraftFields(this.checked)" aria-label="选择全部草稿字段">
+                        </th>
                         <th>字段</th>
                         <th>采用策略</th>
                         <th>来源</th>
@@ -9649,7 +9770,10 @@ function renderKBCompareMergeDraft() {
                 </thead>
                 <tbody>
                     ${draft.fields.map(field => `
-                        <tr class="${field.changed ? 'is-pending' : ''}">
+                        <tr class="${field.changed ? 'is-pending' : ''} ${kbCompareState.selectedDraftFields.has(String(field.key || '').trim()) ? 'is-selected' : ''}">
+                            <td class="kb-compare-draft-select-col">
+                                <input type="checkbox" ${kbCompareState.selectedDraftFields.has(String(field.key || '').trim()) ? 'checked' : ''} onchange="toggleKBCompareDraftField(${kbCompareJsString(field.key)}, this.checked)" aria-label="选择提交 ${_escapeAttr(field.label)}">
+                            </td>
                             <td>
                                 <div class="kb-compare-field-cell">
                                     <strong>${escapeHtml(field.label)}</strong>
@@ -9666,6 +9790,9 @@ function renderKBCompareMergeDraft() {
             </table>
         </div>
     `;
+    el.querySelectorAll('input[data-indeterminate="true"]').forEach(input => {
+        input.indeterminate = true;
+    });
 }
 
 function renderKBCompareResults() {
@@ -9745,6 +9872,7 @@ async function runKBCompareImport() {
             baseRowId: baseRow ? getKBCompareRowId(baseRow) : '',
             fieldChoices: {},
             mergeDraft: null,
+            submitResult: null,
             importCollapsed: rows.length > 0,
             loading: false
         };
@@ -9768,6 +9896,7 @@ function setKBCompareBaseRow(rowId) {
     if (!exists) return;
     kbCompareState.baseRowId = id;
     kbCompareState.mergeDraft = null;
+    kbCompareState.submitResult = null;
     renderKBCompareResults();
 }
 
@@ -9779,6 +9908,7 @@ function setKBCompareFieldChoice(fieldKey, rowId) {
     if (!field || !exists || !isKBCompareEditableField(field)) return;
     kbCompareState.fieldChoices = { ...(kbCompareState.fieldChoices || {}), [key]: id };
     kbCompareState.mergeDraft = null;
+    kbCompareState.submitResult = null;
     renderKBCompareResults();
 }
 
@@ -9794,6 +9924,8 @@ function generateKBCompareMergeDraft() {
         return;
     }
     kbCompareState.mergeDraft = draft;
+    resetKBCompareDraftSelection(draft);
+    kbCompareState.submitResult = null;
     renderKBCompareResults();
     const el = document.getElementById('kbCompareMergeDraft');
     try { el?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch {}
@@ -9827,6 +9959,150 @@ async function openKBCompareDraftEditor() {
     setTimeout(() => applyKBCompareDraftDigestToEditor(draft.digest), 0);
 }
 
+function buildKBCompareSubmitPayload(draft, selectedFields = null) {
+    const baseRow = (kbCompareState.rows || []).find(row => getKBCompareRowId(row) === draft?.editId) || {};
+    const digest = {
+        question_wiki_id: draft?.editId || getKBCompareRowId(baseRow) || '',
+        product_category_name: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'product_category_name')) || '',
+        question_type: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'question_type')) || '',
+        if_bm25: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'if_bm25')) || 'false',
+        question: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'question')) || '',
+        answer: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'answer')) || '',
+        answer_type: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'answer_type')) || '',
+        product_name: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'product_name')) || '',
+        similar_questions: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'similar_questions')) || '',
+        error_list: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'error_list')) || '',
+        keyword_list: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'keyword_list')) || '',
+        image_urls: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'image_urls')) || '',
+        video_urls: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'video_urls')) || '',
+        file_urls: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'file_urls')) || '',
+        link_type: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'link_type')) || '',
+        link_url: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'link_url')) || '',
+        kb_tags_input: getKBCompareFieldEditValue(baseRow, KB_COMPARE_FIELDS.find(f => f.key === 'kb_tags')) || ''
+    };
+    (selectedFields || draft?.fields || []).forEach(field => {
+        if (field?.formField) digest[field.formField] = field.value;
+    });
+    const payload = {
+        ...digest,
+        question_wiki_id: draft?.editId || digest.question_wiki_id || '',
+        change_source: '知识对比'
+    };
+    const listFields = ['similar_questions', 'error_list', 'keyword_list', 'image_urls', 'video_urls', 'file_urls'];
+    listFields.forEach(field => {
+        if (payload[field] === undefined || payload[field] === null) return;
+        payload[field] = parseSmartListValue(payload[field], {
+            splitOnAsciiComma: true,
+            splitOnChineseCommaWhenUrlList: field !== 'similar_questions' && field !== 'keyword_list',
+            isUrlList: field === 'image_urls' || field === 'video_urls' || field === 'file_urls'
+        });
+    });
+    if (payload.product_name !== undefined) {
+        payload.product_name = normalizeProductsListText(payload.product_name);
+    }
+    if (payload.product_category_name !== undefined) {
+        payload.product_category_name = parseSmartListValue(payload.product_category_name, { splitOnAsciiComma: true }).join(',');
+    }
+    if (payload.link_url !== undefined) {
+        payload.link_url = parseSmartListValue(payload.link_url, {
+            splitOnAsciiComma: true,
+            splitOnChineseCommaWhenUrlList: true,
+            isUrlList: true
+        }).join('\n');
+    }
+    if (!payload.if_bm25) payload.if_bm25 = 'false';
+    delete payload.kb_tags_input;
+    return payload;
+}
+
+async function syncKBCompareDraftTags(draft, savedWikiId, selectedFields = null) {
+    const tagField = (selectedFields || draft?.fields || []).find(field => field?.key === 'kb_tags');
+    if (!tagField) return;
+    const tagNames = __kbParseTagNames(tagField.value || '');
+    const wikiId = String(savedWikiId || draft?.editId || '').trim();
+    if (!wikiId) return;
+    const res = await api('/kb/item/tags', 'PUT', {
+        libraryType: 'current',
+        question_wiki_id: wikiId,
+        tagNames
+    });
+    if (!res || !res.success) {
+        throw new Error('标签保存失败: ' + (res?.message || '未知错误'));
+    }
+}
+
+async function submitKBCompareMergeDraft() {
+    const draft = kbCompareState.mergeDraft || buildKBCompareMergeDraft();
+    if (!draft) {
+        if (typeof showToast === 'function') showToast('请先生成合并草稿', 'warning');
+        return;
+    }
+    if (draft.table !== 'knowledge_base_v1') {
+        if (typeof showToast === 'function') showToast('前刻库仅用于对比，请切换到此刻库后再提交', 'warning');
+        return;
+    }
+    if (kbCompareState.submittingDraft) return;
+
+    const selection = getKBCompareDraftSelection(draft);
+    const selectedChangedFields = selection.fields.filter(field => field.changed);
+    const selectedDeleteIds = selection.deleteIds;
+    if (!selectedChangedFields.length && !selectedDeleteIds.length) {
+        if (typeof showToast === 'function') showToast('请先勾选要提交的字段变更或删除建议', 'warning');
+        return;
+    }
+
+    const message = `将保存主记录 ${draft.editId} 的 ${selectedChangedFields.length} 个已选字段变更，并把 ${selectedDeleteIds.length} 条已选删除建议写入修改记录。未勾选项会继续保留在草稿中。确认继续？`;
+    const ok = await showDangerConfirmModal('提交合并草稿', message, '确认提交');
+    if (!ok) return;
+
+    kbCompareState.submittingDraft = true;
+    kbCompareState.submitResult = null;
+    renderKBCompareResults();
+
+    try {
+        let saveRes = { success: true, no_change: true, question_wiki_id: draft.editId };
+        let savedWikiId = String(draft.editId || '').trim();
+        if (selectedChangedFields.length > 0) {
+            const savePayload = buildKBCompareSubmitPayload(draft, selectedChangedFields);
+            saveRes = await api('/kb/update', 'POST', savePayload);
+            if (!saveRes || !saveRes.success) {
+                throw new Error(saveRes?.message || saveRes?.error || '主记录保存失败');
+            }
+            savedWikiId = String(saveRes.question_wiki_id || draft.editId || '').trim();
+            await syncKBCompareDraftTags(draft, savedWikiId, selectedChangedFields);
+        }
+
+        let deleteCount = 0;
+        if (selectedDeleteIds.length > 0) {
+            const deleteRes = await api('/kb/delete', 'POST', {
+                ids: selectedDeleteIds,
+                change_source: '知识对比'
+            });
+            if (!deleteRes || !deleteRes.success) {
+                throw new Error(deleteRes?.message || deleteRes?.error || '删除建议提交失败');
+            }
+            deleteCount = Number(deleteRes.count || selectedDeleteIds.length || 0);
+        }
+
+        clearKBCache();
+        if (typeof loadModifications === 'function') loadModifications(1);
+        kbCompareState.submitResult = {
+            success: true,
+            message: `已写入修改记录：主记录 ${savedWikiId} ${saveRes.no_change ? '无字段变化' : '已保存'}，删除建议 ${deleteCount} 条。`
+        };
+        if (typeof showToast === 'function') showToast(kbCompareState.submitResult.message, 'success');
+    } catch (e) {
+        kbCompareState.submitResult = {
+            success: false,
+            message: `提交失败：${e?.message || String(e)}`
+        };
+        if (typeof showToast === 'function') showToast(kbCompareState.submitResult.message, 'error');
+    } finally {
+        kbCompareState.submittingDraft = false;
+        renderKBCompareResults();
+    }
+}
+
 function clearKBCompareWorkspace() {
     kbCompareState = {
         table: getKBCompareTable(),
@@ -9841,7 +10117,9 @@ function clearKBCompareWorkspace() {
         mergeDraft: null,
         importCollapsed: false,
         source: 'manual',
-        loading: false
+        loading: false,
+        submittingDraft: false,
+        submitResult: null
     };
     const input = document.getElementById('kbCompareIdInput');
     if (input) input.value = '';
@@ -9935,6 +10213,11 @@ window.setKBCompareFieldChoice = setKBCompareFieldChoice;
 window.toggleKBCompareImportCollapsed = toggleKBCompareImportCollapsed;
 window.generateKBCompareMergeDraft = generateKBCompareMergeDraft;
 window.openKBCompareDraftEditor = openKBCompareDraftEditor;
+window.toggleKBCompareDraftField = toggleKBCompareDraftField;
+window.toggleKBCompareDraftDelete = toggleKBCompareDraftDelete;
+window.toggleKBCompareDraftFields = toggleKBCompareDraftFields;
+window.toggleKBCompareDraftDeletes = toggleKBCompareDraftDeletes;
+window.submitKBCompareMergeDraft = submitKBCompareMergeDraft;
 window.runKBCompareImport = runKBCompareImport;
 window.clearKBCompareWorkspace = clearKBCompareWorkspace;
 window.handleKBCompareFileImport = handleKBCompareFileImport;

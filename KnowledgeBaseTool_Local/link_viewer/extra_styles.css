@@ -5082,7 +5082,38 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
 
 .kb-compare-draft-action-stack {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
+    gap: 8px;
+}
+
+.kb-compare-draft-status {
+    margin: -2px 0 12px;
+    padding: 9px 10px;
+    border: 1px solid #D8E5F8;
+    border-radius: 8px;
+    background: #F8FAFC;
+    color: #475569;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.kb-compare-draft-status.is-success {
+    border-color: #BBF7D0;
+    background: #F0FDF4;
+    color: #166534;
+}
+
+.kb-compare-draft-status.is-error {
+    border-color: #FECACA;
+    background: #FFF7F7;
+    color: #991B1B;
+}
+
+.kb-compare-draft-status.is-warning {
+    border-color: #FDE68A;
+    background: #FFFBEB;
+    color: #92400E;
 }
 
 .kb-compare-decision-grid {
@@ -5159,6 +5190,44 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
     font-weight: 700;
 }
 
+.kb-compare-draft-select-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.kb-compare-draft-select-head small {
+    color: #64748B;
+    font-size: 12px;
+}
+
+.kb-compare-draft-checkbox,
+.kb-compare-draft-check-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    color: #334155;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.kb-compare-draft-checkbox input,
+.kb-compare-draft-check-chip input,
+.kb-compare-draft-select-col input {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    cursor: pointer;
+}
+
+.kb-compare-draft-check-chip {
+    font-weight: 500;
+}
+
 .kb-compare-draft-warning {
     margin-bottom: 12px;
     padding: 9px 10px;
@@ -5178,8 +5247,22 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
     min-width: 860px;
 }
 
+.kb-compare-draft-select-col {
+    width: 42px;
+    min-width: 42px;
+    text-align: center;
+}
+
 .kb-compare-draft-table tr.is-pending td {
     background: #FFFBEB;
+}
+
+.kb-compare-draft-table tr.is-selected td {
+    box-shadow: inset 0 0 0 999px rgba(37, 99, 235, 0.035);
+}
+
+.kb-compare-draft-table tr.is-selected td:first-child {
+    box-shadow: inset 3px 0 0 #2563EB, inset 0 0 0 999px rgba(37, 99, 235, 0.035);
 }
 
 .kb-compare-strategy-chip {
