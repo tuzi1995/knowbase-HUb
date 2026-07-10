@@ -4574,6 +4574,14 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
     margin: 10px 0 12px;
 }
 
+.kb-compare-import-actions .primary-btn {
+    flex: 1 1 132px;
+}
+
+.kb-compare-import-actions .action-btn {
+    flex: 1 1 132px;
+}
+
 .kb-compare-validation,
 .kb-compare-summary,
 .kb-compare-detail {
@@ -4828,6 +4836,11 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
     background: #F8FAFC;
 }
 
+.kb-compare-detail-main {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
 .kb-compare-detail-head h3 {
     margin: 0 0 4px;
     color: #0F172A;
@@ -4867,10 +4880,31 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
     font-size: 12px;
 }
 
+.kb-compare-detail-side {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+    max-width: 320px;
+}
+
 .kb-compare-legend span {
     display: inline-flex;
     align-items: center;
     gap: 5px;
+}
+
+.kb-compare-detail-actions {
+    display: flex;
+    justify-content: flex-end;
+    width: 100%;
+}
+
+.kb-compare-generate-draft-btn {
+    min-height: 34px;
+    padding: 7px 12px;
+    white-space: nowrap;
 }
 
 .legend-dot {
@@ -4898,6 +4932,22 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
     background: #FEF3C7;
     border: 1px solid #FDE68A;
     color: #92400E;
+}
+
+.legend-dot.is-model-overlap,
+.kb-compare-value-chip.is-model-overlap {
+    background: #DCFCE7;
+    border: 1px solid #86EFAC;
+    color: #166534;
+    font-weight: 700;
+}
+
+.legend-dot.is-model-different,
+.kb-compare-value-chip.is-model-different {
+    background: #FEF3C7;
+    border: 1px solid #FDE68A;
+    color: #92400E;
+    font-weight: 700;
 }
 
 .kb-compare-detail-grid {
@@ -5329,8 +5379,16 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
 
     .kb-compare-import-tools,
     .kb-compare-result-tools,
-    .kb-compare-card-actions {
+    .kb-compare-card-actions,
+    .kb-compare-detail-side,
+    .kb-compare-detail-actions {
+        align-items: flex-start;
         justify-content: flex-start;
+    }
+
+    .kb-compare-detail-side {
+        max-width: none;
+        width: 100%;
     }
 
     .kb-compare-draft-ops {

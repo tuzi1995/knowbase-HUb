@@ -15,7 +15,7 @@
   
   <!-- 原有样式 -->
   <link rel="stylesheet" href="styles.css?v=55">
-  <link rel="stylesheet" href="extra_styles.css?v=37">
+  <link rel="stylesheet" href="extra_styles.css?v=39">
   <!-- 滚动性能优化 - 暂时禁用 -->
   <!-- <link rel="stylesheet" href="scroll-performance.css?v=2"> -->
   <!-- 加载状态提示样式 -->
@@ -611,8 +611,6 @@
                     <div class="text-muted kb-compare-desc">按 ID 批量导入知识库记录，完成匹配校验、字段差异与合并草稿。</div>
                 </div>
                 <div class="action-bar kb-compare-actions">
-                    <button onclick="runKBCompareImport()" class="primary-btn btn-primary-gradient">开始对比</button>
-                    <button id="kbCompareGenerateDraftBtn" onclick="generateKBCompareMergeDraft()" class="primary-btn btn-primary-gradient" disabled>生成合并草稿</button>
                     <button onclick="clearKBCompareWorkspace()" class="action-btn btn-secondary-outline">清空</button>
                     <button onclick="switchTab('kbView')" class="action-btn btn-secondary-outline">返回知识库</button>
                 </div>
@@ -639,6 +637,7 @@
 
                         <div class="kb-compare-import-actions">
                             <input type="file" id="kbCompareFileInput" accept=".txt,.csv,.xlsx,.xls" class="d-none" onchange="handleKBCompareFileImport(this.files && this.files[0])">
+                            <button type="button" id="kbCompareRunBtn" onclick="runKBCompareImport()" class="primary-btn btn-primary-gradient">开始对比</button>
                             <button type="button" onclick="document.getElementById('kbCompareFileInput')?.click()" class="action-btn btn-secondary-outline">导入 Excel/CSV</button>
                         </div>
 
@@ -1737,7 +1736,7 @@
                 </div>
                 <div class="mod-summary-actions">
                     <button onclick="smartMergeExportModifications()" class="primary-btn">智能合并导出</button>
-                    <button onclick="createArchiveFromCurrent()" class="action-btn">🗂️ 归档当前结果</button>
+                    <button id="modArchiveBtn" onclick="createArchiveFromCurrent()" class="action-btn" title="未勾选时归档当前待归档结果">🗂️ 归档当前结果</button>
                     <button onclick="exportRawModifications()" class="action-btn">📤 导出原始记录</button>
                     <button onclick="loadModifications(1)" class="action-btn">🔄 刷新结果</button>
                     <button onclick="deleteSelectedModifications()" class="danger-btn">🗑 删除选中</button>
@@ -1804,7 +1803,7 @@
                 <table class="kb-table" id="modTable">
                     <thead>
                         <tr>
-                            <th class="col-check" style="width: 44px; text-align:center;"><input type="checkbox" id="modSelectAll" aria-label="全选当前页可删除的修改记录"></th>
+                            <th class="col-check" style="width: 44px; text-align:center;"><input type="checkbox" id="modSelectAll" aria-label="全选当前页可归档或删除的修改记录"></th>
                             <th class="col-op" style="width: 90px;">操作</th>
                             <th class="col-id sortable" data-mod-sort-by="kb_id" style="width: 160px; cursor: pointer;">问题编号</th>
                             <th class="col-question sortable" data-mod-sort-by="question" style="width: 260px; cursor: pointer;">问题</th>
@@ -3501,7 +3500,7 @@ G10 系列: G10S, G10S Pro"></textarea>
         </div>
     </div>
 
-    <script src="app_v8.js?v=135"></script>
+    <script src="app_v8.js?v=139"></script>
 
   <!-- KB Tag Filter Modal -->
   <div id="kbTagFilterModal" class="modal">
@@ -3540,7 +3539,7 @@ G10 系列: G10S, G10S Pro"></textarea>
 
   <!-- Copy Config Modal -->
   <div id="copyConfigModal" class="modal">
-    <div class="modal-content" style="width: 600px;">
+    <div class="modal-content" style="width: 640px;">
         <div class="modal-header" style="border-bottom: 1px solid #eee; padding-bottom: 15px;">
             <h3 style="margin: 0; color: #333;"><i class="fas fa-clipboard-check" style="color: #9B59B6; margin-right: 10px;"></i> 复制机型配置</h3>
             <button class="close-modal-btn" onclick="closeCopyConfigModal()">&times;</button>
@@ -3567,6 +3566,25 @@ G10 系列: G10S, G10S Pro"></textarea>
                     <select id="copySourceCategory" class="form-select" onchange="fetchCopyStats()" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></select>
                     <div class="form-hint" id="copyCategoryStats" style="font-size: 12px; color: #666; margin-top: 5px; min-height: 18px;">请选择源分类...</div>
                 </div>
+            </div>
+
+            <div class="form-group" style="margin-top: 18px; margin-bottom: 15px; background: #f8f9fb; border: 1px solid #e5e7eb; padding: 14px; border-radius: 6px;">
+                <label class="form-label" style="display: block; margin-bottom: 10px; font-weight: bold;">克隆范围</label>
+                <div class="radio-group" style="display: flex; flex-direction: column; gap: 8px;">
+                    <label style="cursor: pointer; display: flex; align-items: flex-start; gap: 8px;">
+                        <input type="radio" name="copyScope" value="all" checked onchange="updateCopyScopeSummary()" style="margin-top: 3px;">
+                        <span><b>全部源数据</b><br><span style="font-size: 12px; color: #666;">沿用原逻辑，克隆源机型或源分类下的全部知识条目。</span></span>
+                    </label>
+                    <label style="cursor: pointer; display: flex; align-items: flex-start; gap: 8px;">
+                        <input type="radio" name="copyScope" value="filtered" onchange="updateCopyScopeSummary()" style="margin-top: 3px;">
+                        <span><b>当前筛选结果</b><span id="copyScopeFilteredCount" style="display: inline-flex; margin-left: 8px; padding: 1px 7px; border-radius: 999px; border: 1px solid #d1d5db; background: #fff; color: #6b7280; font-size: 12px; font-weight: normal; line-height: 18px;">待选择源</span><br><span style="font-size: 12px; color: #666;">使用页面上 ID、问题、答案、分类、机型、修改状态等筛选后的范围。</span></span>
+                    </label>
+                    <label style="cursor: pointer; display: flex; align-items: flex-start; gap: 8px;">
+                        <input type="radio" name="copyScope" value="selected" onchange="updateCopyScopeSummary()" style="margin-top: 3px;">
+                        <span><b>已勾选数据</b><span id="copyScopeSelectedCount" style="display: inline-flex; margin-left: 8px; padding: 1px 7px; border-radius: 999px; border: 1px solid #d1d5db; background: #fff; color: #6b7280; font-size: 12px; font-weight: normal; line-height: 18px;">待选择源</span><br><span style="font-size: 12px; color: #666;">仅克隆表格中已勾选的知识条目。</span></span>
+                    </label>
+                </div>
+                <div class="form-hint" id="copyScopeSummary" style="font-size: 12px; color: #555; margin-top: 10px; min-height: 18px;">将克隆全部源数据。</div>
             </div>
 
             <div class="form-group" style="margin-top: 20px; margin-bottom: 15px;">

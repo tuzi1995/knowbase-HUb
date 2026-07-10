@@ -56,7 +56,14 @@ try:
 except ImportError:
     HAS_PSYCOPG2 = False
 
-app = Flask(__name__, static_folder='link_viewer', static_url_path='')
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_INSTANCE_DIR = os.path.join(_BASE_DIR, 'instance')
+app = Flask(
+    __name__,
+    static_folder=os.path.join(_BASE_DIR, 'link_viewer'),
+    static_url_path='',
+    instance_path=_INSTANCE_DIR,
+)
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 app.config['SESSION_COOKIE_NAME'] = os.environ.get('KMATRIX_SESSION_COOKIE_NAME', 'kmatrix_8085_session')
 
@@ -79,8 +86,7 @@ def _get_cors_allowed_origins():
 
 CORS(app, supports_credentials=True, origins=_get_cors_allowed_origins())
 app.config['SECRET_KEY'] = os.environ.get('KMATRIX_SECRET_KEY', 'dev-only-change-me')
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-_DB_PATH = os.path.join(_BASE_DIR, 'instance', 'data.db')
+_DB_PATH = os.path.join(_INSTANCE_DIR, 'data.db')
 BADCASE_WORKBENCH_SOURCE = 'badcase标注工作台'
 os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)  # Ensure SQLite folder exists
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + _DB_PATH.replace('\\', '/')
@@ -207,6 +213,355 @@ class ProductMatrix(db.Model):
     __table_args__ = (
         db.UniqueConstraint('question_wiki_id', 'product_name', name='unique_matrix_item'),
     )
+
+def _matrix_scope_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text_value = str(value).strip().lower()
+    if text_value == '':
+        return default
+    if text_value in ('1', 'true', 't', 'yes', 'y', 'on'):
+        return True
+    if text_value in ('0', 'false', 'f', 'no', 'n', 'off'):
+        return False
+    return default
+
+def _matrix_scope_list(value, separators=r'[,，\n]+'):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, tuple) or isinstance(value, set):
+        raw_items = list(value)
+    else:
+        raw_items = re.split(separators, str(value))
+    items = [str(x).strip() for x in raw_items if str(x).strip()]
+    return list(OrderedDict.fromkeys(items))
+
+def _matrix_scope_normalize_name(value):
+    s = str(value or '')
+    s = s.replace('\u3000', ' ')
+    return re.sub(r'\s+', ' ', s).strip()
+
+def _matrix_scope_diff_compare_ids(ids_subq, selected_models):
+    models = [str(x).strip() for x in (selected_models or []) if str(x).strip()]
+    if len(models) < 2:
+        return []
+    rows_for_diff = ProductMatrix.query.filter(
+        ProductMatrix.question_wiki_id.in_(ids_subq),
+        ProductMatrix.product_name.in_(models)
+    ).all()
+    state_map = {}
+    for r in rows_for_diff:
+        wid_key = str(getattr(r, 'question_wiki_id', '') or '').strip()
+        product_key = str(getattr(r, 'product_name', '') or '').strip()
+        if not wid_key or product_key not in models:
+            continue
+        state_map.setdefault(wid_key, {})[product_key] = bool(getattr(r, 'is_configured', False))
+    out = []
+    for wid_key, states_by_model in state_map.items():
+        states = [bool(states_by_model.get(model, False)) for model in models]
+        if len(set(states)) > 1:
+            out.append(wid_key)
+    return sorted(out)
+
+def _matrix_scope_modified_ids(ids_subq, columns_list):
+    edit_query = db.session.query(ProductMatrix.question_wiki_id).filter(
+        ProductMatrix.question_wiki_id.in_(ids_subq)
+    ).filter(
+        or_(
+            ProductMatrix.edit_source.in_(['cell', 'bulk']),
+            ProductMatrix.manual_edit == True
+        )
+    )
+    wiki_ids_for_edits = [
+        str(r[0]).strip()
+        for r in edit_query.distinct().all()
+        if r and str(r[0]).strip()
+    ]
+    wiki_ids_for_edits = list(OrderedDict.fromkeys(wiki_ids_for_edits))
+    if not wiki_ids_for_edits:
+        return set()
+
+    source_products_map, source_ok = _fetch_kb_products_map('knowledge_base_v1', wiki_ids_for_edits)
+    if not source_ok:
+        raise RuntimeError('Failed to fetch source products')
+
+    source_norm_map = {}
+    for x in wiki_ids_for_edits:
+        source_norm_map[x] = set([
+            _matrix_scope_normalize_name(v)
+            for v in (source_products_map.get(x, set()) or set())
+            if _matrix_scope_normalize_name(v)
+        ])
+
+    cols_norm_set = set([
+        _matrix_scope_normalize_name(x)
+        for x in (columns_list or [])
+        if _matrix_scope_normalize_name(x)
+    ])
+
+    qy = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(wiki_ids_for_edits)).filter(
+        or_(
+            ProductMatrix.edit_source.in_(['cell', 'bulk']),
+            ProductMatrix.manual_edit == True
+        )
+    )
+    if columns_list:
+        qy = qy.filter(ProductMatrix.product_name.in_(columns_list))
+    matrix_rows = qy.all()
+
+    modified_ids = set()
+    for r in matrix_rows:
+        wid = str(getattr(r, 'question_wiki_id', '') or '').strip()
+        product_name = str(getattr(r, 'product_name', '') or '').strip()
+        if not wid or not product_name:
+            continue
+        product_norm = _matrix_scope_normalize_name(product_name)
+        if product_norm not in cols_norm_set:
+            continue
+        source_configured = product_norm in source_norm_map.get(wid, set())
+        current_configured = bool(getattr(r, 'is_configured', False))
+        if current_configured != source_configured:
+            modified_ids.add(wid)
+    return modified_ids
+
+def _resolve_matrix_filtered_scope_ids(filters):
+    filters = filters if isinstance(filters, dict) else {}
+
+    wid = str(filters.get('id') or filters.get('wid') or '').strip()
+    q = str(filters.get('q') or '').strip()
+    a = str(filters.get('a') or '').strip()
+    p = str(filters.get('p') or '').strip()
+    pc = str(filters.get('pc') or '').strip()
+    mc = str(filters.get('mc') or '').strip()
+    p_mode = str(filters.get('p_mode') or 'any').strip().lower()
+    p_models = _matrix_scope_list(filters.get('p_models'))
+    col_models = _matrix_scope_list(filters.get('col_models'), separators=r'[,，]+')
+    diff_compare = _matrix_scope_bool(filters.get('diff_compare'), False)
+
+    marks = filters.get('marks') if isinstance(filters.get('marks'), dict) else {}
+    if marks:
+        want_modified = _matrix_scope_bool(marks.get('modified'), True)
+        want_unmodified = _matrix_scope_bool(marks.get('unmodified'), True)
+    else:
+        want_modified = _matrix_scope_bool(filters.get('mark_modified'), True)
+        want_unmodified = _matrix_scope_bool(filters.get('mark_unmodified'), True)
+
+    if not (want_modified or want_unmodified):
+        return []
+
+    mappings = get_model_mappings()
+    allowed_models = []
+    if mc and mc in mappings and isinstance(mappings.get(mc), list):
+        allowed_models = [str(x) for x in mappings.get(mc) if x]
+
+    catalog = parse_product_catalog()
+    pc_models = []
+    if pc and pc in catalog and isinstance(catalog.get(pc), list):
+        pc_models = [str(x).strip() for x in catalog.get(pc) if x and str(x).strip()]
+
+    models_whitelist = set()
+    if pc_models:
+        models_whitelist = set([str(x) for x in pc_models if x])
+    if allowed_models:
+        if models_whitelist:
+            models_whitelist = models_whitelist.intersection(set([str(x) for x in allowed_models if x]))
+        else:
+            models_whitelist = set([str(x) for x in allowed_models if x])
+
+    selected_models_ordered = []
+    if col_models:
+        seen_models = set()
+        for model in col_models:
+            if model in seen_models:
+                continue
+            seen_models.add(model)
+            selected_models_ordered.append(model)
+        selected_set = set(selected_models_ordered)
+        if models_whitelist:
+            models_whitelist = models_whitelist.intersection(selected_set)
+        else:
+            models_whitelist = selected_set
+
+    columns_raw = filters.get('columns')
+    if isinstance(columns_raw, list) and columns_raw:
+        col_list = [
+            str(x).strip()
+            for x in columns_raw
+            if str(x).strip() and str(x).strip() != '测试型号'
+        ]
+    else:
+        col_query = MatrixColumn.query.order_by(MatrixColumn.sort_order)
+        if models_whitelist:
+            col_query = col_query.filter(MatrixColumn.product_name.in_(list(models_whitelist)))
+        if selected_models_ordered:
+            columns = col_query.filter(MatrixColumn.product_name.in_(selected_models_ordered)).all()
+            by_name = {
+                str(c.product_name): c
+                for c in columns
+                if c and str(getattr(c, 'product_name', '') or '').strip()
+            }
+            col_list = [m for m in selected_models_ordered if m in by_name]
+        else:
+            columns = col_query.all()
+            col_list = [c.product_name for c in columns]
+        col_list = [c for c in (col_list or []) if str(c or '').strip() and str(c or '').strip() != '测试型号']
+
+    if not col_list:
+        return []
+
+    base_query = db.session.query(ProductMatrix.question_wiki_id)
+    if wid:
+        base_query = base_query.filter(ProductMatrix.question_wiki_id.ilike(f'%{wid}%'))
+    if q:
+        base_query = base_query.filter(ProductMatrix.question_content.ilike(f'%{q}%'))
+    if a:
+        base_query = base_query.filter(ProductMatrix.answer_content.ilike(f'%{a}%'))
+
+    if p_models:
+        if p_mode == 'all':
+            subq = db.session.query(ProductMatrix.question_wiki_id)\
+                .filter(ProductMatrix.product_name.in_(p_models))\
+                .group_by(ProductMatrix.question_wiki_id)\
+                .having(func.count(func.distinct(ProductMatrix.product_name)) == len(p_models))\
+                .subquery()
+            base_query = base_query.filter(ProductMatrix.question_wiki_id.in_(subq))
+        else:
+            base_query = base_query.filter(ProductMatrix.product_name.in_(p_models))
+    elif p:
+        base_query = base_query.filter(ProductMatrix.product_name.ilike(f'%{p}%'))
+
+    if pc:
+        base_query = base_query.filter(ProductMatrix.product_category.ilike(f'%{pc}%'))
+
+    if mc and mc in mappings:
+        if allowed_models:
+            allowed_models = [str(x) for x in allowed_models if x]
+            n = len(allowed_models)
+            if n == 0:
+                base_query = base_query.filter(False)
+            else:
+                exact_ids_subq = db.session.query(ProductMatrix.question_wiki_id)\
+                    .filter(ProductMatrix.is_configured == True)\
+                    .group_by(ProductMatrix.question_wiki_id)\
+                    .having(func.count(func.distinct(ProductMatrix.product_name)) == n)\
+                    .having(func.count(func.distinct(case(
+                        (ProductMatrix.product_name.in_(allowed_models), ProductMatrix.product_name),
+                        else_=None
+                    ))) == n)\
+                    .subquery()
+                base_query = base_query.filter(ProductMatrix.question_wiki_id.in_(exact_ids_subq))
+        else:
+            base_query = base_query.filter(False)
+
+    base_ids_subq = base_query.distinct().subquery()
+    if diff_compare and len(selected_models_ordered) >= 2:
+        return _matrix_scope_diff_compare_ids(base_ids_subq, selected_models_ordered)
+
+    if want_modified and want_unmodified:
+        return [
+            str(row[0]).strip()
+            for row in base_query.distinct().order_by(ProductMatrix.question_wiki_id).all()
+            if row and str(row[0]).strip()
+        ]
+
+    modified_ids = _matrix_scope_modified_ids(base_ids_subq, col_list)
+    if want_modified and not want_unmodified:
+        return sorted(list(modified_ids))
+    if want_unmodified and not want_modified:
+        base_ids = [
+            str(row[0]).strip()
+            for row in base_query.distinct().order_by(ProductMatrix.question_wiki_id).all()
+            if row and str(row[0]).strip()
+        ]
+        return [x for x in base_ids if x not in modified_ids]
+    return []
+
+def _resolve_matrix_clone_scope_ids(scope, allow_empty_selected=False):
+    scope = scope if isinstance(scope, dict) else {}
+    scope_mode = str(scope.get('mode') or 'all').strip().lower()
+    if not scope_mode:
+        scope_mode = 'all'
+    if scope_mode not in ('all', 'selected', 'filtered'):
+        raise ValueError('Invalid clone scope')
+
+    scope_ids = None
+    if scope_mode == 'selected':
+        scope_ids = _matrix_scope_list(scope.get('wiki_ids') or scope.get('ids'))
+        if not scope_ids and not allow_empty_selected:
+            raise ValueError('No selected rows found for clone scope')
+    elif scope_mode == 'filtered':
+        scope_ids = _resolve_matrix_filtered_scope_ids(
+            scope.get('filters') if isinstance(scope.get('filters'), dict) else {}
+        )
+    return scope_mode, scope_ids
+
+def _resolve_matrix_clone_source_items(mode, source, scope_ids=None):
+    source_items = {}
+    source_products_to_remove = set()
+
+    mode = str(mode or '').strip()
+    source = str(source or '').strip()
+    if not mode or not source:
+        return source_items, source_products_to_remove
+
+    if mode == 'model':
+        source_query = ProductMatrix.query.filter_by(product_name=source, is_configured=True)
+        if scope_ids is not None:
+            source_query = source_query.filter(ProductMatrix.question_wiki_id.in_(scope_ids))
+        items = source_query.all()
+
+        if not items and ' ' in source:
+            source_query = ProductMatrix.query.filter_by(product_name=source.replace(' ', ''), is_configured=True)
+            if scope_ids is not None:
+                source_query = source_query.filter(ProductMatrix.question_wiki_id.in_(scope_ids))
+            items = source_query.all()
+
+        source_products_to_remove.add(source)
+        if ' ' in source:
+            source_products_to_remove.add(source.replace(' ', ''))
+        source_items = {item.question_wiki_id: item for item in items}
+    elif mode == 'category':
+        mappings = get_model_mappings()
+        if source in mappings:
+            allowed_models = [str(x) for x in (mappings[source] or []) if x]
+            n = len(allowed_models)
+            if n > 0:
+                source_products_to_remove.update([str(m) for m in allowed_models if m])
+                exact_query = db.session.query(ProductMatrix.question_wiki_id)\
+                    .filter(ProductMatrix.is_configured == True)
+                if scope_ids is not None:
+                    exact_query = exact_query.filter(ProductMatrix.question_wiki_id.in_(scope_ids))
+                exact_query = exact_query\
+                    .group_by(ProductMatrix.question_wiki_id)\
+                    .having(func.count(func.distinct(ProductMatrix.product_name)) == n)\
+                    .having(func.count(func.distinct(case(
+                        (ProductMatrix.product_name.in_(allowed_models), ProductMatrix.product_name),
+                        else_=None
+                    ))) == n)
+                exact_ids = exact_query.all()
+                valid_ids = [row[0] for row in exact_ids]
+                if valid_ids:
+                    all_rows = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(valid_ids)).all()
+                    for row in all_rows:
+                        if row.question_wiki_id not in source_items:
+                            source_items[row.question_wiki_id] = row
+        else:
+            category_query = ProductMatrix.query.filter(ProductMatrix.product_category == source)
+            if scope_ids is not None:
+                category_query = category_query.filter(ProductMatrix.question_wiki_id.in_(scope_ids))
+            items = category_query.all()
+            for item in items:
+                if item.question_wiki_id not in source_items:
+                    source_items[item.question_wiki_id] = item
+            source_products_to_remove.update([str(r.product_name) for r in items if r.product_name])
+
+    return source_items, source_products_to_remove
 
 class MatrixSubmitOperation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -6081,22 +6436,74 @@ def import_ops_excel(kind):
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
-def _collect_archive_candidates(client, operation_id=None):
+def _clean_modification_ids(values):
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw = values.strip()
+        if not raw:
+            values = []
+        else:
+            try:
+                parsed = json.loads(raw)
+                values = parsed if isinstance(parsed, list) else [parsed]
+            except Exception:
+                values = [v.strip() for v in raw.split(',')]
+    elif not isinstance(values, (list, tuple, set)):
+        values = [values]
+
+    cleaned = []
+    seen = set()
+    for v in (values or []):
+        if v is None or isinstance(v, bool):
+            continue
+        if isinstance(v, int):
+            item = v
+        else:
+            s = str(v).strip()
+            if not s:
+                continue
+            item = int(s) if re.fullmatch(r'\d+', s) else s
+        key = f'{type(item).__name__}:{item}'
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item)
+    return cleaned
+
+
+def _collect_archive_candidates(client, operation_id=None, ids=None):
     all_rows = client.select_all('knowledge_base_modifications', order_by='modification_time', order_dir='desc', page_size=1000) or []
     normalized = []
     raw_ids = []
     operation_id = str(operation_id or '').strip()
+    selected_ids = _clean_modification_ids(ids)
+    selected_id_set = {str(v).strip() for v in selected_ids if str(v).strip()}
     for r in all_rows:
+        rid = r.get('id') if isinstance(r, dict) else None
+        if selected_id_set and str(rid).strip() not in selected_id_set:
+            continue
         it = _normalize_mod_record(r)
         if not it:
             continue
         if operation_id and str(it.get('operation_id') or '').strip() != operation_id:
             continue
         normalized.append(it)
-        rid = r.get('id') if isinstance(r, dict) else None
         if rid is not None:
             raw_ids.append(rid)
     return normalized, raw_ids
+
+
+def _delete_modification_rows_by_ids(client, ids):
+    cleaned = _clean_modification_ids(ids)
+    if not cleaned:
+        return True, 0, ''
+    inner = ",".join([json.dumps(v, ensure_ascii=False) for v in cleaned])
+    in_filter = f"in.({inner})"
+    resp = client.delete('knowledge_base_modifications', {'id': in_filter})
+    if not resp or getattr(resp, 'status_code', 500) >= 400:
+        return False, 0, getattr(resp, "text", "") if resp else ''
+    return True, len(cleaned), ''
 
 @app.route('/api/archives/preview', methods=['GET'])
 @login_required
@@ -6106,7 +6513,9 @@ def preview_archive():
         return jsonify({'success': False, 'message': '本地主库未配置'}), 400
     try:
         operation_id = request.args.get('operation_id')
-        normalized, raw_ids = _collect_archive_candidates(client, operation_id=operation_id)
+        ids_params = request.args.getlist('ids')
+        ids = ids_params if len(ids_params) > 1 else (ids_params[0] if ids_params else None)
+        normalized, raw_ids = _collect_archive_candidates(client, operation_id=operation_id, ids=ids)
         samples = []
         for it in normalized[:5]:
             samples.append({
@@ -6120,6 +6529,7 @@ def preview_archive():
             'count': len(normalized),
             'delete_count': len(raw_ids),
             'operation_id': str(operation_id or '').strip() or None,
+            'selected_count': len(_clean_modification_ids(ids)),
             'samples': samples,
             'destructive': len(raw_ids) > 0
         })
@@ -6191,7 +6601,8 @@ def create_archive():
         return jsonify({'success': False, 'message': '本地主库未配置'}), 400
 
     try:
-        normalized, raw_ids = _collect_archive_candidates(client)
+        archive_ids = payload.get('ids')
+        normalized, raw_ids = _collect_archive_candidates(client, ids=archive_ids)
         if not normalized:
             return jsonify({'success': False, 'message': '没有待归档的修改记录'}), 400
 
@@ -6201,7 +6612,8 @@ def create_archive():
                 'requires_confirmation': True,
                 'message': '归档会把当前修改记录迁移到归档表，并删除当前列表中的对应记录，请确认后继续。',
                 'count': len(normalized),
-                'delete_count': len(raw_ids)
+                'delete_count': len(raw_ids),
+                'selected_count': len(_clean_modification_ids(archive_ids))
             }), 409
 
         expected_count = payload.get('expected_count')
@@ -6213,7 +6625,8 @@ def create_archive():
                         'requires_confirmation': True,
                         'message': f'待归档记录数已变化（确认时 {expected_count} 条，当前 {len(normalized)} 条），请重新确认。',
                         'count': len(normalized),
-                        'delete_count': len(raw_ids)
+                        'delete_count': len(raw_ids),
+                        'selected_count': len(_clean_modification_ids(archive_ids))
                     }), 409
             except Exception:
                 return jsonify({'success': False, 'message': 'expected_count 必须为数字'}), 400
@@ -6270,12 +6683,12 @@ def create_archive():
             chunk_size = 500
             for i in range(0, len(raw_ids), chunk_size):
                 chunk = raw_ids[i:i + chunk_size]
-                resp = client.delete_in('knowledge_base_modifications', 'id', chunk)
-                if not resp or getattr(resp, 'status_code', 500) >= 400:
-                    return jsonify({'success': False, 'message': f'归档已保存，但清理主库失败: {getattr(resp, "text", "")}'}), 500
-                deleted += len(chunk)
+                ok, count, message = _delete_modification_rows_by_ids(client, chunk)
+                if not ok:
+                    return jsonify({'success': False, 'message': f'归档已保存，但清理主库失败: {message}'}), 500
+                deleted += count
 
-        return jsonify({'success': True, 'id': archive_id, 'record_count': batch.record_count})
+        return jsonify({'success': True, 'id': archive_id, 'record_count': batch.record_count, 'deleted_count': deleted})
     except Exception as e:
         db.session.rollback()
         traceback.print_exc()
@@ -16683,14 +17096,52 @@ def get_matrix_stats():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 
+@app.route('/api/matrix/clone_config/preview', methods=['POST'])
+@login_required
+def preview_matrix_clone_config():
+    data = request.json or {}
+    mode = data.get('mode')
+    source = data.get('source')
+    scope = data.get('scope') if isinstance(data.get('scope'), dict) else {}
+
+    if not mode or not source:
+        scope_mode = str(scope.get('mode') or 'all').strip().lower() or 'all'
+        return jsonify({
+            'success': True,
+            'count': 0,
+            'source_count': 0,
+            'scope_mode': scope_mode,
+            'scope_ids_count': None,
+            'message': 'Missing source'
+        })
+
+    try:
+        _maybe_pull_matrix_and_logs_from_supabase(force=False)
+        scope_mode, scope_ids = _resolve_matrix_clone_scope_ids(scope, allow_empty_selected=True)
+        source_items, _ = _resolve_matrix_clone_source_items(mode, source, scope_ids)
+        scope_ids_count = len(scope_ids) if scope_ids is not None else None
+        return jsonify({
+            'success': True,
+            'count': len(source_items),
+            'source_count': len(source_items),
+            'scope_mode': scope_mode,
+            'scope_ids_count': scope_ids_count
+        })
+    except ValueError as e:
+        return jsonify({'success': False, 'count': 0, 'message': str(e)}), 400
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'count': 0, 'message': str(e)}), 500
+
 @app.route('/api/matrix/clone_config', methods=['POST'])
 @login_required
 def clone_matrix_config():
-    data = request.json
+    data = request.json or {}
     mode = data.get('mode') # model, category
     source = data.get('source')
     targets = data.get('targets', []) # List of target models
     strategy = data.get('strategy', 'append') # append, force_sync
+    scope = data.get('scope') if isinstance(data.get('scope'), dict) else {}
     
     if not mode or not source or not targets:
         return jsonify({'success': False, 'message': 'Missing required parameters'}), 400
@@ -16700,65 +17151,21 @@ def clone_matrix_config():
         
     try:
         _maybe_pull_matrix_and_logs_from_supabase(force=False)
+        scope_mode, scope_ids = _resolve_matrix_clone_scope_ids(scope)
         pending_changes = []
-        # 1. Identify Source Entries (KB Items)
-        source_items = []
-        source_products_to_remove = set()
-        if mode == 'model':
-            # Get all entries for source model
-            # We fetch them as a dict keyed by wiki_id to easily access content
-            items = ProductMatrix.query.filter_by(product_name=source, is_configured=True).all()
-            
-            # Fallback: Try removing spaces if count is 0
-            if not items and ' ' in source:
-                items = ProductMatrix.query.filter_by(product_name=source.replace(' ', ''), is_configured=True).all()
-            
-            source_products_to_remove.add(source)
-            if ' ' in source:
-                source_products_to_remove.add(source.replace(' ', ''))
-            
-            # De-duplicate by wiki_id (should be unique per product anyway)
-            source_items = {item.question_wiki_id: item for item in items}
-        elif mode == 'category':
-            mappings = get_model_mappings()
-            items = []
-            
-            if source in mappings:
-                allowed_models = [str(x) for x in (mappings[source] or []) if x]
-                n = len(allowed_models)
-                if n > 0:
-                    source_products_to_remove.update([str(m) for m in allowed_models if m])
-                    exact_ids = db.session.query(ProductMatrix.question_wiki_id)\
-                        .filter(ProductMatrix.is_configured == True)\
-                        .group_by(ProductMatrix.question_wiki_id)\
-                        .having(func.count(func.distinct(ProductMatrix.product_name)) == n)\
-                        .having(func.count(func.distinct(case(
-                            (ProductMatrix.product_name.in_(allowed_models), ProductMatrix.product_name),
-                            else_=None
-                        ))) == n)\
-                        .all()
-                    valid_ids = [row[0] for row in exact_ids]
-                    if valid_ids:
-                        all_rows = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(valid_ids)).all()
-                        source_items = {}
-                        for row in all_rows:
-                            if row.question_wiki_id not in source_items:
-                                source_items[row.question_wiki_id] = row
-                    else:
-                        source_items = {}
-                else:
-                    source_items = {}
-            else:
-                # Fallback
-                items = ProductMatrix.query.filter(ProductMatrix.product_category == source).all()
-                source_items = {}
-                for item in items:
-                    if item.question_wiki_id not in source_items:
-                        source_items[item.question_wiki_id] = item
-                source_products_to_remove.update([str(r.product_name) for r in items if r.product_name])
+        source_items, source_products_to_remove = _resolve_matrix_clone_source_items(mode, source, scope_ids)
         
         if not source_items:
-            return jsonify({'success': True, 'updated_count': 0, 'message': 'No source data found'})
+            return jsonify({
+                'success': True,
+                'updated_count': 0,
+                'removed_count': 0,
+                'pending_changes': [],
+                'pending_count': 0,
+                'source_count': 0,
+                'scope_mode': scope_mode,
+                'message': 'No source data found'
+            })
 
         total_updated = 0
         total_removed = 0
@@ -16880,9 +17287,12 @@ def clone_matrix_config():
             'updated_count': total_updated,
             'removed_count': total_removed,
             'pending_changes': pending_changes,
-            'pending_count': len(pending_changes)
+            'pending_count': len(pending_changes),
+            'source_count': len(source_items),
+            'scope_mode': scope_mode
         })
-        
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
     except Exception as e:
         db.session.rollback()
         traceback.print_exc()

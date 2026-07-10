@@ -269,8 +269,10 @@ let kbCompareState = {
 };
 
 const KB_EMBED_MESSAGE_SOURCE = 'kmatrix-kb-edit';
+const KB_ACTION_MESSAGE_SOURCE = 'kmatrix-kb-action';
 let kbEditEmbedRequest = null;
 let kbEditEmbedSaved = false;
+let kbActionEmbedRequest = null;
 
 function getKbEditEmbedRequest() {
     try {
@@ -281,7 +283,78 @@ function getKbEditEmbedRequest() {
         const create = ['1', 'true', 'yes'].includes(String(params.get('create') || '').toLowerCase());
         if (!id && !create) return null;
         const changeSource = String(params.get('change_source') || params.get('source_module') || '').trim() || 'badcase标注工作台';
-        return { id, create, changeSource };
+        const hostOriginRaw = String(params.get('host_origin') || '').trim();
+        let hostOrigin = '';
+        if (hostOriginRaw) {
+            try { hostOrigin = new URL(hostOriginRaw).origin; } catch {}
+        }
+        return { id, create, changeSource, hostOrigin };
+    } catch {
+        return null;
+    }
+}
+
+function normalizeKbExternalIds(value) {
+    if (Array.isArray(value)) {
+        const ids = [];
+        value.forEach(item => ids.push(...normalizeKbExternalIds(item)));
+        return Array.from(new Set(ids));
+    }
+    const raw = String(value || '').trim();
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return normalizeKbExternalIds(parsed);
+    } catch {}
+    try {
+        if (typeof parseKBCompareIds === 'function') {
+            return parseKBCompareIds(raw).ids || [];
+        }
+    } catch {}
+    return raw.split(/[\s,，;；、|]+/).map(s => s.trim()).filter(Boolean);
+}
+
+function parseEmbedHostOrigin(params) {
+    const hostOriginRaw = String(params.get('host_origin') || '').trim();
+    if (!hostOriginRaw) return '';
+    try { return new URL(hostOriginRaw).origin; } catch {}
+    return '';
+}
+
+function getKbActionEmbedRequest() {
+    try {
+        const params = new URLSearchParams(window.location.search || '');
+        const embed = String(params.get('embed') || params.get('mode') || '').trim();
+        const tab = String(params.get('tab') || '').trim();
+        const action = String(params.get('action') || '').trim();
+        const actionLower = action.toLowerCase();
+
+        let type = '';
+        if (embed === 'kb-manage' || actionLower.includes('delete')) type = 'delete';
+        if (embed === 'kb-compare' || tab === 'kbCompareView' || actionLower.includes('merge')) type = 'merge';
+        if (!type) return null;
+
+        const ids = normalizeKbExternalIds([
+            params.get('ids'),
+            params.get('id'),
+            params.get('kb_id'),
+            params.get('question_wiki_id')
+        ]);
+        if (type === 'delete' && !ids.length) return null;
+        if (type === 'merge' && ids.length < 2) return null;
+
+        const defaultSource = type === 'merge' ? '知识对比' : '知识库管理';
+        const changeSource = String(params.get('change_source') || params.get('source_module') || '').trim() || defaultSource;
+        return {
+            type,
+            action,
+            ids,
+            id: ids[0] || '',
+            changeSource,
+            hostOrigin: parseEmbedHostOrigin(params),
+            embed,
+            tab
+        };
     } catch {
         return null;
     }
@@ -294,9 +367,83 @@ function postKbEditEmbedMessage(type, detail = {}) {
             source: KB_EMBED_MESSAGE_SOURCE,
             type,
             ...detail,
-        }, '*');
+        }, kbEditEmbedRequest.hostOrigin || '*');
     } catch {
         // Cross-window notifications are best-effort only.
+    }
+}
+
+function postKbActionEmbedMessage(type, detail = {}) {
+    if (!kbActionEmbedRequest || !window.parent || window.parent === window) return;
+    try {
+        window.parent.postMessage({
+            source: KB_ACTION_MESSAGE_SOURCE,
+            type,
+            ...detail,
+        }, kbActionEmbedRequest.hostOrigin || '*');
+    } catch {
+        // Cross-window notifications are best-effort only.
+    }
+}
+
+function getKbActionChangeSource(fallback = '') {
+    return String(kbActionEmbedRequest?.changeSource || fallback || '').trim();
+}
+
+let kbEditEmbedHostListenerBound = false;
+
+function bindKbEditEmbedHostListener() {
+    if (kbEditEmbedHostListenerBound) return;
+    kbEditEmbedHostListenerBound = true;
+    window.addEventListener('message', (event) => {
+        if (!kbEditEmbedRequest || !window.parent || window.parent === window) return;
+        if (event.source !== window.parent) return;
+        if (kbEditEmbedRequest.hostOrigin && event.origin !== kbEditEmbedRequest.hostOrigin) return;
+        const data = event.data || {};
+        if (data.source !== KB_EMBED_MESSAGE_SOURCE) return;
+        if (data.type !== 'replace_field') return;
+        try {
+            applyKbEditEmbedFieldReplacement(data);
+        } catch (e) {
+            const message = e?.message || String(e);
+            postKbEditEmbedMessage('error', { kbId: kbEditEmbedRequest.id || '', message });
+            if (typeof showToast === 'function') showToast(message, 'error');
+        }
+    });
+}
+
+function applyKbEditEmbedFieldReplacement(payload = {}) {
+    const form = document.getElementById('kbEditForm');
+    const modal = document.getElementById('kbEditModal');
+    if (!form || !modal || modal.style.display === 'none') {
+        throw new Error('编辑器尚未就绪，无法替换字段');
+    }
+    const requestedKbId = String(payload.kbId || '').trim();
+    if (requestedKbId && kbEditEmbedRequest?.id && requestedKbId !== String(kbEditEmbedRequest.id)) {
+        throw new Error('替换请求与当前编辑的 KB 不一致');
+    }
+    const field = payload.field === 'answer' ? 'answer' : 'question';
+    const value = String(payload.value ?? '');
+    const el = form.elements?.[field];
+    if (!el) throw new Error(`未找到可替换的${field === 'answer' ? '答案' : '问题'}字段`);
+
+    if (field === 'answer') {
+        __kbAnswerSetMarkdown(value, { from: 'embed-replace-field' });
+    } else {
+        el.value = value;
+        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+        try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+    }
+
+    __kbEditTouched = true;
+    __kbEditRefreshDirtyState();
+    __kbEditScheduleDraftSave();
+    postKbEditEmbedMessage('field_replaced', {
+        kbId: kbEditEmbedRequest?.id || __kbEditDraftContextId || '',
+        field,
+    });
+    if (typeof showToast === 'function') {
+        showToast(`已替换${field === 'answer' ? '答案' : '问题'}，请确认后保存`);
     }
 }
 
@@ -327,6 +474,105 @@ async function openKbEditEmbedRequest() {
         postKbEditEmbedMessage('error', { kbId: kbEditEmbedRequest.id || '', message });
         if (typeof showToast === 'function') showToast(message, 'error', 0);
         else alert(message);
+        return false;
+    }
+}
+
+function clearKBActionFilters() {
+    ['idSearch', 'productNameSearch', 'questionSearch', 'similarQuestionSearch', 'answerSearch', 'urlSearch'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
+    const draftFilter = document.getElementById('kbDraftStatusFilter');
+    if (draftFilter) draftFilter.value = '';
+    document.querySelectorAll('#reviewStatusChips .tag-chip').forEach(chip => chip.classList.remove('active'));
+    kbSelectedProductCategories.clear();
+    kbSelectedTags.clear();
+    if (typeof syncKBDraftStatusChips === 'function') syncKBDraftStatusChips();
+    if (typeof syncKBProductCategoryChipActive === 'function') syncKBProductCategoryChipActive();
+    if (typeof updateKbTagFilterButton === 'function') updateKbTagFilterButton();
+}
+
+function setSelectedKBTable(table) {
+    const value = table === 'knowledge_base_v1_t1' ? 'knowledge_base_v1_t1' : 'knowledge_base_v1';
+    document.querySelectorAll('input[name="kbTable"]').forEach(input => {
+        input.checked = input.value === value;
+    });
+}
+
+async function openKbDeleteActionEmbedRequest() {
+    const ids = kbActionEmbedRequest?.ids || [];
+    clearKBActionFilters();
+    selectedKBRows = new Set(ids);
+    kbShowSelectedOnly = true;
+    setSelectedKBTable('knowledge_base_v1');
+    clearKBCache();
+    switchTab('kbView');
+    await loadKBTable(1);
+    updateKBPreviewSelectedButton();
+    postKbActionEmbedMessage('ready', {
+        action: 'delete',
+        kbId: ids[0] || '',
+        kbIds: ids,
+        changeSource: kbActionEmbedRequest?.changeSource || ''
+    });
+    if (typeof showToast === 'function') {
+        showToast(`已从 DataLoop 带入 ${ids.length} 条待复核删除 KB`, 'info');
+    }
+}
+
+async function openKbMergeActionEmbedRequest() {
+    const ids = kbActionEmbedRequest?.ids || [];
+    setKBCompareTable('knowledge_base_v1');
+    const input = document.getElementById('kbCompareIdInput');
+    if (input) input.value = ids.join('\n');
+    kbCompareState = {
+        ...kbCompareState,
+        source: 'dataloop',
+        ids,
+        duplicateIds: [],
+        missingIds: [],
+        rows: [],
+        fieldSummaries: [],
+        activeFieldKey: '',
+        baseRowId: '',
+        fieldChoices: {},
+        mergeDraft: null,
+        submitResult: null
+    };
+    switchTab('kbCompareView');
+    await runKBCompareImport();
+    postKbActionEmbedMessage('ready', {
+        action: 'merge',
+        kbIds: ids,
+        primaryKbId: ids[0] || '',
+        secondaryKbIds: ids.slice(1),
+        changeSource: kbActionEmbedRequest?.changeSource || ''
+    });
+    if (typeof showToast === 'function') {
+        showToast(`已从 DataLoop 带入 ${ids.length} 条待合并 KB`, 'info');
+    }
+}
+
+async function openKbActionEmbedRequest() {
+    if (!kbActionEmbedRequest) return false;
+    document.body.classList.add('kb-action-embed-mode');
+    try {
+        if (kbActionEmbedRequest.type === 'delete') {
+            await openKbDeleteActionEmbedRequest();
+        } else if (kbActionEmbedRequest.type === 'merge') {
+            await openKbMergeActionEmbedRequest();
+        }
+        return true;
+    } catch (e) {
+        const message = e?.message || String(e);
+        postKbActionEmbedMessage('error', {
+            action: kbActionEmbedRequest?.type || '',
+            kbId: kbActionEmbedRequest?.id || '',
+            kbIds: kbActionEmbedRequest?.ids || [],
+            message
+        });
+        if (typeof showToast === 'function') showToast(message, 'error', 0);
         return false;
     }
 }
@@ -1570,21 +1816,39 @@ function smUpdateReadyState() {
 }
 
 let _smArchiveModalBackup = null;
-async function fetchArchivePreview(operationId = null) {
-    const qs = operationId ? `?operation_id=${encodeURIComponent(operationId)}` : '';
+let archiveNameModalContext = { operationId: null, ids: [] };
+
+function buildArchiveScopeParams(operationId = null, opts = {}) {
+    const params = new URLSearchParams();
+    if (operationId) params.set('operation_id', operationId);
+    const ids = Array.isArray(opts.ids) ? opts.ids : [];
+    ids.forEach((id) => {
+        const v = String(id ?? '').trim();
+        if (v) params.append('ids', v);
+    });
+    return params;
+}
+
+async function fetchArchivePreview(operationId = null, opts = {}) {
+    const params = buildArchiveScopeParams(operationId, opts);
+    const qs = params.toString() ? `?${params.toString()}` : '';
     const res = await api(`/archives/preview${qs}`);
     if (!res || !res.success) throw new Error(res?.message || '获取归档预览失败');
     return res;
 }
 
-async function confirmArchiveImpact(operationId = null) {
-    const preview = await fetchArchivePreview(operationId);
+async function confirmArchiveImpact(operationId = null, opts = {}) {
+    const preview = await fetchArchivePreview(operationId, opts);
     if (!preview.count) {
         throw new Error('没有待归档的修改记录');
     }
+    const ids = Array.isArray(opts.ids) ? opts.ids : [];
+    const scopeText = operationId
+        ? '本次智能映射提交'
+        : (ids.length ? '已勾选记录' : '当前待归档结果');
     const ok = await showDangerConfirmModal(
         '归档确认',
-        `本次将归档 ${preview.count || 0} 条修改记录，并从当前修改记录列表删除 ${preview.delete_count || 0} 条对应记录。\n归档后可在归档管理中查看和导出，但当前列表不会再显示这些记录。确认继续？`,
+        `本次将归档${scopeText} ${preview.count || 0} 条修改记录，并从当前修改记录列表删除 ${preview.delete_count || 0} 条对应记录。\n归档后可在归档管理中查看和导出，但当前列表不会再显示这些记录。确认继续？`,
         '确认归档'
     );
     if (!ok) throw new Error('已取消归档');
@@ -6609,6 +6873,7 @@ function updateModSummary() {
             : `结果：第 ${Math.min(modCurrentPage || 1, totalPages)} / ${totalPages} 页，共 ${modTotal || 0} 条`;
     }
     if (selectionSummaryEl) selectionSummaryEl.textContent = `已选 ${selectedCount} 条`;
+    updateModArchiveButton();
     if (pageJumpInput) {
         pageJumpInput.max = String(totalPages);
         pageJumpInput.placeholder = modDupOnly ? '1' : `${totalPages}`;
@@ -7191,10 +7456,44 @@ function _modKeyIsDeletable(item) {
     return sid !== null && sid !== undefined && String(sid).trim() !== '';
 }
 
+function _normalizeModPayloadId(value) {
+    const s = String(value ?? '').trim();
+    if (!s) return null;
+    return /^\d+$/.test(s) ? parseInt(s, 10) : s;
+}
+
+function getCurrentSelectableModificationRows() {
+    const { rows } = getRenderedModificationsRows();
+    return rows
+        .map((item, idx) => ({
+            item,
+            key: _getModRowKey(item, idx),
+            id: _normalizeModPayloadId(item?.supabase_id)
+        }))
+        .filter(row => _modKeyIsDeletable(row.item) && row.id !== null && row.id !== undefined);
+}
+
+function getSelectedModificationArchiveIds() {
+    return getCurrentSelectableModificationRows()
+        .filter(row => selectedModifications.has(row.key))
+        .map(row => row.id);
+}
+
+function updateModArchiveButton() {
+    const btn = document.getElementById('modArchiveBtn');
+    if (!btn) return;
+    const count = getSelectedModificationArchiveIds().length;
+    btn.textContent = count ? `🗂️ 归档选中 (${count})` : '🗂️ 归档当前结果';
+    btn.setAttribute(
+        'title',
+        count ? '仅归档当前勾选的修改记录' : '未勾选时归档当前待归档结果'
+    );
+}
+
 function updateModSelectAllCheckbox() {
     const el = document.getElementById('modSelectAll');
     if (!el) return;
-    const deletableKeys = (currentModifications || []).filter(_modKeyIsDeletable).map((it, idx) => _getModRowKey(it, idx));
+    const deletableKeys = getCurrentSelectableModificationRows().map(row => row.key);
     if (deletableKeys.length === 0) {
         el.checked = false;
         el.indeterminate = false;
@@ -7213,10 +7512,7 @@ function toggleModSelectAll(checked) {
     const want = !!checked;
     selectedModifications.clear();
     if (want) {
-        (currentModifications || []).forEach((it, idx) => {
-            if (!_modKeyIsDeletable(it)) return;
-            selectedModifications.add(_getModRowKey(it, idx));
-        });
+        getCurrentSelectableModificationRows().forEach(row => selectedModifications.add(row.key));
     }
     renderModificationsTable();
 }
@@ -7232,16 +7528,11 @@ function toggleModRowSelection(key, checked) {
 window.toggleModRowSelection = toggleModRowSelection;
 
 async function deleteSelectedModifications() {
-    const keys = Array.from(selectedModifications);
-    if (!keys.length) {
+    const ids = getSelectedModificationArchiveIds();
+    if (!ids.length) {
         alert('请先勾选要删除的记录（仅支持删除当前页勾选的记录）');
         return;
     }
-    const ids = [];
-    keys.forEach(k => {
-        if (/^\d+$/.test(k)) ids.push(parseInt(k, 10));
-        else ids.push(k);
-    });
     const ok = confirm(`确认删除选中的 ${ids.length} 条修改记录？此操作不可恢复。`);
     if (!ok) return;
     try {
@@ -7863,21 +8154,26 @@ async function downloadByUrl(url, fallbackName = '') {
 window.downloadByUrl = downloadByUrl;
 
 async function createArchiveFromCurrent() {
-    openArchiveNameModal();
+    const ids = getSelectedModificationArchiveIds();
+    openArchiveNameModal(null, { ids });
 }
 window.createArchiveFromCurrent = createArchiveFromCurrent;
 
-function openArchiveNameModal(operationId = null) {
+function openArchiveNameModal(operationId = null, opts = {}) {
     const modal = document.getElementById('archiveNameModal');
     const input = document.getElementById('archiveNameInput');
     const btn = document.getElementById('archiveNameConfirmBtn');
     const impact = document.getElementById('archiveImpactPreview');
+    const ids = Array.isArray(opts.ids) ? opts.ids : [];
+    archiveNameModalContext = { operationId, ids };
     if (btn) btn.disabled = false;
     if (impact) {
         impact.textContent = '正在读取待归档记录数...';
-        fetchArchivePreview(operationId)
+        fetchArchivePreview(operationId, { ids })
             .then(preview => {
-                const scope = operationId ? '本次提交待归档' : '当前待归档';
+                const scope = operationId
+                    ? '本次提交待归档'
+                    : (ids.length ? '已勾选待归档' : '当前待归档');
                 impact.textContent = `${scope} ${preview.count || 0} 条；确认后会从当前修改记录列表删除 ${preview.delete_count || 0} 条对应记录。`;
             })
             .catch(e => {
@@ -7898,6 +8194,7 @@ window.openArchiveNameModal = openArchiveNameModal;
 function closeArchiveNameModal() {
     const modal = document.getElementById('archiveNameModal');
     if (modal) modal.style.display = 'none';
+    archiveNameModalContext = { operationId: null, ids: [] };
     const impact = document.getElementById('archiveImpactPreview');
     if (impact) impact.textContent = '';
     if (_smArchiveModalBackup) {
@@ -7923,15 +8220,19 @@ async function confirmCreateArchiveFromCurrent() {
     }
     if (btn) btn.disabled = true;
     try {
-        const preview = await confirmArchiveImpact();
+        const ctx = archiveNameModalContext || { operationId: null, ids: [] };
+        const ids = Array.isArray(ctx.ids) ? ctx.ids : [];
+        const preview = await confirmArchiveImpact(ctx.operationId || null, { ids });
         const res = await api('/archives', 'POST', {
             batch_name: name,
             confirm_archive: true,
-            expected_count: preview.count || 0
+            expected_count: preview.count || 0,
+            ids
         });
         if (res && res.success) {
             closeArchiveNameModal();
             showToast(`归档成功：${res.record_count || 0} 条`, 'success');
+            selectedModifications.clear();
             switchTab('archiveView');
         } else {
             showToast(res && res.message ? res.message : '归档失败', 'error');
@@ -9350,6 +9651,7 @@ function renderKBCompareFrame() {
     const body = document.getElementById('kbCompareImportBody');
     const toggleBtn = document.getElementById('kbCompareImportToggleBtn');
     const importMeta = document.getElementById('kbCompareImportMeta');
+    const runBtn = document.getElementById('kbCompareRunBtn');
     const draftBtn = document.getElementById('kbCompareGenerateDraftBtn');
 
     if (layout) layout.classList.toggle('is-import-collapsed', !!kbCompareState.importCollapsed);
@@ -9361,8 +9663,13 @@ function renderKBCompareFrame() {
             ? `已匹配 ${rows.length} 条，未找到 ${missing.length} 条，重复 ${duplicates.length} 条。`
             : '支持换行、逗号、空格、CSV 文本。也可以从知识库管理勾选后跳转带入。';
     }
+    if (runBtn) {
+        runBtn.disabled = !!kbCompareState.loading;
+        runBtn.textContent = kbCompareState.loading ? '对比中...' : '开始对比';
+    }
     if (draftBtn) {
         draftBtn.disabled = rows.length < 2 || kbCompareState.loading;
+        draftBtn.textContent = kbCompareState.mergeDraft ? '重新生成合并草稿' : '生成合并草稿';
         draftBtn.title = rows.length < 2 ? '请至少匹配 2 条记录后生成合并草稿' : '按当前主记录和字段采用值生成合并草稿';
     }
 }
@@ -9462,11 +9769,16 @@ function renderKBCompareListValue(row, field) {
             let cls = 'is-partial';
             if (count >= shared.rowCount) cls = 'is-shared';
             else if (count === 1) cls = 'is-unique';
+            const isProductModel = field.key === 'product_name';
+            const modelClass = isProductModel ? (count > 1 ? ' is-model-overlap' : ' is-model-different') : '';
+            const title = isProductModel
+                ? (count > 1 ? `${label}，重复出现于 ${count}/${shared.rowCount} 条 KB` : `${label}，仅当前 KB 有`)
+                : label;
             if (field.type === 'urlList') {
                 const href = /^https?:\/\//i.test(label) ? label : `http://${label}`;
                 return `<a class="kb-compare-value-chip ${cls}" href="${_escapeAttr(href)}" target="_blank" title="${_escapeAttr(label)}">${escapeHtml(label)}</a>`;
             }
-            return `<span class="kb-compare-value-chip ${cls}" title="${_escapeAttr(label)}">${escapeHtml(label)}</span>`;
+            return `<span class="kb-compare-value-chip ${cls}${modelClass}" title="${_escapeAttr(title)}">${escapeHtml(label)}</span>`;
         }).join('')
     }</div>`;
 }
@@ -9482,6 +9794,18 @@ function renderKBCompareTextValue(row, field, baseText) {
     }
     const diff = _renderDiff(baseText || '', text);
     return `<div class="kb-compare-text-value">${diff.afterHtml || escapeHtml(text)}</div>`;
+}
+
+function renderKBCompareDraftActionButton() {
+    const rows = kbCompareState.rows || [];
+    const disabled = rows.length < 2 || kbCompareState.loading;
+    const label = kbCompareState.loading
+        ? '对比中...'
+        : (kbCompareState.mergeDraft ? '重新生成合并草稿' : '生成合并草稿');
+    const title = rows.length < 2
+        ? '请至少匹配 2 条记录后生成合并草稿'
+        : '按当前主记录和字段采用值生成合并草稿';
+    return `<button type="button" id="kbCompareGenerateDraftBtn" class="primary-btn btn-primary-gradient kb-compare-generate-draft-btn" onclick="generateKBCompareMergeDraft()" ${disabled ? 'disabled' : ''} title="${_escapeAttr(title)}">${escapeHtml(label)}</button>`;
 }
 
 function renderKBCompareDetail() {
@@ -9547,10 +9871,24 @@ function renderKBCompareDetail() {
             ? `已手动采用 ${chosenId}`
             : (KB_COMPARE_DEFAULT_MERGE_FIELDS.has(field.key) ? '默认合并取并集' : '默认沿用主记录'))
         : '仅用于校验';
+    const legendHtml = field.key === 'product_name'
+        ? `
+                <div class="kb-compare-legend">
+                    <span><i class="legend-dot is-model-overlap"></i>重复出现</span>
+                    <span><i class="legend-dot is-model-different"></i>单条独有</span>
+                </div>
+        `
+        : `
+                <div class="kb-compare-legend">
+                    <span><i class="legend-dot is-shared"></i>共有</span>
+                    <span><i class="legend-dot is-partial"></i>部分共有</span>
+                    <span><i class="legend-dot is-unique"></i>单条独有</span>
+                </div>
+        `;
 
     el.innerHTML = `
         <div class="kb-compare-detail-head">
-            <div>
+            <div class="kb-compare-detail-main">
                 <h3>${escapeHtml(field.label)}</h3>
                 <p>${field.hasDiff ? `发现 ${field.distinctCount} 种取值，涉及 ${field.affectedCount}/${rows.length} 条记录。当前主记录：${baseId || '-'}` : `该字段在当前记录中一致。当前主记录：${baseId || '-'}`}</p>
                 <div class="kb-compare-field-meta">
@@ -9558,10 +9896,11 @@ function renderKBCompareDetail() {
                     <span>${escapeHtml(decisionHint)}</span>
                 </div>
             </div>
-            <div class="kb-compare-legend">
-                <span><i class="legend-dot is-shared"></i>共有</span>
-                <span><i class="legend-dot is-partial"></i>部分共有</span>
-                <span><i class="legend-dot is-unique"></i>单条独有</span>
+            <div class="kb-compare-detail-side">
+                ${legendHtml}
+                <div class="kb-compare-detail-actions">
+                    ${renderKBCompareDraftActionButton()}
+                </div>
             </div>
         </div>
         <div class="kb-compare-detail-grid">${cards}</div>
@@ -9873,7 +10212,6 @@ async function runKBCompareImport() {
             fieldChoices: {},
             mergeDraft: null,
             submitResult: null,
-            importCollapsed: rows.length > 0,
             loading: false
         };
     } catch (e) {
@@ -9986,7 +10324,7 @@ function buildKBCompareSubmitPayload(draft, selectedFields = null) {
     const payload = {
         ...digest,
         question_wiki_id: draft?.editId || digest.question_wiki_id || '',
-        change_source: '知识对比'
+        change_source: getKbActionChangeSource('知识对比')
     };
     const listFields = ['similar_questions', 'error_list', 'keyword_list', 'image_urls', 'video_urls', 'file_urls'];
     listFields.forEach(field => {
@@ -10076,7 +10414,7 @@ async function submitKBCompareMergeDraft() {
         if (selectedDeleteIds.length > 0) {
             const deleteRes = await api('/kb/delete', 'POST', {
                 ids: selectedDeleteIds,
-                change_source: '知识对比'
+                change_source: getKbActionChangeSource('知识对比')
             });
             if (!deleteRes || !deleteRes.success) {
                 throw new Error(deleteRes?.message || deleteRes?.error || '删除建议提交失败');
@@ -10091,6 +10429,15 @@ async function submitKBCompareMergeDraft() {
             message: `已写入修改记录：主记录 ${savedWikiId} ${saveRes.no_change ? '无字段变化' : '已保存'}，删除建议 ${deleteCount} 条。`
         };
         if (typeof showToast === 'function') showToast(kbCompareState.submitResult.message, 'success');
+        postKbActionEmbedMessage('kb_action_saved', {
+            action: 'merge',
+            kbIds: draft.ids || kbCompareState.ids || [],
+            primaryKbId: savedWikiId || draft.editId || '',
+            secondaryKbIds: selectedDeleteIds,
+            changedFieldCount: selectedChangedFields.length,
+            deleteCount,
+            changeSource: getKbActionChangeSource('知识对比')
+        });
     } catch (e) {
         kbCompareState.submitResult = {
             success: false,
@@ -10755,9 +11102,20 @@ async function deleteSelectedKBItems() {
     )) return;
     
     try {
-        const res = await api('/kb/delete', 'POST', { ids: Array.from(selectedKBRows) });
+        const ids = Array.from(selectedKBRows);
+        const res = await api('/kb/delete', 'POST', {
+            ids,
+            change_source: getKbActionChangeSource('知识库管理')
+        });
         if (res.success) {
             alert('删除操作成功');
+            postKbActionEmbedMessage('kb_action_saved', {
+                action: 'delete',
+                kbId: ids[0] || '',
+                kbIds: ids,
+                deleteCount: Number(res.count || ids.length || 0),
+                changeSource: getKbActionChangeSource('知识库管理')
+            });
             selectedKBRows.clear();
             // 删除后强制清缓存并刷新，避免继续显示旧状态。
             clearKBCache();
@@ -11601,6 +11959,9 @@ function __kbEditBuildSubmitPayload() {
     if (typeof data.link_type === 'string') data.link_type = data.link_type.trim();
     if (kbEditEmbedRequest?.changeSource && !data.change_source && !data.source_module) {
         data.change_source = kbEditEmbedRequest.changeSource;
+    }
+    if (kbActionEmbedRequest?.changeSource && !data.change_source && !data.source_module) {
+        data.change_source = kbActionEmbedRequest.changeSource;
     }
     if (__kbEditQualityContext) {
         data.change_source = '管控中心';
@@ -14106,6 +14467,26 @@ function closeMatrixSubmitLogsModal() {
     if (modal) modal.style.display = 'none';
 }
 
+function formatMatrixSubmitLogTime(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '-';
+    let normalized = raw;
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(normalized)) {
+        normalized += 'Z';
+    }
+    const d = new Date(normalized);
+    if (Number.isNaN(d.getTime())) return raw;
+    return d.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    }).replace(/\//g, '-');
+}
+
 async function loadMatrixSubmitLogs() {
     const statusEl = document.getElementById('matrixSubmitLogsStatus');
     const tbody = document.getElementById('matrixSubmitLogsTbody');
@@ -14130,13 +14511,14 @@ async function loadMatrixSubmitLogs() {
             const tr = document.createElement('tr');
             const err = r.error_message ? escapeHtml(String(r.error_message)) : '';
             const opId = String(r.operation_id || '');
+            const rawTime = (r.updated_at || r.created_at || '') + '';
             tr.innerHTML = `
                 <td style="font-family: monospace; font-size: 12px;">${escapeHtml(opId)}</td>
                 <td>${escapeHtml(r.status || '')}</td>
                 <td>${escapeHtml(String(r.attempts ?? ''))}</td>
                 <td>${escapeHtml(r.created_by || '')}</td>
                 <td style="max-width: 320px; white-space: normal;">${err}</td>
-                <td style="font-size: 12px;">${escapeHtml((r.updated_at || r.created_at || '') + '')}</td>
+                <td style="font-size: 12px;" title="${_escapeAttr(rawTime)}">${escapeHtml(formatMatrixSubmitLogTime(rawTime))}</td>
                 <td>
                     <button class="action-btn btn-sm" onclick="openMatrixSubmitLogDetailsModal('${_escapeAttr(opId)}')">明细</button>
                 </td>
@@ -14218,6 +14600,7 @@ async function openMatrixSubmitLogDetailsModal(operationId) {
         rows.forEach((item, idx) => {
             const tr = document.createElement('tr');
             const qText = item?.question || '';
+            const rawSubmittedAt = item?.submitted_at || '';
             tr.innerHTML = `
                 <td style="font-family: monospace; font-size: 12px;">${escapeHtml(item?.question_wiki_id || '')}</td>
                 <td>${tdRenderExpandableText(`matrix-submit-detail:${item?.question_wiki_id || idx}:question`, qText, { placeholder: '-' })}</td>
@@ -14226,7 +14609,7 @@ async function openMatrixSubmitLogDetailsModal(operationId) {
                 <td>${escapeHtml(_matrixSubmitStatusText(!!item?.new_is_configured))}</td>
                 <td>${escapeHtml(item?.edit_source || '-')}</td>
                 <td>${escapeHtml(item?.submitted_by || '-')}</td>
-                <td style="font-size: 12px;">${escapeHtml(item?.submitted_at ? new Date(item.submitted_at).toLocaleString() : '-')}</td>
+                <td style="font-size: 12px;" title="${_escapeAttr(rawSubmittedAt)}">${escapeHtml(formatMatrixSubmitLogTime(rawSubmittedAt))}</td>
                 <td><button class="action-btn btn-sm" onclick="openMatrixSubmitDetail(${idx})">详情</button></td>
             `;
             tbody.appendChild(tr);
@@ -15254,6 +15637,11 @@ function toggleMatrixRow(id) {
 function updateMatrixBulkToolbarState() {
     const toolbar = document.getElementById('matrixBulkToolbar');
     if (toolbar) toolbar.classList.toggle('d-none', selectedMatrixRows.size === 0);
+    const copyModal = document.getElementById('copyConfigModal');
+    if (copyModal && copyModal.style.display && copyModal.style.display !== 'none') {
+        updateCopyScopeSummary();
+        refreshCopyScopeCounts();
+    }
 }
 
 function cancelMatrixSelection() {
@@ -15496,8 +15884,216 @@ async function addMatrixColumn() {
 let copyConfigState = {
     mode: 'model', // 'model' or 'category'
     targets: [],
-    availableTargets: []
+    availableTargets: [],
+    scopePreviewSeq: 0,
+    scopePreviewCounts: {
+        filtered: null,
+        selected: null
+    }
 };
+
+function getCopyScopeMode() {
+    return document.querySelector('input[name="copyScope"]:checked')?.value || 'all';
+}
+
+function getCopySourcePayload() {
+    const mode = copyConfigState.mode || 'model';
+    const source = mode === 'model'
+        ? (document.getElementById('copySourceModel')?.value || '')
+        : (document.getElementById('copySourceCategory')?.value || '');
+    return { mode, source };
+}
+
+function getMatrixCloneFilterPayload() {
+    return {
+        id: document.getElementById('matrixSearchId')?.value.trim() || '',
+        q: document.getElementById('matrixSearchQuestion')?.value.trim() || '',
+        a: document.getElementById('matrixSearchAnswer')?.value.trim() || '',
+        p_models: Array.from(matrixSearchProductSelected || []),
+        p_mode: matrixProductMatchMode || 'any',
+        pc: matrixProductCategoryFilter || '',
+        mc: matrixMappingCategoryFilter || '',
+        col_models: Array.from(matrixColumnModelSelected || []),
+        mark_modified: matrixMarkFilter.modified ? '1' : '0',
+        mark_unmodified: matrixMarkFilter.unmodified ? '1' : '0',
+        diff_compare: isMatrixDiffCompareActive() ? '1' : '0',
+        columns: Array.isArray(matrixColumns) ? matrixColumns : []
+    };
+}
+
+function getMatrixCloneFilterLabels(filters = getMatrixCloneFilterPayload()) {
+    const labels = [];
+    if (filters.id) labels.push(`ID: ${filters.id}`);
+    if (filters.q) labels.push(`问题: ${filters.q}`);
+    if (filters.a) labels.push(`答案: ${filters.a}`);
+    if (filters.pc) labels.push(`产品分类: ${filters.pc}`);
+    if (filters.mc) labels.push(`映射分类: ${filters.mc}`);
+    if (Array.isArray(filters.p_models) && filters.p_models.length > 0) labels.push(`产品机型 ${filters.p_models.length} 个`);
+    if (Array.isArray(filters.col_models) && filters.col_models.length > 0) labels.push(`表头机型 ${filters.col_models.length} 个`);
+
+    const wantModified = String(filters.mark_modified || '1') === '1';
+    const wantUnmodified = String(filters.mark_unmodified || '1') === '1';
+    if (wantModified && !wantUnmodified) labels.push('仅已修改');
+    if (!wantModified && wantUnmodified) labels.push('仅未修改');
+    if (!wantModified && !wantUnmodified) labels.push('未选择修改状态');
+    if (String(filters.diff_compare || '0') === '1') labels.push('差异对比');
+    return labels;
+}
+
+function setCopyScopeCountBadge(scopeMode, text, tone = 'muted') {
+    const el = document.getElementById(scopeMode === 'filtered' ? 'copyScopeFilteredCount' : 'copyScopeSelectedCount');
+    if (!el) return;
+
+    const tones = {
+        muted: { color: '#6b7280', border: '#d1d5db', bg: '#fff' },
+        loading: { color: '#1d4ed8', border: '#bfdbfe', bg: '#eff6ff' },
+        success: { color: '#166534', border: '#bbf7d0', bg: '#f0fdf4' },
+        warning: { color: '#92400e', border: '#fde68a', bg: '#fffbeb' },
+        error: { color: '#991b1b', border: '#fecaca', bg: '#fef2f2' }
+    };
+    const style = tones[tone] || tones.muted;
+    el.innerText = text;
+    el.style.color = style.color;
+    el.style.borderColor = style.border;
+    el.style.background = style.bg;
+}
+
+function getCopyPreviewCount(result) {
+    if (!result || result.status !== 'fulfilled') return null;
+    const value = result.value || {};
+    if (!value.success) return null;
+    const count = Number(value.count ?? value.source_count);
+    return Number.isFinite(count) ? count : null;
+}
+
+async function refreshCopyScopeCounts() {
+    const modal = document.getElementById('copyConfigModal');
+    if (!modal || modal.style.display === 'none') return;
+
+    const selectedCount = selectedMatrixRows ? selectedMatrixRows.size : 0;
+    const { mode, source } = getCopySourcePayload();
+    const seq = ++copyConfigState.scopePreviewSeq;
+
+    if (!source) {
+        copyConfigState.scopePreviewCounts = { filtered: null, selected: null };
+        setCopyScopeCountBadge('filtered', '待选择源', 'muted');
+        setCopyScopeCountBadge('selected', `已选 ${selectedCount} 条`, selectedCount > 0 ? 'warning' : 'muted');
+        updateCopyScopeSummary();
+        return;
+    }
+
+    copyConfigState.scopePreviewCounts = { filtered: null, selected: null };
+    setCopyScopeCountBadge('filtered', '计算中...', 'loading');
+    setCopyScopeCountBadge('selected', selectedCount > 0 ? '计算中...' : '命中 0 条', selectedCount > 0 ? 'loading' : 'muted');
+    updateCopyScopeSummary();
+
+    const selectedIds = Array.from(selectedMatrixRows || []);
+    const filteredPreview = api('/matrix/clone_config/preview', 'POST', {
+        mode,
+        source,
+        scope: {
+            mode: 'filtered',
+            filters: getMatrixCloneFilterPayload()
+        }
+    });
+    const selectedPreview = selectedIds.length > 0
+        ? api('/matrix/clone_config/preview', 'POST', {
+            mode,
+            source,
+            scope: {
+                mode: 'selected',
+                wiki_ids: selectedIds
+            }
+        })
+        : Promise.resolve({ success: true, count: 0, source_count: 0 });
+
+    const [filteredResult, selectedResult] = await Promise.allSettled([filteredPreview, selectedPreview]);
+    if (seq !== copyConfigState.scopePreviewSeq) return;
+
+    const filteredCount = getCopyPreviewCount(filteredResult);
+    const selectedMatchedCount = getCopyPreviewCount(selectedResult);
+    copyConfigState.scopePreviewCounts = {
+        filtered: filteredCount,
+        selected: selectedMatchedCount
+    };
+
+    if (filteredCount === null) {
+        setCopyScopeCountBadge('filtered', '统计失败', 'error');
+    } else {
+        setCopyScopeCountBadge('filtered', `命中 ${filteredCount} 条`, filteredCount > 0 ? 'success' : 'warning');
+    }
+
+    if (selectedMatchedCount === null) {
+        setCopyScopeCountBadge('selected', '统计失败', 'error');
+    } else {
+        setCopyScopeCountBadge('selected', `命中 ${selectedMatchedCount} 条`, selectedMatchedCount > 0 ? 'success' : 'warning');
+    }
+    updateCopyScopeSummary();
+}
+window.refreshCopyScopeCounts = refreshCopyScopeCounts;
+
+function updateCopyScopeSummary() {
+    const summary = document.getElementById('copyScopeSummary');
+    if (!summary) return;
+
+    const scopeMode = getCopyScopeMode();
+    if (scopeMode === 'selected') {
+        const count = selectedMatrixRows ? selectedMatrixRows.size : 0;
+        const { source } = getCopySourcePayload();
+        const matchedCount = copyConfigState.scopePreviewCounts?.selected;
+        if (source && typeof matchedCount === 'number') {
+            summary.innerText = matchedCount > 0
+                ? `将仅克隆已勾选且匹配当前源的 ${matchedCount} 条知识数据。`
+                : (count > 0 ? '已勾选数据中没有匹配当前源的知识条目。' : '当前未勾选数据，请先在矩阵表格中勾选要克隆的知识条目。');
+            summary.style.color = matchedCount > 0 ? '#555' : '#b45309';
+            return;
+        }
+        summary.innerText = count > 0
+            ? `将仅克隆已勾选的 ${count} 条知识数据，并继续叠加源机型或源分类条件。`
+            : '当前未勾选数据，请先在矩阵表格中勾选要克隆的知识条目。';
+        summary.style.color = count > 0 ? '#555' : '#b45309';
+        return;
+    }
+
+    if (scopeMode === 'filtered') {
+        const labels = getMatrixCloneFilterLabels();
+        const { source } = getCopySourcePayload();
+        const matchedCount = copyConfigState.scopePreviewCounts?.filtered;
+        if (source && typeof matchedCount === 'number') {
+            summary.innerText = labels.length > 0
+                ? `当前筛选与源条件命中 ${matchedCount} 条。筛选条件：${labels.join('；')}。`
+                : `当前没有有效筛选条件，执行时将等同全部源数据；当前源命中 ${matchedCount} 条。`;
+            summary.style.color = matchedCount > 0 ? '#555' : '#b45309';
+            return;
+        }
+        summary.innerText = labels.length > 0
+            ? `将按当前筛选结果克隆：${labels.join('；')}。`
+            : '当前没有有效筛选条件，执行时将等同全部源数据。';
+        summary.style.color = labels.length > 0 ? '#555' : '#b45309';
+        return;
+    }
+
+    summary.innerText = '将克隆全部源数据。';
+    summary.style.color = '#555';
+}
+window.updateCopyScopeSummary = updateCopyScopeSummary;
+
+function buildCopyScopePayload() {
+    const scopeMode = getCopyScopeMode();
+    if (scopeMode === 'selected') {
+        return {
+            mode: 'selected',
+            wiki_ids: Array.from(selectedMatrixRows || [])
+        };
+    }
+    if (scopeMode === 'filtered') {
+        return {
+            mode: 'filtered',
+            filters: getMatrixCloneFilterPayload()
+        };
+    }
+    return { mode: 'all' };
+}
 
 async function openCopyConfigModal() {
     const modal = document.getElementById('copyConfigModal');
@@ -15505,6 +16101,7 @@ async function openCopyConfigModal() {
     
     // Reset State
     copyConfigState.targets = [];
+    copyConfigState.scopePreviewCounts = { filtered: null, selected: null };
     renderCopyTargets();
     
     // Clear Inputs
@@ -15516,6 +16113,9 @@ async function openCopyConfigModal() {
     
     const targetInput = document.getElementById('copyTargetInput');
     if (targetInput) targetInput.value = '';
+
+    const scopeAll = document.querySelector('input[name="copyScope"][value="all"]');
+    if (scopeAll) scopeAll.checked = true;
     
     // Reset Stats
     const modelStats = document.getElementById('copyModelStats');
@@ -15526,6 +16126,7 @@ async function openCopyConfigModal() {
     
     // Show Modal
     modal.style.display = 'flex';
+    updateCopyScopeSummary();
     
     // Switch to default mode (this loads sources)
     switchCopyMode('model');
@@ -15646,6 +16247,7 @@ function switchCopyMode(mode) {
     
     // Load sources for the selected mode
     loadCopySources();
+    refreshCopyScopeCounts();
 }
 
 async function loadCopySources() {
@@ -15677,9 +16279,11 @@ async function loadCopySources() {
                     categories.map(c => `<option value="${c}">${c}</option>`).join('');
             }
         }
+        refreshCopyScopeCounts();
     } catch (e) {
         console.error('Failed to load copy sources:', e);
         showToast('加载源数据失败: ' + e.message, 'error');
+        refreshCopyScopeCounts();
     }
 }
 
@@ -15695,6 +16299,8 @@ async function fetchCopyStats() {
         source = document.getElementById('copySourceCategory').value;
         statsElem = document.getElementById('copyCategoryStats');
     }
+
+    refreshCopyScopeCounts();
         
     if (!source) {
         if (statsElem) statsElem.innerText = mode === 'model' ? '请选择源机型...' : '请选择源分类...';
@@ -15778,6 +16384,20 @@ async function executeCopyConfig() {
         showToast('请至少添加一个目标机型', 'error');
         return;
     }
+
+    const scope = buildCopyScopePayload();
+    if (scope.mode === 'selected' && (!Array.isArray(scope.wiki_ids) || scope.wiki_ids.length === 0)) {
+        showToast('请选择要克隆的知识数据，或切换为全部源数据/当前筛选结果', 'warning');
+        updateCopyScopeSummary();
+        return;
+    }
+    if (scope.mode === 'filtered') {
+        const labels = getMatrixCloneFilterLabels(scope.filters || {});
+        if (labels.length === 0) {
+            const ok = confirm('当前未设置任何筛选条件，按当前筛选结果执行将等同全量源数据。是否继续？');
+            if (!ok) return;
+        }
+    }
     
     const strategyElem = document.querySelector('input[name="copyStrategy"]:checked');
     const strategy = strategyElem ? strategyElem.value : 'append';
@@ -15800,12 +16420,14 @@ async function executeCopyConfig() {
             mode,
             source,
             targets: copyConfigState.targets,
-            strategy
+            strategy,
+            scope
         });
         
         if (res.success) {
             const removed = res.removed_count || 0;
-            showToast(`成功更新 ${res.updated_count} 条记录${removed ? `，移除 ${removed} 条源机型关联` : ''}`, 'success');
+            const sourceCountText = typeof res.source_count === 'number' ? `，命中源数据 ${res.source_count} 条` : '';
+            showToast(`成功更新 ${res.updated_count} 条记录${removed ? `，移除 ${removed} 条源机型关联` : ''}${sourceCountText}`, 'success');
             const pending = Array.isArray(res.pending_changes) ? res.pending_changes : [];
             if (pending.length > 0) {
                 pending.forEach(c => recordMatrixPendingChange({
@@ -18730,8 +19352,13 @@ function enableAllTableColumnResize() {
 // ==========================================
 window.addEventListener('DOMContentLoaded', async () => {
   kbEditEmbedRequest = getKbEditEmbedRequest();
+  kbActionEmbedRequest = getKbActionEmbedRequest();
   if (kbEditEmbedRequest) {
     document.body.classList.add('kb-edit-embed-mode');
+    bindKbEditEmbedHostListener();
+  }
+  if (kbActionEmbedRequest) {
+    document.body.classList.add('kb-action-embed-mode');
   }
 
   // Check Login
@@ -18745,6 +19372,12 @@ window.addEventListener('DOMContentLoaded', async () => {
 
         if (kbEditEmbedRequest) {
           await openKbEditEmbedRequest();
+          return;
+        }
+
+        if (kbActionEmbedRequest) {
+          await loadKBProductCategoryChips();
+          await openKbActionEmbedRequest();
           return;
         }
         

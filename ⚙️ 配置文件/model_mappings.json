@@ -22,7 +22,8 @@
     "A30 Pro Steam 5合1版",
     "A30 Pro Steam 智享版",
     "A30 Pro Steam 2.0",
-    "A30 Pro Steam 2.0 尊享版"
+    "A30 Pro Steam 2.0 尊享版",
+    "A30 Pro Steam 2.0 5合1版"
   ],
   "A30 pure同内部名Morph Lite C": [
     "A30 Lite",
@@ -84,7 +85,9 @@
     "A30 Pro 2.0",
     "A30 Pro Steam 2.0 尊享版",
     "智净",
-    "A30 超能版"
+    "A30 超能版",
+    "A30 Pro Steam 2.0 5合1版",
+    "A30 Pro Combo 2.0"
   ],
   "A30 系列（带拓界系列）": [
     "A30 Pro",
@@ -119,7 +122,9 @@
     "A30 Pro Steam 2.0 尊享版",
     "拓界 Tech",
     "智净",
-    "A30 超能版"
+    "A30 超能版",
+    "A30 Pro Steam 2.0 5合1版",
+    "A30 Pro Combo 2.0"
   ],
   "A30系列支持联网的": [
     "A30 Pro",
@@ -129,7 +134,9 @@
     "A30 Pro Steam 5合1版",
     "A30 Pro Steam 2.0",
     "A30 Pro 2.0",
-    "A30 Pro Steam 2.0 尊享版"
+    "A30 Pro Steam 2.0 尊享版",
+    "A30 Pro Steam 2.0 5合1版",
+    "A30 Pro Combo 2.0"
   ],
   "G20S Ultra同内部名": [
     "G30 U",
@@ -152,6 +159,14 @@
     "G30曜石",
     "G30S Pro",
     "G30S Pro铂金版"
+  ],
+  "P10系列": [
+    "P10",
+    "P10 Pro",
+    "P10S",
+    "P10S Pro 系列",
+    "P10S Pro 系列超薄嵌入式",
+    "P10S Pure"
   ],
   "P20 Plus同内部名Vivian SC": [
     "P20 Plus",
@@ -700,13 +715,5 @@
     "T8 Plus",
     "G30S Pro",
     "G30S Pro铂金版"
-  ],
-  "P10系列": [
-    "P10",
-    "P10 Pro",
-    "P10S",
-    "P10S Pro 系列",
-    "P10S Pro 系列超薄嵌入式",
-    "P10S Pure"
   ]
 }
