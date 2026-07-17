@@ -15,7 +15,7 @@
   
   <!-- 原有样式 -->
   <link rel="stylesheet" href="styles.css?v=55">
-  <link rel="stylesheet" href="extra_styles.css?v=39">
+  <link rel="stylesheet" href="extra_styles.css?v=43">
   <!-- 滚动性能优化 - 暂时禁用 -->
   <!-- <link rel="stylesheet" href="scroll-performance.css?v=2"> -->
   <!-- 加载状态提示样式 -->
@@ -382,6 +382,7 @@
               <div class="workbench-nav-group" data-nav-group="核心数据">
                 <div class="workbench-nav-group-title">核心数据</div>
                 <button onclick="switchTab('kbView')" class="tab-modern workbench-nav-btn active" id="tab-kbView">知识库管理</button>
+                <button onclick="switchTab('kbDuplicateCheckView')" class="tab-modern workbench-nav-btn" id="tab-kbDuplicateCheckView">知识查重</button>
                 <button onclick="switchTab('kbCompareView')" class="tab-modern workbench-nav-btn" id="tab-kbCompareView">知识对比</button>
                 <button onclick="switchTab('matrixView')" class="tab-modern workbench-nav-btn" id="tab-matrixView">机型矩阵管理</button>
                 <button onclick="switchTab('linkView')" class="tab-modern workbench-nav-btn" id="tab-linkView">多媒体预览</button>
@@ -675,6 +676,8 @@
                         <div class="kb-compare-empty">点击摘要中的字段查看详细对比。</div>
                     </div>
 
+                    <div id="kbCompareAIRecommendation" class="kb-compare-ai d-none" aria-live="polite"></div>
+
                     <div id="kbCompareMergeDraft" class="kb-compare-merge-draft">
                         <div class="kb-compare-empty">生成合并草稿后，将展示要编辑的主 ID、建议删除的 ID 与字段采用值。</div>
                     </div>
@@ -682,6 +685,184 @@
             </div>
           </div>
       </div>
+
+
+      <div id="kbDuplicateCheckView" class="d-none">
+          <div class="kb-section kd-section">
+            <div class="kd-toolbar">
+                <div class="kd-library-switch" role="group" aria-label="查重范围">
+                    <label><input type="radio" name="kdLibrary" value="knowledge_base_v1" checked> 此刻库</label>
+                    <label><input type="radio" name="kdLibrary" value="knowledge_base_v1_t1"> 前刻库</label>
+                </div>
+                <div class="kd-toolbar-actions">
+                    <button type="button" class="action-btn btn-secondary-outline" onclick="kdSaveDraft(true)"><i class="fas fa-save"></i><span>保存草稿</span></button>
+                    <button type="button" class="action-btn btn-secondary-outline" onclick="kdClearWorkspace()"><i class="fas fa-eraser"></i><span>清空</span></button>
+                </div>
+            </div>
+
+            <section class="kd-index-admin" aria-live="polite">
+                <div class="kd-index-main">
+                    <div class="kd-index-title-row">
+                        <strong id="kdIndexTitle">知识索引未初始化</strong>
+                        <span id="kdIndexBadge" class="kd-index-badge">未就绪</span>
+                    </div>
+                    <div id="kdIndexMessage" class="kd-index-message">正在读取索引状态...</div>
+                    <div class="kd-index-progress-track" aria-hidden="true">
+                        <div id="kdIndexProgressBar" class="kd-index-progress-bar"></div>
+                    </div>
+                </div>
+                <div class="kd-index-metrics" aria-label="索引统计">
+                    <span>就绪 <b id="kdIndexReady">0</b></span>
+                    <span>待处理 <b id="kdIndexPending">0</b></span>
+                    <span>失败 <b id="kdIndexFailed">0</b></span>
+                    <span>缓存 <b id="kdIndexCache">0</b></span>
+                </div>
+                <div class="kd-index-actions">
+                    <button id="kdIndexSyncBtn" type="button" class="action-btn btn-secondary-outline" onclick="kdStartIndex('incremental')" title="同步新增或已修改的知识">
+                        <i class="fas fa-sync-alt"></i><span>同步变更</span>
+                    </button>
+                    <button id="kdIndexRebuildBtn" type="button" class="action-btn btn-secondary-outline" onclick="kdStartIndex('full')" title="检查全部知识并复用已有向量缓存">
+                        <i class="fas fa-database"></i><span>重建全部</span>
+                    </button>
+                    <button id="kdIndexRetryBtn" type="button" class="action-btn btn-secondary-outline" onclick="kdStartIndex('failed')" title="只重试失败或待处理的知识">
+                        <i class="fas fa-redo-alt"></i><span>重试失败项</span>
+                    </button>
+                    <button id="kdIndexCancelBtn" type="button" class="action-btn btn-secondary-outline d-none" onclick="kdCancelIndex()">
+                        <i class="fas fa-stop"></i><span>取消建索引</span>
+                    </button>
+                </div>
+            </section>
+
+            <div class="kd-layout">
+                <form class="kd-input-pane" onsubmit="event.preventDefault(); kdStartCheck();">
+                    <div class="kd-pane-head">
+                        <h3>拟新增知识</h3>
+                        <span id="kdDraftStatus" class="kd-subtle-status">草稿未保存</span>
+                    </div>
+
+                    <label class="kd-field" for="kdQuestion">
+                        <span>拟新增问题 <b>*</b></span>
+                        <textarea id="kdQuestion" class="input-modern" rows="3" maxlength="8000" placeholder="输入 FAQ 标准问题" required></textarea>
+                    </label>
+
+                    <label class="kd-field" for="kdAnswer">
+                        <span>拟新增答案 <b>*</b></span>
+                        <textarea id="kdAnswer" class="input-modern" rows="7" maxlength="30000" placeholder="输入完整答案或排查步骤" required></textarea>
+                    </label>
+
+                    <div class="kd-field-grid">
+                        <label class="kd-field" for="kdCategory">
+                            <span>产品品类</span>
+                            <select id="kdCategory" class="input-modern" onchange="kdRenderModelOptions()">
+                                <option value="">未指定</option>
+                            </select>
+                        </label>
+                        <label class="kd-field" for="kdModels">
+                            <span>适用型号</span>
+                            <select id="kdModels" class="input-modern kd-model-select" multiple size="5" aria-label="适用型号，可多选"></select>
+                        </label>
+                    </div>
+
+                    <label class="kd-field" for="kdSourceNote">
+                        <span>来源说明</span>
+                        <input id="kdSourceNote" class="input-modern" maxlength="4000" placeholder="Badcase、业务反馈或需求来源">
+                    </label>
+
+                    <div id="kdFormError" class="kd-inline-alert is-error d-none" role="alert"></div>
+                    <button id="kdStartBtn" type="submit" class="primary-btn btn-primary-gradient kd-start-btn">
+                        <i class="fas fa-search"></i><span>开始查重</span>
+                    </button>
+                </form>
+
+                <section class="kd-result-pane" aria-live="polite">
+                    <div id="kdEmptyState" class="kd-empty-state">
+                        <i class="fas fa-search"></i>
+                        <strong>等待查重任务</strong>
+                        <span>填写左侧内容后开始查重。</span>
+                    </div>
+
+                    <div id="kdTaskWorkspace" class="d-none">
+                        <div class="kd-progress-shell">
+                            <div class="kd-progress-head">
+                                <div>
+                                    <strong id="kdProgressTitle">准备任务</strong>
+                                    <span id="kdProgressMessage">任务尚未开始</span>
+                                </div>
+                                <span id="kdTaskStatusBadge" class="kd-status-badge">草稿</span>
+                            </div>
+                            <div class="kd-stage-track" id="kdStageTrack">
+                                <div class="kd-stage" data-stage="preparing_index"><i class="fas fa-database"></i><span>准备索引</span></div>
+                                <div class="kd-stage" data-stage="recalling"><i class="fas fa-layer-group"></i><span>候选召回</span></div>
+                                <div class="kd-stage" data-stage="ai_analyzing"><i class="fas fa-brain"></i><span>覆盖判断</span></div>
+                                <div class="kd-stage" data-stage="completed"><i class="fas fa-check"></i><span>人工确认</span></div>
+                            </div>
+                            <div class="kd-index-progress">
+                                <div id="kdProgressBar" class="kd-progress-bar"></div>
+                            </div>
+                            <div id="kdChannelStatus" class="kd-channel-status"></div>
+                        </div>
+
+                        <div id="kdResultActions" class="kd-result-actions">
+                            <button id="kdExpandBtn" type="button" class="action-btn btn-secondary-outline" onclick="kdExpandSearch()"><i class="fas fa-expand-alt"></i><span>扩大检索</span></button>
+                            <button id="kdRetryBtn" type="button" class="action-btn btn-secondary-outline" onclick="kdRetryFailed()"><i class="fas fa-redo-alt"></i><span>重试失败步骤</span></button>
+                            <button id="kdExportBtn" type="button" class="action-btn btn-secondary-outline" onclick="kdExportReport()"><i class="fas fa-file-export"></i><span>导出报告</span></button>
+                            <button id="kdCancelBtn" type="button" class="action-btn btn-secondary-outline" onclick="kdCancelTask()"><i class="fas fa-stop"></i><span>取消任务</span></button>
+                        </div>
+
+                        <div id="kdSummary" class="kd-summary d-none"></div>
+
+                        <div class="kd-candidate-head">
+                            <div>
+                                <h3>相关候选</h3>
+                                <span id="kdCandidateMeta">等待召回</span>
+                            </div>
+                            <button id="kdCompareBtn" type="button" class="action-btn btn-secondary-outline" onclick="kdOpenCompare()" disabled>
+                                <i class="fas fa-columns"></i><span>进入知识对比</span>
+                            </button>
+                        </div>
+                        <div id="kdCandidateList" class="kd-candidate-list"></div>
+
+                        <div id="kdHumanReview" class="kd-human-review d-none">
+                            <div class="kd-pane-head">
+                                <h3>人工结论</h3>
+                                <span id="kdReviewStatus" class="kd-subtle-status">尚未保存</span>
+                            </div>
+                            <div class="kd-review-controls">
+                                <label class="kd-field" for="kdDecision">
+                                    <span>处理动作</span>
+                                    <select id="kdDecision" class="input-modern">
+                                        <option value="manual_review">人工确认</option>
+                                        <option value="no_add">无需新增</option>
+                                        <option value="update_existing">扩充现有知识</option>
+                                        <option value="compare_merge">对比并合并</option>
+                                        <option value="create_new">新增知识</option>
+                                    </select>
+                                </label>
+                                <label class="kd-field kd-review-note" for="kdDecisionNote">
+                                    <span>审核备注</span>
+                                    <input id="kdDecisionNote" class="input-modern" maxlength="4000" placeholder="记录人工判断依据">
+                                </label>
+                                <button type="button" class="primary-btn" onclick="kdSaveDecision()"><i class="fas fa-check"></i><span>保存结论</span></button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+          </div>
+      </div>
+
+      <dialog id="kdCandidateDialog" class="kd-dialog" aria-labelledby="kdDialogTitle">
+          <div class="kd-dialog-head">
+              <div>
+                  <span id="kdDialogId" class="kd-dialog-id"></span>
+                  <h3 id="kdDialogTitle">候选详情</h3>
+              </div>
+              <button type="button" class="btn-ghost kd-dialog-close" onclick="document.getElementById('kdCandidateDialog')?.close()" title="关闭" aria-label="关闭">
+                  <i class="fas fa-times"></i>
+              </button>
+          </div>
+          <div id="kdDialogBody" class="kd-dialog-body"></div>
+      </dialog>
 
 
       <div id="dataSettingsView" class="d-none">
@@ -699,6 +880,25 @@
             </div>
 
             <div class="data-settings-grid">
+                <article class="data-setting-card data-setting-card-embedding">
+                    <div class="data-setting-card-head">
+                        <div class="data-setting-icon" aria-hidden="true">🧠</div>
+                        <div>
+                            <h4>Embedding 配置</h4>
+                            <p>配置智能映射和知识查重使用的语义向量模型。</p>
+                        </div>
+                    </div>
+                    <div class="data-setting-tags">
+                        <span>语义向量</span>
+                        <span>智能映射</span>
+                        <span>知识查重</span>
+                    </div>
+                    <div class="data-setting-actions">
+                        <button type="button" onclick="smOpenEmbeddingConfigDialog()" class="action-btn btn-secondary-outline">打开 Embedding 配置</button>
+                        <span id="smEmbeddingCardStatus" class="data-setting-status" role="status">正在加载配置...</span>
+                    </div>
+                </article>
+
                 <article class="data-setting-card data-setting-card-primary">
                     <div class="data-setting-card-head">
                         <div class="data-setting-icon">📥</div>
@@ -741,17 +941,24 @@
                         <div class="data-setting-icon">🔗</div>
                         <div>
                             <h4>一键同步下游</h4>
-                            <p>把当前 V1 同步到机型矩阵、多媒体链接与评分表。</p>
+                            <p>管理当前 V1 的下游数据同步，并更新知识查重索引。</p>
                         </div>
                     </div>
                     <div class="data-setting-tags">
                         <span>矩阵</span>
                         <span>多媒体</span>
                         <span>评分</span>
+                        <span>查重索引</span>
                     </div>
                     <div class="data-setting-actions">
                         <button id="syncDownstreamBtn" onclick="syncDownstreamFromV1()" class="primary-btn btn-primary-gradient">同步下游</button>
+                        <button id="syncDuplicateIndexBtn" type="button" onclick="kdStartIndex('incremental', 'knowledge_base_v1')" class="action-btn btn-secondary-outline" title="同步 V1 中新增或已修改的知识到查重索引">
+                            <i class="fas fa-sync-alt" aria-hidden="true"></i><span>增量同步索引</span>
+                        </button>
+                    </div>
+                    <div class="data-setting-actions" aria-live="polite">
                         <span id="syncDownstreamStatus" class="data-setting-status"></span>
+                        <span id="syncDuplicateIndexStatus" class="data-setting-status" role="status"></span>
                     </div>
                 </article>
 
@@ -809,6 +1016,48 @@
             </div>
           </div>
       </div>
+
+      <dialog id="smEmbeddingConfigDialog" class="embedding-config-dialog" aria-labelledby="smEmbeddingConfigTitle" onclick="if (event.target === this) smCloseEmbeddingConfigDialog()">
+          <div class="embedding-config-dialog-head">
+              <div>
+                  <h3 id="smEmbeddingConfigTitle">Embedding 配置</h3>
+                  <p>设置语义向量接口，配置将用于智能映射和知识查重。</p>
+              </div>
+              <button type="button" class="btn-ghost embedding-config-dialog-close" onclick="smCloseEmbeddingConfigDialog()" title="关闭" aria-label="关闭 Embedding 配置">
+                  <i class="fas fa-times" aria-hidden="true"></i>
+              </button>
+          </div>
+          <form class="embedding-config-form" onsubmit="event.preventDefault(); smSaveEmbeddingConfig();">
+              <div class="embedding-config-fields">
+                  <label class="sm-embedding-field sm-embedding-field-wide">
+                      <span>API 地址（URL）</span>
+                      <input id="smEmbeddingApiUrl" type="text" class="form-control" autocomplete="off" placeholder="https://api.example.com/v1/embeddings">
+                  </label>
+                  <label class="sm-embedding-field">
+                      <span>模型名称</span>
+                      <input id="smEmbeddingModel" type="text" class="form-control" autocomplete="off" placeholder="embedding-model-name">
+                  </label>
+                  <label class="sm-embedding-field sm-embedding-field-small">
+                      <span>向量维度</span>
+                      <input id="smEmbeddingDimensions" type="number" min="1" max="8192" class="form-control" inputmode="numeric">
+                  </label>
+                  <label class="sm-embedding-field sm-embedding-field-small">
+                      <span>匹配阈值</span>
+                      <input id="smEmbeddingThreshold" type="number" min="0.01" max="1" step="0.01" class="form-control" inputmode="decimal">
+                  </label>
+                  <label class="sm-embedding-field sm-embedding-field-key">
+                      <span>API Key</span>
+                      <input id="smEmbeddingApiKey" type="password" class="form-control" autocomplete="new-password" placeholder="已配置时无需重复填写">
+                  </label>
+              </div>
+              <div id="smEmbeddingConfigStatus" class="embedding-config-status" role="status" aria-live="polite">正在加载配置...</div>
+              <div class="embedding-config-actions">
+                  <button type="button" onclick="smCloseEmbeddingConfigDialog()" class="action-btn btn-secondary-outline">取消</button>
+                  <button type="button" onclick="smTestEmbeddingConfig()" id="smEmbeddingTestBtn" class="action-btn btn-secondary-outline">测试连接</button>
+                  <button type="submit" id="smEmbeddingSaveBtn" class="primary-btn">保存配置</button>
+              </div>
+          </form>
+      </dialog>
 
 
 
@@ -1924,6 +2173,9 @@
 
             <div class="kb-header-group">
                 <div class="kb-title">模块二：智能语义比对引擎</div>
+                <div class="sm-embedding-meta">
+                    <span id="smAlgorithmStatus" class="text-muted">当前算法：Embedding</span>
+                </div>
                 <div class="sm-row">
                     <button onclick="smStartCompare()" id="smCompareBtn" class="primary-btn" disabled>开始比对</button>
                     <div class="sm-progress-wrapper">
@@ -1932,7 +2184,7 @@
                         </div>
                         <span id="smProgressText" class="text-muted"></span>
                     </div>
-                    <span class="text-muted">阈值：0.7</span>
+                    <span id="smThresholdLabel" class="text-muted">Embedding 阈值：0.75</span>
                 </div>
             </div>
 
@@ -3500,7 +3752,7 @@ G10 系列: G10S, G10S Pro"></textarea>
         </div>
     </div>
 
-    <script src="app_v8.js?v=139"></script>
+    <script src="app_v8.js?v=142"></script>
 
   <!-- KB Tag Filter Modal -->
   <div id="kbTagFilterModal" class="modal">

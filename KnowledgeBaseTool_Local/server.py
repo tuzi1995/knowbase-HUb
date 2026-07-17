@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import shutil
 import sys
+from array import array
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 from datetime import datetime
@@ -110,6 +111,9 @@ _SM_LOCK = threading.Lock()
 _SM_BASELINE_CACHE = {}
 _SM_JOBS = {}
 _SM_DB_CLEAN_TS = 0.0
+_KD_LOCK = threading.Lock()
+_KD_ACTIVE_TASKS = set()
+_KD_INDEX_ACTIVE_JOBS = set()
 
 
 
@@ -189,6 +193,94 @@ class SmartMappingJob(db.Model):
     results_json = db.Column(db.Text)
     created_ts = db.Column(db.Float, default=lambda: time.time())
     updated_ts = db.Column(db.Float, default=lambda: time.time())
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SmartMappingEmbeddingCache(db.Model):
+    __tablename__ = 'smart_mapping_embedding_cache'
+    cache_key = db.Column(db.String(64), primary_key=True)
+    model = db.Column(db.String(240), nullable=False, index=True)
+    dimensions = db.Column(db.Integer, nullable=False)
+    vector_blob = db.Column(db.LargeBinary, nullable=False)
+    updated_ts = db.Column(db.Float, default=lambda: time.time(), index=True)
+
+
+class KBDuplicateRetrievalIndex(db.Model):
+    __tablename__ = 'kb_retrieval_index'
+    id = db.Column(db.Integer, primary_key=True)
+    library_type = db.Column(db.String(40), nullable=False, index=True)
+    question_wiki_id = db.Column(db.String(160), nullable=False, index=True)
+    content_hash = db.Column(db.String(64), nullable=False)
+    intent_cache_key = db.Column(db.String(64), default='')
+    content_cache_keys_json = db.Column(db.Text, default='[]')
+    question = db.Column(db.Text, default='')
+    answer = db.Column(db.Text, default='')
+    similar_questions_json = db.Column(db.Text, default='[]')
+    product_category_name = db.Column(db.Text, default='')
+    product_names_json = db.Column(db.Text, default='[]')
+    topic_terms_json = db.Column(db.Text, default='[]')
+    source_update_time = db.Column(db.String(100), default='')
+    index_status = db.Column(db.String(20), default='pending', index=True)
+    last_error = db.Column(db.Text, default='')
+    indexed_at = db.Column(db.DateTime)
+    updated_ts = db.Column(db.Float, default=lambda: time.time(), index=True)
+
+    __table_args__ = (
+        db.UniqueConstraint('library_type', 'question_wiki_id', name='uq_kb_retrieval_library_wiki'),
+    )
+
+
+class KBDuplicateCheckTask(db.Model):
+    __tablename__ = 'kb_duplicate_check_task'
+    task_id = db.Column(db.String(36), primary_key=True)
+    username = db.Column(db.String(80), default='', index=True)
+    library = db.Column(db.String(40), default='knowledge_base_v1')
+    status = db.Column(db.String(24), default='running', index=True)
+    stage = db.Column(db.String(40), default='preparing_index')
+    question = db.Column(db.Text, default='')
+    answer = db.Column(db.Text, default='')
+    product_category_name = db.Column(db.Text, default='')
+    product_names_json = db.Column(db.Text, default='[]')
+    source_note = db.Column(db.Text, default='')
+    top_k = db.Column(db.Integer, default=20)
+    expanded = db.Column(db.Boolean, default=False)
+    index_total = db.Column(db.Integer, default=0)
+    index_done = db.Column(db.Integer, default=0)
+    candidate_count = db.Column(db.Integer, default=0)
+    completed_channels_json = db.Column(db.Text, default='[]')
+    failed_stages_json = db.Column(db.Text, default='[]')
+    candidates_json = db.Column(db.Text, default='[]')
+    analysis_json = db.Column(db.Text, default='{}')
+    config_snapshot_json = db.Column(db.Text, default='{}')
+    human_decision = db.Column(db.String(40), default='')
+    human_note = db.Column(db.Text, default='')
+    selected_source_ids_json = db.Column(db.Text, default='[]')
+    cancel_requested = db.Column(db.Boolean, default=False)
+    message = db.Column(db.Text, default='')
+    created_ts = db.Column(db.Float, default=lambda: time.time(), index=True)
+    updated_ts = db.Column(db.Float, default=lambda: time.time(), index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class KBDuplicateIndexJob(db.Model):
+    __tablename__ = 'kb_duplicate_index_job'
+    job_id = db.Column(db.String(36), primary_key=True)
+    username = db.Column(db.String(80), default='', index=True)
+    library = db.Column(db.String(40), default='knowledge_base_v1', index=True)
+    mode = db.Column(db.String(20), default='incremental')
+    status = db.Column(db.String(24), default='running', index=True)
+    total = db.Column(db.Integer, default=0)
+    done = db.Column(db.Integer, default=0)
+    cache_hits = db.Column(db.Integer, default=0)
+    failed_count = db.Column(db.Integer, default=0)
+    message = db.Column(db.Text, default='')
+    error = db.Column(db.Text, default='')
+    cancel_requested = db.Column(db.Boolean, default=False)
+    config_snapshot_json = db.Column(db.Text, default='{}')
+    created_ts = db.Column(db.Float, default=lambda: time.time(), index=True)
+    updated_ts = db.Column(db.Float, default=lambda: time.time(), index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -3526,6 +3618,150 @@ def _parse_similar_questions(v):
                 seen.add(val)
         return out
     return []
+
+
+def _kb_compare_ai_text(value, limit=16000):
+    """Keep comparison prompts bounded without changing the source records."""
+    if value is None:
+        return ''
+    if isinstance(value, (dict, list)):
+        try:
+            value = json.dumps(value, ensure_ascii=False)
+        except Exception:
+            value = str(value)
+    return str(value).strip()[:limit]
+
+
+def _kb_compare_ai_bool(value):
+    if isinstance(value, bool):
+        return value
+    text = str(value or '').strip().lower()
+    if text in ('true', '1', 'yes', 'y', '建议合并', '合并', '是'):
+        return True
+    if text in ('false', '0', 'no', 'n', '不建议合并', '不合并', '否'):
+        return False
+    return None
+
+
+def _kb_compare_ai_confidence(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if number > 1:
+        number /= 100
+    return round(max(0.0, min(1.0, number)), 3)
+
+
+def _kb_compare_ai_records(raw_records):
+    if not isinstance(raw_records, list):
+        return []
+    records = []
+    seen_ids = set()
+    for raw in raw_records:
+        if not isinstance(raw, dict):
+            continue
+        record_id = _kb_compare_ai_text(raw.get('question_wiki_id') or raw.get('id'), 160)
+        if not record_id or record_id in seen_ids:
+            continue
+        seen_ids.add(record_id)
+        records.append({
+            'question_wiki_id': record_id,
+            'question': _kb_compare_ai_text(raw.get('question')),
+            'answer': _kb_compare_ai_text(raw.get('answer'), 24000),
+            'similar_questions': _parse_similar_questions(raw.get('similar_questions'))[:80],
+            'product_name': _kb_compare_ai_text(raw.get('product_name'), 4000),
+            'product_category_name': _kb_compare_ai_text(raw.get('product_category_name'), 2000),
+            'question_type': _kb_compare_ai_text(raw.get('question_type'), 1000),
+            'answer_type': _kb_compare_ai_text(raw.get('answer_type'), 1000),
+            'link_type': _kb_compare_ai_text(raw.get('link_type'), 1000),
+            'link_url': _kb_compare_ai_text(raw.get('link_url'), 4000),
+        })
+    return records
+
+
+@app.route('/api/kb/compare/ai_merge', methods=['POST'])
+@login_required
+def kb_compare_ai_merge():
+    """Recommend whether records can merge and generate only the three content fields."""
+    payload = request.json or {}
+    records = _kb_compare_ai_records(payload.get('records'))
+    if len(records) < 2:
+        return jsonify({'success': False, 'message': '至少需要 2 条有效记录进行 AI 合并判断'}), 400
+    if len(records) > 20:
+        return jsonify({'success': False, 'message': '单次 AI 合并判断最多支持 20 条记录，请拆分后重试'}), 400
+
+    base_id = _kb_compare_ai_text(payload.get('base_id'), 160)
+    system_prompt = (
+        '你是企业知识库治理审核员，负责判断多条知识库记录是否属于同一用户意图，并在可以合并时生成一份可人工复核的内容草稿。\n'
+        '必须只输出合法 JSON，不要输出 Markdown 代码块或额外解释。\n'
+        '合并判断规则：\n'
+        '1. 只有当问题表达的是同一用户意图、操作目标和适用边界时才建议合并。\n'
+        '2. 如果功能、步骤、产品范围或限制条件存在无法消解的冲突，建议不合并。\n'
+        '3. 产品型号不同不必然禁止合并，但答案必须能同时适用于所有记录；无法确认时不合并。\n'
+        '4. 不得补造输入记录中不存在的按钮、能力、参数或结论。\n'
+        '5. 建议合并时，问题要能代表共同意图，答案只保留输入中可核验的事实，相似问题要去重并覆盖原问题的自然问法。\n'
+        '6. 其他字段（型号、分类、类型、治理、链接）由系统按原规则处理，你只能生成 question、answer、similar_questions。\n'
+        '输出结构：\n'
+        '{"recommend_merge": true|false, "confidence": 0-1, "reason": "简洁原因", "conflicts": ["冲突点"], "question": "合并后问题", "answer": "合并后答案", "similar_questions": ["相似问题"]}\n'
+        '当 recommend_merge=false 时，question、answer、similar_questions 必须返回空字符串或空数组。'
+    )
+    user_prompt = (
+        f'当前主记录 ID：{base_id or records[0]["question_wiki_id"]}\n'
+        '请分析以下记录：\n'
+        + json.dumps(records, ensure_ascii=False, indent=2)
+    )
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            raw = _ai_call_llm(load_ai_config() or {}, system_prompt, user_prompt, temperature=0.1)
+            result = _ai_repair_mojibake_value(_ai_extract_json(raw))
+            if not isinstance(result, dict):
+                raise ValueError('AI 未返回合法 JSON')
+
+            recommend_merge = _kb_compare_ai_bool(result.get('recommend_merge'))
+            if recommend_merge is None:
+                raise ValueError('AI 未返回明确的合并建议')
+            reason = _kb_compare_ai_text(result.get('reason'), 2000)
+            if not reason:
+                raise ValueError('AI 未返回合并判断原因')
+            conflicts = _parse_similar_questions(result.get('conflicts'))[:12]
+            confidence = _kb_compare_ai_confidence(result.get('confidence'))
+            question = _kb_compare_ai_text(result.get('question'), 8000) if recommend_merge else ''
+            answer = _kb_compare_ai_text(result.get('answer'), 30000) if recommend_merge else ''
+            similar_questions = _parse_similar_questions(result.get('similar_questions'))[:20] if recommend_merge else []
+            if recommend_merge and (not question or not answer or not similar_questions):
+                raise ValueError('建议合并时必须同时返回问题、答案和相似问题')
+
+            return jsonify({
+                'success': True,
+                'data': {
+                    'recommend_merge': recommend_merge,
+                    'confidence': confidence,
+                    'reason': reason,
+                    'conflicts': conflicts,
+                    'question': question,
+                    'answer': answer,
+                    'similar_questions': similar_questions,
+                    'base_id': base_id or records[0]['question_wiki_id'],
+                    'source_ids': [record['question_wiki_id'] for record in records],
+                }
+            })
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                user_prompt += '\n\n请修正上一轮输出，只返回符合结构的严格 JSON。'
+
+    raw_message = str(last_error or '').strip()
+    if 'AI 配置不完整' in raw_message:
+        safe_message = raw_message
+    elif raw_message.startswith('HTTP '):
+        status_code = raw_message.split(':', 1)[0]
+        safe_message = f'AI 服务请求失败（{status_code}），请检查 AI 配置或接口可用性。'
+    else:
+        safe_message = 'AI 输出未通过校验，请稍后重试。'
+    return jsonify({'success': False, 'message': safe_message}), 500
 
 @app.route('/api/kb/data', methods=['GET'])
 @login_required
@@ -13691,6 +13927,1610 @@ def kb_export():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+_SM_EMBEDDING_DEFAULTS = {
+    'api_url': 'https://api.siliconflow.cn/v1/embeddings',
+    'model': 'Pro/BAAI/bge-m3',
+    'dimensions': 1024,
+    'threshold': 0.75,
+    'batch_size': 64,
+    'timeout': 60,
+    'fallback_to_ngram': True,
+}
+_SM_EMBEDDING_TEXT_MAX_CHARS = 12000
+_SM_EMBEDDING_TRANSIENT_STATUS = {408, 409, 429, 500, 502, 503, 504}
+
+
+def _sm_embedding_config_path():
+    return os.path.join(_BASE_DIR, 'smart_mapping_embedding_config.json')
+
+
+def _sm_embedding_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    text_value = str(value or '').strip().lower()
+    if text_value in ('1', 'true', 'yes', 'on'):
+        return True
+    if text_value in ('0', 'false', 'no', 'off'):
+        return False
+    return bool(default)
+
+
+def _sm_embedding_number(value, default, cast, minimum, maximum):
+    try:
+        number = cast(value)
+    except (TypeError, ValueError):
+        number = cast(default)
+    return max(minimum, min(maximum, number))
+
+
+def _sm_read_embedding_config_file():
+    path = _sm_embedding_config_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _sm_normalize_embedding_config(raw=None, fallback_key=True):
+    raw = raw if isinstance(raw, dict) else {}
+    config = dict(_SM_EMBEDDING_DEFAULTS)
+    for key in ('api_url', 'model'):
+        value = str(raw.get(key) or '').strip()
+        if value:
+            config[key] = value
+    config['dimensions'] = _sm_embedding_number(raw.get('dimensions'), config['dimensions'], int, 1, 8192)
+    config['threshold'] = _sm_embedding_number(raw.get('threshold'), config['threshold'], float, 0.01, 1.0)
+    config['batch_size'] = _sm_embedding_number(raw.get('batch_size'), config['batch_size'], int, 1, 128)
+    config['timeout'] = _sm_embedding_number(raw.get('timeout'), config['timeout'], int, 5, 300)
+    config['fallback_to_ngram'] = _sm_embedding_bool(
+        raw.get('fallback_to_ngram'), config['fallback_to_ngram']
+    )
+
+    custom_key = str(raw.get('api_key') or '').strip()
+    embedding_host = urlparse(str(config.get('api_url') or '')).netloc.lower()
+    provider_env_key = ''
+    if 'siliconflow' in embedding_host:
+        provider_env_key = str(os.environ.get('SILICONFLOW_API_KEY') or '').strip()
+    elif 'openai.com' in embedding_host:
+        provider_env_key = str(os.environ.get('OPENAI_API_KEY') or '').strip()
+    env_key = str(os.environ.get('KMATRIX_SM_EMBEDDING_API_KEY') or '').strip() or provider_env_key
+    root_key = ''
+    if fallback_key:
+        try:
+            ai_config = load_ai_config() or {}
+            ai_host = urlparse(str(ai_config.get('base_url') or '')).netloc.lower()
+            if embedding_host and ai_host and embedding_host == ai_host:
+                root_key = str(ai_config.get('api_key') or '').strip()
+        except Exception:
+            root_key = ''
+    config['api_key'] = env_key or custom_key or root_key
+    config['api_key_source'] = 'environment' if env_key else ('custom' if custom_key else ('ai_config' if root_key else ''))
+    return config
+
+
+def _sm_load_embedding_config():
+    return _sm_normalize_embedding_config(_sm_read_embedding_config_file())
+
+
+def _sm_public_embedding_config(config=None):
+    config = dict(config or _sm_load_embedding_config())
+    api_key = str(config.pop('api_key', '') or '')
+    config['api_key_configured'] = bool(api_key)
+    config['api_key_source'] = str(config.get('api_key_source') or '')
+    try:
+        config['cache_count'] = int(
+            SmartMappingEmbeddingCache.query.filter_by(
+                model=str(config.get('model') or ''),
+                dimensions=int(config.get('dimensions') or 0),
+            ).count()
+        )
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        config['cache_count'] = 0
+    return config
+
+
+def _sm_validate_embedding_config(config):
+    api_url = str(config.get('api_url') or '').strip()
+    if not re.match(r'^https?://', api_url, re.IGNORECASE):
+        raise ValueError('Embedding API URL 必须是完整的 http/https 地址')
+    if not str(config.get('model') or '').strip():
+        raise ValueError('Embedding 模型不能为空')
+    if not str(config.get('api_key') or '').strip():
+        raise ValueError('Embedding API Key 未配置，可单独填写或复用现有 AI 配置 Key')
+
+
+def _sm_save_embedding_config(payload):
+    current_raw = _sm_read_embedding_config_file()
+    merged = dict(current_raw)
+    payload = payload if isinstance(payload, dict) else {}
+    for key in ('api_url', 'model', 'dimensions', 'threshold', 'batch_size', 'timeout', 'fallback_to_ngram'):
+        if key in payload:
+            merged[key] = payload.get(key)
+    if _sm_embedding_bool(payload.get('clear_api_key'), False):
+        merged.pop('api_key', None)
+    else:
+        new_key = str(payload.get('api_key') or '').strip()
+        if new_key:
+            merged['api_key'] = new_key
+
+    normalized = _sm_normalize_embedding_config(merged)
+    _sm_validate_embedding_config(normalized)
+    stored = {key: normalized[key] for key in _SM_EMBEDDING_DEFAULTS}
+    if str(merged.get('api_key') or '').strip():
+        stored['api_key'] = str(merged.get('api_key') or '').strip()
+
+    path = _sm_embedding_config_path()
+    temp_path = ''
+    try:
+        with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=_BASE_DIR, delete=False) as handle:
+            json.dump(stored, handle, ensure_ascii=False, indent=2)
+            handle.write('\n')
+            temp_path = handle.name
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+    return _sm_load_embedding_config()
+
+
+def _sm_embedding_request(texts, config):
+    _sm_validate_embedding_config(config)
+    clean_texts = [str(text or '').strip()[:_SM_EMBEDDING_TEXT_MAX_CHARS] for text in texts]
+    if not clean_texts or any(not text for text in clean_texts):
+        raise ValueError('Embedding 输入文本不能为空')
+    payload = {
+        'model': str(config.get('model') or '').strip(),
+        'input': clean_texts,
+    }
+    model_lower = payload['model'].lower()
+    if model_lower.startswith('text-embedding-') or 'qwen3' in model_lower:
+        payload['dimensions'] = int(config.get('dimensions') or 0)
+    headers = {
+        'Authorization': f"Bearer {config.get('api_key')}",
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+    }
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                str(config.get('api_url') or '').strip(),
+                headers=headers,
+                json=payload,
+                timeout=int(config.get('timeout') or 60),
+            )
+            if response.status_code >= 400:
+                detail = str(response.text or '').strip().replace('\n', ' ')[:300]
+                last_error = RuntimeError(f'Embedding API 请求失败（HTTP {response.status_code}）：{detail}')
+                if response.status_code not in _SM_EMBEDDING_TRANSIENT_STATUS:
+                    break
+            else:
+                body = response.json()
+                items = body.get('data') if isinstance(body, dict) else None
+                if not isinstance(items, list):
+                    raise RuntimeError('Embedding API 响应缺少 data 数组')
+                items = sorted(items, key=lambda item: int(item.get('index', 0)))
+                vectors = [item.get('embedding') for item in items]
+                if len(vectors) != len(clean_texts):
+                    raise RuntimeError(f'Embedding API 返回 {len(vectors)} 条向量，预期 {len(clean_texts)} 条')
+                expected_dimensions = int(config.get('dimensions') or 0)
+                for vector in vectors:
+                    if not isinstance(vector, list) or not vector:
+                        raise RuntimeError('Embedding API 返回了空向量')
+                    if expected_dimensions and len(vector) != expected_dimensions:
+                        raise RuntimeError(
+                            f'Embedding 向量维度为 {len(vector)}，与配置的 {expected_dimensions} 不一致'
+                        )
+                return [[float(value) for value in vector] for vector in vectors]
+        except (requests.RequestException, ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
+            last_error = exc if isinstance(exc, RuntimeError) else RuntimeError(f'Embedding API 请求失败：{exc}')
+        if attempt < 2:
+            time.sleep(1.0 * (attempt + 1))
+    raise last_error or RuntimeError('Embedding API 请求失败')
+
+
+def _sm_embedding_cache_key(text_value, config):
+    raw = '|'.join([
+        'v1',
+        str(config.get('api_url') or '').strip(),
+        str(config.get('model') or '').strip(),
+        str(int(config.get('dimensions') or 0)),
+        str(text_value or '').strip()[:_SM_EMBEDDING_TEXT_MAX_CHARS],
+    ])
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _sm_unpack_embedding(blob, dimensions):
+    values = array('f')
+    values.frombytes(bytes(blob or b''))
+    if len(values) != int(dimensions or 0):
+        return None
+    return [float(value) for value in values]
+
+
+def _sm_load_cached_embeddings(cache_keys, config):
+    found = {}
+    keys = list(dict.fromkeys(str(key) for key in cache_keys if key))
+    for start in range(0, len(keys), 400):
+        batch = keys[start:start + 400]
+        rows = SmartMappingEmbeddingCache.query.filter(
+            SmartMappingEmbeddingCache.cache_key.in_(batch)
+        ).all()
+        for row in rows:
+            vector = _sm_unpack_embedding(row.vector_blob, row.dimensions)
+            if vector is not None:
+                found[row.cache_key] = vector
+    return found
+
+
+def _sm_store_cached_embeddings(items, config):
+    if not items:
+        return
+    model = str(config.get('model') or '')
+    dimensions = int(config.get('dimensions') or 0)
+    now = time.time()
+    for cache_key, vector in items:
+        blob = array('f', [float(value) for value in vector]).tobytes()
+        db.session.merge(SmartMappingEmbeddingCache(
+            cache_key=str(cache_key),
+            model=model,
+            dimensions=dimensions,
+            vector_blob=blob,
+            updated_ts=now,
+        ))
+    db.session.commit()
+
+
+def _sm_get_embeddings(texts, config):
+    results = [None] * len(texts)
+    key_to_text = OrderedDict()
+    key_to_indexes = {}
+    for index, value in enumerate(texts):
+        text_value = str(value or '').strip()[:_SM_EMBEDDING_TEXT_MAX_CHARS]
+        if not text_value:
+            continue
+        cache_key = _sm_embedding_cache_key(text_value, config)
+        key_to_text.setdefault(cache_key, text_value)
+        key_to_indexes.setdefault(cache_key, []).append(index)
+
+    try:
+        cached = _sm_load_cached_embeddings(list(key_to_text.keys()), config)
+    except Exception:
+        try:
+            db.session.rollback()
+            init_db()
+            cached = _sm_load_cached_embeddings(list(key_to_text.keys()), config)
+        except Exception:
+            db.session.rollback()
+            cached = {}
+
+    missing_keys = [key for key in key_to_text if key not in cached]
+    batch_size = int(config.get('batch_size') or 64)
+    generated = []
+    for start in range(0, len(missing_keys), batch_size):
+        batch_keys = missing_keys[start:start + batch_size]
+        batch_texts = [key_to_text[key] for key in batch_keys]
+        batch_vectors = _sm_embedding_request(batch_texts, config)
+        for cache_key, vector in zip(batch_keys, batch_vectors):
+            cached[cache_key] = vector
+            generated.append((cache_key, vector))
+    if generated:
+        try:
+            _sm_store_cached_embeddings(generated, config)
+        except Exception:
+            db.session.rollback()
+
+    for cache_key, indexes in key_to_indexes.items():
+        vector = cached.get(cache_key)
+        for index in indexes:
+            results[index] = vector
+    return results
+
+
+def _sm_vector_cosine(left, right):
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return float(dot / (left_norm * right_norm))
+
+
+def _sm_embedding_reason(match_type, question_score, answer_score, fallback_reason=''):
+    if fallback_reason:
+        return _sm_trim_reason(f'Embedding不可用，已降级字符相似度：{fallback_reason}', 80)
+    q_text = f'{max(0.0, min(1.0, float(question_score or 0))) * 100:.1f}%'
+    a_text = f'{max(0.0, min(1.0, float(answer_score or 0))) * 100:.1f}%'
+    if match_type == '无匹配':
+        return f'Embedding未达到阈值；问题{q_text}，答案{a_text}'
+    if match_type == '仅问题一致':
+        return f'Embedding问题语义匹配{q_text}；答案仅{a_text}'
+    if match_type == '仅答案一致':
+        return f'Embedding答案语义匹配{a_text}；问题仅{q_text}'
+    return f'Embedding问题{q_text}、答案{a_text}均达到阈值'
+
+
+@app.route('/api/smart_mapping/embedding/config', methods=['GET', 'POST'])
+@login_required
+def sm_embedding_config():
+    if request.method == 'GET':
+        return jsonify({'success': True, 'config': _sm_public_embedding_config()})
+    try:
+        config = _sm_save_embedding_config(request.json or {})
+        return jsonify({'success': True, 'config': _sm_public_embedding_config(config)})
+    except Exception as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+
+
+@app.route('/api/smart_mapping/embedding/test', methods=['POST'])
+@login_required
+def sm_embedding_test():
+    payload = request.json or {}
+    raw = _sm_read_embedding_config_file()
+    raw.update({key: value for key, value in payload.items() if value not in (None, '')})
+    config = _sm_normalize_embedding_config(raw)
+    try:
+        vectors = _sm_embedding_request(['扫地机清扫效果检查', '主刷和风道堵塞排查'], config)
+        return jsonify({
+            'success': True,
+            'message': 'Embedding API 连接成功',
+            'model': config.get('model'),
+            'dimensions': len(vectors[0]) if vectors else 0,
+        })
+    except Exception as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 502
+
+
+_KD_PROMPT_VERSION = 'duplicate-check-p1-v1'
+_KD_DOMAIN_TERMS = (
+    '主刷', '边刷', '尘盒', '滤网', '吸口', '风道', '集尘口', '毛发', '异响',
+    '漏垃圾', '堵塞', '安装不到位', '清扫效果差', '清扫不干净', '吐头发',
+    '甩出毛发', '吸不进去', '清理', '检查', '更换', '安装', '复位', '重试',
+)
+_KD_RELATIONSHIPS = {
+    'fully_covered', 'partially_covered', 'collectively_covered',
+    'conflicting', 'unrelated',
+}
+_KD_ACTIONS = {
+    'no_add', 'update_existing', 'compare_merge', 'create_new', 'manual_review',
+}
+
+
+def _kd_json_load(raw, default):
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        value = json.loads(raw or '')
+        return value if isinstance(value, type(default)) else default
+    except Exception:
+        return default
+
+
+def _kd_json_dump(value):
+    return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+
+
+def _kd_string_list(value, limit=100):
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    elif isinstance(value, dict):
+        raw_items = list(value.values())
+    else:
+        text_value = str(value or '').strip()
+        if not text_value:
+            return []
+        if text_value[:1] in ('[', '{'):
+            try:
+                return _kd_string_list(json.loads(text_value), limit=limit)
+            except Exception:
+                pass
+        raw_items = re.split(r'[\n,，;；、/|]+', text_value)
+    result = []
+    seen = set()
+    for item in raw_items:
+        text_item = str(item or '').strip()
+        if text_item and text_item not in seen:
+            seen.add(text_item)
+            result.append(text_item)
+            if len(result) >= limit:
+                break
+    return result
+
+
+def _kd_norm(value):
+    return re.sub(r'[^\u3400-\u9fffA-Za-z0-9]+', '', str(value or '')).lower()
+
+
+def _kd_topic_terms(*values):
+    text_value = ' '.join(str(value or '') for value in values)
+    normalized = _kd_norm(text_value)
+    terms = [term for term in _KD_DOMAIN_TERMS if _kd_norm(term) in normalized]
+    for token in re.findall(r'[A-Za-z]+[A-Za-z0-9_.-]*|\d+[A-Za-z0-9_.-]*', text_value):
+        token = token.strip()
+        if len(token) >= 2 and token not in terms:
+            terms.append(token)
+    return terms[:60]
+
+
+def _kd_answer_points(answer):
+    parts = re.split(r'[\r\n]+|(?<=[。！？；;])', str(answer or ''))
+    points = [part.strip(' \t-•0123456789.、）)') for part in parts]
+    return [point for point in points if len(point) >= 2][:30]
+
+
+def _kd_index_intent_text(question, similar_questions):
+    values = [str(question or '').strip()] + _kd_string_list(similar_questions, limit=30)
+    return '\n'.join(value for value in values if value)[:_SM_EMBEDDING_TEXT_MAX_CHARS]
+
+
+def _kd_content_hash(row):
+    payload = {
+        'question': str(row.get('question') or ''),
+        'answer': str(row.get('answer') or ''),
+        'similar_questions': _kd_string_list(row.get('similar_questions')),
+        'product_category_name': str(row.get('product_category_name') or ''),
+        'product_name': _kd_string_list(row.get('product_name')),
+        'keyword_list': _kd_string_list(row.get('keyword_list')),
+        'error_list': _kd_string_list(row.get('error_list')),
+    }
+    return hashlib.sha256(_kd_json_dump(payload).encode('utf-8')).hexdigest()
+
+
+def _kd_task_username():
+    return current_user.username if current_user.is_authenticated else ''
+
+
+def _kd_task_owned(task):
+    return bool(task and (not task.username or task.username == _kd_task_username()))
+
+
+def _kd_update_task(task_id, **fields):
+    task = KBDuplicateCheckTask.query.get(str(task_id))
+    if not task:
+        return None
+    for key, value in fields.items():
+        if hasattr(task, key):
+            setattr(task, key, value)
+    task.updated_ts = time.time()
+    db.session.commit()
+    return task
+
+
+def _kd_task_payload(task, include_results=True):
+    completed = _kd_json_load(task.completed_channels_json, [])
+    failed = _kd_json_load(task.failed_stages_json, [])
+    payload = {
+        'task_id': task.task_id,
+        'status': task.status,
+        'stage': task.stage,
+        'message': task.message or '',
+        'library': task.library,
+        'question': task.question or '',
+        'answer': task.answer or '',
+        'product_category_name': task.product_category_name or '',
+        'product_names': _kd_json_load(task.product_names_json, []),
+        'source_note': task.source_note or '',
+        'top_k': int(task.top_k or 20),
+        'expanded': bool(task.expanded),
+        'index': {
+            'total': int(task.index_total or 0),
+            'done': int(task.index_done or 0),
+        },
+        'candidate_count': int(task.candidate_count or 0),
+        'completed_channels': completed,
+        'failed_stages': failed,
+        'human_decision': task.human_decision or '',
+        'human_note': task.human_note or '',
+        'selected_source_ids': _kd_json_load(task.selected_source_ids_json, []),
+        'created_ts': float(task.created_ts or 0),
+        'updated_ts': float(task.updated_ts or 0),
+    }
+    if include_results:
+        payload['candidates'] = _kd_json_load(task.candidates_json, [])
+        payload['analysis'] = _kd_json_load(task.analysis_json, {})
+        payload['config_snapshot'] = _kd_json_load(task.config_snapshot_json, {})
+    return payload
+
+
+def _kd_config_snapshot():
+    embedding = _sm_public_embedding_config()
+    try:
+        ai_config = load_ai_config() or {}
+    except Exception:
+        ai_config = {}
+    return {
+        'embedding': {
+            'api_host': urlparse(str(embedding.get('api_url') or '')).netloc,
+            'model': embedding.get('model') or '',
+            'dimensions': int(embedding.get('dimensions') or 0),
+        },
+        'coverage_ai': {
+            'api_host': urlparse(str(ai_config.get('base_url') or '')).netloc,
+            'model': str(ai_config.get('model') or ''),
+            'prompt_version': _KD_PROMPT_VERSION,
+        },
+    }
+
+
+def _kd_fetch_source_rows(library):
+    client = get_supabase_client()
+    if not client:
+        raise RuntimeError(_db_not_configured_message())
+    columns = (
+        'question_wiki_id,question,answer,similar_questions,product_name,'
+        'product_category_name,keyword_list,error_list,update_time'
+    )
+    return client.select_all(
+        library,
+        order_by='question_wiki_id',
+        order_dir='asc',
+        columns=columns,
+        page_size=1000,
+    ) or []
+
+
+def _kd_cached_embedding_keys(cache_keys):
+    found = set()
+    keys = list(dict.fromkeys(str(key) for key in cache_keys if key))
+    for start in range(0, len(keys), 400):
+        rows = SmartMappingEmbeddingCache.query.with_entities(
+            SmartMappingEmbeddingCache.cache_key
+        ).filter(
+            SmartMappingEmbeddingCache.cache_key.in_(keys[start:start + 400])
+        ).all()
+        found.update(str(row[0]) for row in rows if row and row[0])
+    return found
+
+
+def _kd_sync_index(task, progress_callback=None, cancel_check=None, mode='incremental'):
+    mode = mode if mode in ('incremental', 'full', 'failed') else 'incremental'
+
+    def report(done, total, cache_hits, failed_count, message):
+        if progress_callback:
+            progress_callback(done, total, cache_hits, failed_count, message)
+            return
+        _kd_update_task(
+            task.task_id,
+            index_total=total,
+            index_done=done,
+            message=message,
+        )
+
+    def should_cancel():
+        if cancel_check:
+            return bool(cancel_check())
+        current_task = KBDuplicateCheckTask.query.get(task.task_id)
+        return bool(current_task and current_task.cancel_requested)
+
+    rows = _kd_fetch_source_rows(task.library)
+    config = _sm_load_embedding_config()
+    existing = {
+        item.question_wiki_id: item
+        for item in KBDuplicateRetrievalIndex.query.filter_by(library_type=task.library).all()
+    }
+    changed = []
+    seen_ids = set()
+    unchanged_count = 0
+
+    for row in rows:
+        wiki_id = str(row.get('question_wiki_id') or '').strip()
+        question = str(row.get('question') or '').strip()
+        if not wiki_id or not question:
+            continue
+        seen_ids.add(wiki_id)
+        answer = str(row.get('answer') or '').strip()
+        similar_questions = _kd_string_list(row.get('similar_questions'))
+        product_names = _kd_string_list(row.get('product_name'))
+        category = str(row.get('product_category_name') or '').strip()
+        topic_terms = _kd_topic_terms(
+            question,
+            answer,
+            ' '.join(similar_questions),
+            ' '.join(_kd_string_list(row.get('keyword_list'))),
+            ' '.join(_kd_string_list(row.get('error_list'))),
+        )
+        intent_text = _kd_index_intent_text(question, similar_questions)
+        intent_key = _sm_embedding_cache_key(intent_text, config)
+        content_key = _sm_embedding_cache_key(answer, config) if answer else ''
+        content_hash = _kd_content_hash(row)
+        item = existing.get(wiki_id)
+        is_current = bool(
+            item
+            and item.index_status == 'ready'
+            and item.content_hash == content_hash
+            and item.intent_cache_key == intent_key
+            and _kd_json_load(item.content_cache_keys_json, []) == ([content_key] if content_key else [])
+        )
+        is_failed_target = bool(item and item.index_status in ('failed', 'pending'))
+        if mode == 'failed' and not is_failed_target:
+            unchanged_count += 1
+            continue
+        if mode == 'incremental' and is_current:
+            unchanged_count += 1
+            continue
+        if not item:
+            item = KBDuplicateRetrievalIndex(
+                library_type=task.library,
+                question_wiki_id=wiki_id,
+                content_hash=content_hash,
+            )
+            db.session.add(item)
+        item.content_hash = content_hash
+        item.intent_cache_key = intent_key
+        item.content_cache_keys_json = _kd_json_dump([content_key] if content_key else [])
+        item.question = question
+        item.answer = answer
+        item.similar_questions_json = _kd_json_dump(similar_questions)
+        item.product_category_name = category
+        item.product_names_json = _kd_json_dump(product_names)
+        item.topic_terms_json = _kd_json_dump(topic_terms)
+        item.source_update_time = str(row.get('update_time') or '')
+        item.index_status = 'pending'
+        item.last_error = ''
+        item.updated_ts = time.time()
+        changed.append((item, intent_text, answer))
+
+    if mode != 'failed':
+        for wiki_id, item in existing.items():
+            if wiki_id not in seen_ids and item.index_status != 'deleted':
+                item.index_status = 'deleted'
+                item.updated_ts = time.time()
+    db.session.commit()
+
+    total = len(seen_ids)
+    expected_cache_keys = []
+    for item, _intent_text, answer in changed:
+        expected_cache_keys.append(item.intent_cache_key)
+        if answer:
+            expected_cache_keys.extend(_kd_json_load(item.content_cache_keys_json, []))
+    cache_hits = len(_kd_cached_embedding_keys(expected_cache_keys))
+    report(unchanged_count, total, cache_hits, 0, f'索引同步：{unchanged_count}/{total}')
+    embedding_error = ''
+    failed_count = 0
+    cancelled = False
+    batch_size = max(1, min(64, int(config.get('batch_size') or 32)))
+    for start in range(0, len(changed), batch_size):
+        if should_cancel():
+            cancelled = True
+            break
+        batch = changed[start:start + batch_size]
+        texts = []
+        for _, intent_text, answer in batch:
+            texts.extend([intent_text, answer])
+        try:
+            vectors = _sm_get_embeddings(texts, config)
+            for offset, (item, _intent_text, answer) in enumerate(batch):
+                intent_vector = vectors[offset * 2]
+                content_vector = vectors[offset * 2 + 1]
+                if not intent_vector or (answer and not content_vector):
+                    raise RuntimeError('Embedding API 未返回完整的索引向量')
+                item.index_status = 'ready'
+                item.last_error = ''
+                item.indexed_at = datetime.utcnow()
+                item.updated_ts = time.time()
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            embedding_error = str(exc or 'Embedding 索引失败').replace('\n', ' ')[:500]
+            pending_items = [item for item, _, _ in changed[start:]]
+            failed_count = len(pending_items)
+            pending_ids = [item.id for item in pending_items if item.id]
+            if pending_ids:
+                KBDuplicateRetrievalIndex.query.filter(
+                    KBDuplicateRetrievalIndex.id.in_(pending_ids)
+                ).update({
+                    KBDuplicateRetrievalIndex.index_status: 'failed',
+                    KBDuplicateRetrievalIndex.last_error: embedding_error,
+                    KBDuplicateRetrievalIndex.updated_ts: time.time(),
+                }, synchronize_session=False)
+                db.session.commit()
+            break
+        completed = unchanged_count + min(start + len(batch), len(changed))
+        report(completed, total, cache_hits, 0, f'索引同步：{completed}/{total}')
+
+    if cancelled:
+        ready_count = KBDuplicateRetrievalIndex.query.filter_by(
+            library_type=task.library,
+            index_status='ready',
+        ).count()
+        report(ready_count, total, cache_hits, 0, '索引任务已取消')
+    elif embedding_error:
+        report(total, total, cache_hits, failed_count, 'Embedding 不可用，继续使用本地召回')
+    else:
+        report(total, total, cache_hits, 0, f'索引已就绪：{total}/{total}')
+    return {
+        'embedding_error': embedding_error,
+        'total': total,
+        'done': total if not cancelled else ready_count,
+        'cache_hits': cache_hits,
+        'failed_count': failed_count,
+        'updated_count': len(changed),
+        'cancelled': cancelled,
+    }
+
+
+def _kd_ranked_channel(items, key, limit, minimum=0.0):
+    ranked = sorted(items, key=lambda item: float(item.get(key) or 0), reverse=True)
+    return [item for item in ranked if float(item.get(key) or 0) > minimum][:limit]
+
+
+def _kd_retrieve_candidates(task):
+    indexes = KBDuplicateRetrievalIndex.query.filter(
+        KBDuplicateRetrievalIndex.library_type == task.library,
+        KBDuplicateRetrievalIndex.index_status != 'deleted',
+    ).all()
+    if not indexes:
+        return [], {'embedding_error': '', 'channels': ['structured']}
+
+    config = _sm_load_embedding_config()
+    query_vectors = None
+    cached_vectors = {}
+    embedding_error = ''
+    try:
+        query_vectors = _sm_get_embeddings([task.question, task.answer], config)
+        cache_keys = []
+        for item in indexes:
+            if item.index_status != 'ready':
+                continue
+            cache_keys.append(item.intent_cache_key)
+            cache_keys.extend(_kd_json_load(item.content_cache_keys_json, []))
+        cached_vectors = _sm_load_cached_embeddings(cache_keys, config)
+    except Exception as exc:
+        db.session.rollback()
+        embedding_error = str(exc or 'Embedding 查询失败').replace('\n', ' ')[:500]
+        query_vectors = None
+
+    query_category = _kd_norm(task.product_category_name)
+    query_models = {_kd_norm(item) for item in _kd_json_load(task.product_names_json, []) if _kd_norm(item)}
+    query_terms = set(_kd_topic_terms(task.question, task.answer))
+    scored = []
+    for item in indexes:
+        intent_text = _kd_index_intent_text(item.question, _kd_json_load(item.similar_questions_json, []))
+        question_score = _ai_cosine_sim(task.question, intent_text)
+        answer_score = _ai_cosine_sim(task.answer, item.answer)
+        algorithm = 'ngram_fallback'
+        if query_vectors and item.index_status == 'ready':
+            intent_vector = cached_vectors.get(item.intent_cache_key)
+            content_keys = _kd_json_load(item.content_cache_keys_json, [])
+            content_vector = cached_vectors.get(content_keys[0]) if content_keys else None
+            if intent_vector:
+                question_score = _sm_vector_cosine(query_vectors[0], intent_vector)
+                algorithm = 'embedding'
+            if content_vector:
+                answer_score = _sm_vector_cosine(query_vectors[1], content_vector)
+                algorithm = 'embedding'
+
+        category_norm = _kd_norm(item.product_category_name)
+        model_norms = {_kd_norm(value) for value in _kd_json_load(item.product_names_json, []) if _kd_norm(value)}
+        item_terms = set(_kd_json_load(item.topic_terms_json, []))
+        term_overlap = sorted(query_terms & item_terms, key=lambda value: (-len(value), value))
+        category_match = bool(query_category and category_norm and query_category == category_norm)
+        category_conflict = bool(query_category and category_norm and query_category != category_norm)
+        model_overlap = sorted(query_models & model_norms)
+        model_conflict = bool(query_models and model_norms and not model_overlap)
+        structured_score = 0.0
+        if category_match:
+            structured_score += 0.38
+        if model_overlap:
+            structured_score += 0.34
+        if term_overlap:
+            structured_score += min(0.28, 0.07 * len(term_overlap))
+        local_score = (float(question_score) + float(answer_score)) / 2.0
+        scored.append({
+            'question_wiki_id': item.question_wiki_id,
+            'question': item.question or '',
+            'answer': item.answer or '',
+            'similar_questions': _kd_json_load(item.similar_questions_json, []),
+            'product_category_name': item.product_category_name or '',
+            'product_names': _kd_json_load(item.product_names_json, []),
+            'source_update_time': item.source_update_time or '',
+            'question_similarity': round(float(question_score), 4),
+            'answer_similarity': round(float(answer_score), 4),
+            'local_similarity': round(local_score, 4),
+            'structured_score': round(structured_score, 4),
+            'keyword_hits': term_overlap,
+            'category_match': category_match,
+            'category_conflict': category_conflict,
+            'model_overlap': model_overlap,
+            'model_conflict': model_conflict,
+            'algorithm': algorithm,
+            'channels': [],
+            'fusion_score': 0.0,
+        })
+
+    channels = []
+    if query_vectors and any(item.get('algorithm') == 'embedding' for item in scored):
+        channels.extend([
+            ('embedding_intent', _kd_ranked_channel(scored, 'question_similarity', 50, 0.05)),
+            ('embedding_content', _kd_ranked_channel(scored, 'answer_similarity', 50, 0.05)),
+        ])
+    else:
+        channels.append(('ngram_fallback', _kd_ranked_channel(scored, 'local_similarity', 80, 0.01)))
+    channels.append(('structured', _kd_ranked_channel(scored, 'structured_score', 50, 0.0)))
+
+    fused = {}
+    for channel_name, ranked in channels:
+        for rank, candidate in enumerate(ranked, start=1):
+            target = fused.setdefault(candidate['question_wiki_id'], candidate)
+            target['fusion_score'] += 1.0 / (60.0 + rank)
+            if channel_name not in target['channels']:
+                target['channels'].append(channel_name)
+    if not fused:
+        for candidate in _kd_ranked_channel(scored, 'local_similarity', min(20, task.top_k), 0.0):
+            fused[candidate['question_wiki_id']] = candidate
+            candidate['channels'] = ['ngram_fallback']
+
+    results = list(fused.values())
+    for candidate in results:
+        candidate['fusion_score'] = round(
+            candidate['fusion_score'] + candidate['structured_score'] * 0.01,
+            6,
+        )
+        if candidate['category_conflict'] or candidate['model_conflict']:
+            candidate['fusion_score'] = round(candidate['fusion_score'] * 0.9, 6)
+        if candidate['model_conflict']:
+            relationship = 'conflicting'
+        elif candidate['question_similarity'] >= 0.78 and candidate['answer_similarity'] >= 0.72:
+            relationship = 'fully_covered'
+        elif candidate['question_similarity'] >= 0.5 or candidate['answer_similarity'] >= 0.5:
+            relationship = 'partially_covered'
+        else:
+            relationship = 'unrelated'
+        candidate.update({
+            'relationship': relationship,
+            'confidence': round(max(candidate['question_similarity'], candidate['answer_similarity']), 3),
+            'covered_points': candidate['keyword_hits'][:8],
+            'missing_points': [],
+            'conflicts': ['适用型号范围不重叠'] if candidate['model_conflict'] else [],
+            'recommended_action': 'manual_review',
+            'reason': '等待 AI 覆盖判断',
+            'analysis_source': 'heuristic',
+        })
+    results.sort(key=lambda item: (item['fusion_score'], item['local_similarity']), reverse=True)
+    limit = max(1, min(50, int(task.top_k or 20)))
+    return results[:limit], {
+        'embedding_error': embedding_error,
+        'channels': [name for name, ranked in channels if ranked],
+    }
+
+
+def _kd_normalize_ai_analysis(raw, candidates):
+    if not isinstance(raw, dict):
+        raise ValueError('AI 未返回合法 JSON')
+    relationship = str(raw.get('relationship') or '').strip()
+    action = str(raw.get('recommended_action') or '').strip()
+    reason = str(raw.get('reason') or '').strip()[:2000]
+    if relationship not in _KD_RELATIONSHIPS:
+        raise ValueError('AI 未返回合法的覆盖关系')
+    if action not in _KD_ACTIONS:
+        raise ValueError('AI 未返回合法的建议动作')
+    if not reason:
+        raise ValueError('AI 未返回可核验的判断依据')
+    candidate_ids = {item['question_wiki_id'] for item in candidates}
+    source_ids = [
+        value for value in _kd_string_list(raw.get('source_ids'), limit=20)
+        if value in candidate_ids
+    ]
+    normalized_candidates = []
+    for item in raw.get('candidates') or []:
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get('source_id') or item.get('question_wiki_id') or '').strip()
+        item_relationship = str(item.get('relationship') or '').strip()
+        item_action = str(item.get('recommended_action') or 'manual_review').strip()
+        if source_id not in candidate_ids or item_relationship not in _KD_RELATIONSHIPS:
+            continue
+        normalized_candidates.append({
+            'source_id': source_id,
+            'relationship': item_relationship,
+            'confidence': _kb_compare_ai_confidence(item.get('confidence')),
+            'covered_points': _kd_string_list(item.get('covered_points'), limit=20),
+            'missing_points': _kd_string_list(item.get('missing_points'), limit=20),
+            'conflicts': _kd_string_list(item.get('conflicts'), limit=12),
+            'recommended_action': item_action if item_action in _KD_ACTIONS else 'manual_review',
+            'reason': str(item.get('reason') or '').strip()[:1200],
+        })
+    return {
+        'relationship': relationship,
+        'confidence': _kb_compare_ai_confidence(raw.get('confidence')),
+        'covered_points': _kd_string_list(raw.get('covered_points'), limit=30),
+        'missing_points': _kd_string_list(raw.get('missing_points'), limit=30),
+        'conflicts': _kd_string_list(raw.get('conflicts'), limit=20),
+        'recommended_action': action,
+        'reason': reason,
+        'source_ids': source_ids,
+        'candidates': normalized_candidates,
+        'prompt_version': _KD_PROMPT_VERSION,
+    }
+
+
+def _kd_run_ai_coverage(task, candidates):
+    if not candidates:
+        return {
+            'relationship': 'unrelated',
+            'confidence': 0.0,
+            'covered_points': [],
+            'missing_points': _kd_answer_points(task.answer),
+            'conflicts': [],
+            'recommended_action': 'manual_review',
+            'reason': '未发现高相关候选，需要人工确认后再决定是否新增。',
+            'source_ids': [],
+            'candidates': [],
+            'prompt_version': _KD_PROMPT_VERSION,
+        }
+    prompt_candidates = []
+    for candidate in candidates[:12]:
+        prompt_candidates.append({
+            'source_id': candidate['question_wiki_id'],
+            'question': candidate['question'][:3000],
+            'answer': candidate['answer'][:5000],
+            'product_category_name': candidate['product_category_name'],
+            'product_names': candidate['product_names'],
+            'recall_channels': candidate['channels'],
+            'question_similarity': candidate['question_similarity'],
+            'answer_similarity': candidate['answer_similarity'],
+            'keyword_hits': candidate['keyword_hits'],
+            'range_conflicts': candidate['conflicts'],
+        })
+    system_prompt = (
+        '你是企业知识库查重审核员。判断拟新增 FAQ 是否被现有知识完整、部分、合计覆盖，或存在冲突。\n'
+        '只输出合法 JSON，不输出 Markdown 或额外解释。不得补造输入中没有的事实。\n'
+        '主题相似但事实点不同必须判 unrelated；信息不足必须建议 manual_review。\n'
+        '型号或适用范围冲突时不得建议直接合并。\n'
+        'relationship 只能是 fully_covered、partially_covered、collectively_covered、conflicting、unrelated。\n'
+        'recommended_action 只能是 no_add、update_existing、compare_merge、create_new、manual_review。\n'
+        '输出结构：{"relationship":"...","confidence":0-1,"covered_points":[],"missing_points":[],'
+        '"conflicts":[],"recommended_action":"...","reason":"一句可核验依据","source_ids":[],'
+        '"candidates":[{"source_id":"...","relationship":"...","confidence":0-1,'
+        '"covered_points":[],"missing_points":[],"conflicts":[],"recommended_action":"...","reason":"..."}]}'
+    )
+    user_prompt = _kd_json_dump({
+        'new_faq': {
+            'question': task.question,
+            'answer': task.answer,
+            'answer_points': _kd_answer_points(task.answer),
+            'product_category_name': task.product_category_name,
+            'product_names': _kd_json_load(task.product_names_json, []),
+        },
+        'candidates': prompt_candidates,
+    })
+    last_error = None
+    for attempt in range(2):
+        try:
+            raw_text = _ai_call_llm(load_ai_config() or {}, system_prompt, user_prompt, temperature=0.1)
+            parsed = _ai_repair_mojibake_value(_ai_extract_json(raw_text))
+            return _kd_normalize_ai_analysis(parsed, candidates)
+        except Exception as exc:
+            last_error = exc
+            user_prompt += '\n上一轮输出未通过 JSON 契约校验，请只返回符合结构的 JSON。'
+    raise last_error or RuntimeError('AI 覆盖判断失败')
+
+
+def _kd_apply_ai_candidates(candidates, analysis):
+    by_id = {item.get('source_id'): item for item in analysis.get('candidates') or []}
+    result = []
+    for candidate in candidates:
+        item = by_id.get(candidate['question_wiki_id'])
+        if item:
+            candidate = dict(candidate)
+            candidate.update({
+                'relationship': item['relationship'],
+                'confidence': item['confidence'],
+                'covered_points': item['covered_points'],
+                'missing_points': item['missing_points'],
+                'conflicts': item['conflicts'],
+                'recommended_action': item['recommended_action'],
+                'reason': item['reason'],
+                'analysis_source': 'ai',
+            })
+        result.append(candidate)
+    return result
+
+
+def _kd_safe_stage_error(exc, stage):
+    message = str(exc or '').strip().replace('\n', ' ')
+    if '配置不完整' in message:
+        return message[:500]
+    if message.startswith('HTTP '):
+        status = message.split(':', 1)[0]
+        return f'{stage}服务请求失败（{status}）'
+    return (message or f'{stage}失败')[:500]
+
+
+def _kd_run_task(task_id, retry_stage='all'):
+    ctx = app.app_context()
+    ctx.push()
+    try:
+        task = KBDuplicateCheckTask.query.get(str(task_id))
+        if not task:
+            return
+        completed = _kd_json_load(task.completed_channels_json, [])
+        failed = _kd_json_load(task.failed_stages_json, [])
+        if retry_stage != 'ai':
+            _kd_update_task(
+                task_id,
+                status='running',
+                stage='preparing_index',
+                message='正在同步知识检索索引',
+                cancel_requested=False,
+            )
+            task = KBDuplicateCheckTask.query.get(str(task_id))
+            sync_result = _kd_sync_index(task)
+            embedding_error = sync_result.get('embedding_error') or ''
+            task = KBDuplicateCheckTask.query.get(str(task_id))
+            if task.cancel_requested:
+                _kd_update_task(task_id, status='cancelled', stage='cancelled', message='任务已取消')
+                return
+            _kd_update_task(task_id, stage='recalling', message='正在执行多路候选召回')
+            task = KBDuplicateCheckTask.query.get(str(task_id))
+            candidates, recall_meta = _kd_retrieve_candidates(task)
+            embedding_error = embedding_error or recall_meta.get('embedding_error') or ''
+            completed = [value for value in completed if value not in ('embedding', 'ngram_fallback', 'structured')]
+            failed = [value for value in failed if value != 'embedding']
+            completed.append('structured')
+            if embedding_error:
+                completed.append('ngram_fallback')
+                failed.append('embedding')
+            else:
+                completed.append('embedding')
+            completed = list(OrderedDict.fromkeys(completed))
+            failed = list(OrderedDict.fromkeys(failed))
+            _kd_update_task(
+                task_id,
+                stage='ai_analyzing',
+                message=f'已召回 {len(candidates)} 条候选，正在进行 AI 覆盖判断',
+                candidate_count=len(candidates),
+                candidates_json=_kd_json_dump(candidates),
+                completed_channels_json=_kd_json_dump(completed),
+                failed_stages_json=_kd_json_dump(failed),
+            )
+        else:
+            candidates = _kd_json_load(task.candidates_json, [])
+            completed = [value for value in completed if value != 'ai']
+            failed = [value for value in failed if value != 'ai']
+            _kd_update_task(
+                task_id,
+                status='running',
+                stage='ai_analyzing',
+                message='正在重试 AI 覆盖判断',
+                cancel_requested=False,
+                completed_channels_json=_kd_json_dump(completed),
+                failed_stages_json=_kd_json_dump(failed),
+            )
+
+        task = KBDuplicateCheckTask.query.get(str(task_id))
+        if task.cancel_requested:
+            _kd_update_task(task_id, status='cancelled', stage='cancelled', message='任务已取消')
+            return
+        analysis = {}
+        try:
+            analysis = _kd_run_ai_coverage(task, candidates)
+            candidates = _kd_apply_ai_candidates(candidates, analysis)
+            completed.append('ai')
+            failed = [value for value in failed if value != 'ai']
+        except Exception as exc:
+            failed.append('ai')
+            analysis = {
+                'relationship': '',
+                'confidence': 0.0,
+                'covered_points': [],
+                'missing_points': [],
+                'conflicts': [],
+                'recommended_action': 'manual_review',
+                'reason': _kd_safe_stage_error(exc, 'AI 覆盖判断'),
+                'source_ids': [],
+                'candidates': [],
+                'prompt_version': _KD_PROMPT_VERSION,
+            }
+        completed = list(OrderedDict.fromkeys(completed))
+        failed = list(OrderedDict.fromkeys(failed))
+        final_status = 'partial_failed' if failed else 'done'
+        final_message = '查重已完成' if not failed else '查重已完成，部分阶段可重试'
+        _kd_update_task(
+            task_id,
+            status=final_status,
+            stage='completed',
+            message=final_message,
+            candidate_count=len(candidates),
+            candidates_json=_kd_json_dump(candidates),
+            analysis_json=_kd_json_dump(analysis),
+            completed_channels_json=_kd_json_dump(completed),
+            failed_stages_json=_kd_json_dump(failed),
+        )
+    except Exception as exc:
+        db.session.rollback()
+        try:
+            task = KBDuplicateCheckTask.query.get(str(task_id))
+            stage = task.stage if task else 'unknown'
+            failed = _kd_json_load(task.failed_stages_json, []) if task else []
+            failed.append(stage)
+            _kd_update_task(
+                task_id,
+                status='failed',
+                message=_kd_safe_stage_error(exc, '查重任务'),
+                failed_stages_json=_kd_json_dump(list(OrderedDict.fromkeys(failed))),
+            )
+        except Exception:
+            db.session.rollback()
+    finally:
+        with _KD_LOCK:
+            _KD_ACTIVE_TASKS.discard(str(task_id))
+        ctx.pop()
+
+
+def _kd_spawn_task(task_id, retry_stage='all'):
+    task_id = str(task_id)
+    with _KD_LOCK:
+        if task_id in _KD_ACTIVE_TASKS:
+            return False
+        _KD_ACTIVE_TASKS.add(task_id)
+    thread = threading.Thread(
+        target=_kd_run_task,
+        args=(task_id, retry_stage),
+        daemon=True,
+        name=f'kb-duplicate-{task_id[:8]}',
+    )
+    thread.start()
+    return True
+
+
+def _kd_update_index_job(job_id, **fields):
+    job = KBDuplicateIndexJob.query.get(str(job_id))
+    if not job:
+        return None
+    for key, value in fields.items():
+        if hasattr(job, key):
+            setattr(job, key, value)
+    job.updated_ts = time.time()
+    db.session.commit()
+    return job
+
+
+def _kd_index_job_owned(job):
+    return bool(job and (not job.username or job.username == _kd_task_username()))
+
+
+def _kd_index_job_payload(job):
+    if not job:
+        return None
+    return {
+        'job_id': job.job_id,
+        'library': job.library,
+        'mode': job.mode,
+        'status': job.status,
+        'total': int(job.total or 0),
+        'done': int(job.done or 0),
+        'cache_hits': int(job.cache_hits or 0),
+        'failed_count': int(job.failed_count or 0),
+        'message': job.message or '',
+        'error': job.error or '',
+        'created_ts': float(job.created_ts or 0),
+        'updated_ts': float(job.updated_ts or 0),
+    }
+
+
+def _kd_index_status_payload(library, job=None):
+    base = KBDuplicateRetrievalIndex.query.filter_by(library_type=library)
+    counts = {
+        status: base.filter_by(index_status=status).count()
+        for status in ('ready', 'pending', 'failed', 'deleted')
+    }
+    latest_indexed_at = db.session.query(
+        func.max(KBDuplicateRetrievalIndex.indexed_at)
+    ).filter(
+        KBDuplicateRetrievalIndex.library_type == library,
+        KBDuplicateRetrievalIndex.index_status == 'ready',
+    ).scalar()
+    failed_item = base.filter_by(index_status='failed').order_by(
+        KBDuplicateRetrievalIndex.updated_ts.desc()
+    ).first()
+    config = _sm_public_embedding_config()
+    return {
+        'library': library,
+        'total': counts['ready'] + counts['pending'] + counts['failed'],
+        **counts,
+        'cache_count': int(config.get('cache_count') or 0),
+        'last_indexed_at': latest_indexed_at.isoformat() if latest_indexed_at else '',
+        'last_error': (failed_item.last_error or '')[:500] if failed_item else '',
+        'embedding': {
+            'model': config.get('model') or '',
+            'dimensions': int(config.get('dimensions') or 0),
+            'api_key_configured': bool(config.get('api_key_configured')),
+        },
+        'job': _kd_index_job_payload(job),
+    }
+
+
+def _kd_run_index_job(job_id):
+    ctx = app.app_context()
+    ctx.push()
+    try:
+        job = KBDuplicateIndexJob.query.get(str(job_id))
+        if not job:
+            return
+
+        def progress(done, total, cache_hits, failed_count, message):
+            _kd_update_index_job(
+                job_id,
+                total=total,
+                done=done,
+                cache_hits=cache_hits,
+                failed_count=failed_count,
+                message=message,
+            )
+
+        def cancelled():
+            current = KBDuplicateIndexJob.query.get(str(job_id))
+            return bool(current and current.cancel_requested)
+
+        _kd_update_index_job(
+            job_id,
+            status='running',
+            message='正在读取知识库并计算内容变更',
+            error='',
+            cancel_requested=False,
+        )
+        job = KBDuplicateIndexJob.query.get(str(job_id))
+        result = _kd_sync_index(
+            job,
+            progress_callback=progress,
+            cancel_check=cancelled,
+            mode=job.mode,
+        )
+        if result.get('cancelled'):
+            _kd_update_index_job(job_id, status='cancelled', message='索引任务已取消')
+        elif result.get('embedding_error'):
+            _kd_update_index_job(
+                job_id,
+                status='partial_failed',
+                failed_count=int(result.get('failed_count') or 0),
+                error=str(result.get('embedding_error') or '')[:500],
+                message='索引任务完成，但部分向量生成失败',
+            )
+        else:
+            _kd_update_index_job(
+                job_id,
+                status='done',
+                total=int(result.get('total') or 0),
+                done=int(result.get('done') or 0),
+                cache_hits=int(result.get('cache_hits') or 0),
+                failed_count=0,
+                message='知识检索索引已就绪',
+            )
+    except Exception as exc:
+        db.session.rollback()
+        try:
+            _kd_update_index_job(
+                job_id,
+                status='failed',
+                error=_kd_safe_stage_error(exc, '索引任务'),
+                message='索引任务失败',
+            )
+        except Exception:
+            db.session.rollback()
+    finally:
+        with _KD_LOCK:
+            _KD_INDEX_ACTIVE_JOBS.discard(str(job_id))
+        ctx.pop()
+
+
+def _kd_spawn_index_job(job_id):
+    job_id = str(job_id)
+    with _KD_LOCK:
+        if job_id in _KD_INDEX_ACTIVE_JOBS:
+            return False
+        _KD_INDEX_ACTIVE_JOBS.add(job_id)
+    thread = threading.Thread(
+        target=_kd_run_index_job,
+        args=(job_id,),
+        daemon=True,
+        name=f'kb-index-{job_id[:8]}',
+    )
+    thread.start()
+    return True
+
+
+@app.route('/api/kb/duplicate-check/index/status', methods=['GET'])
+@login_required
+def kb_duplicate_index_status():
+    library = str(request.args.get('library') or 'knowledge_base_v1').strip()
+    if library not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+        return jsonify({'success': False, 'message': '索引范围无效'}), 400
+    job = KBDuplicateIndexJob.query.filter_by(
+        username=_kd_task_username(),
+        library=library,
+    ).order_by(KBDuplicateIndexJob.created_ts.desc()).first()
+    if job and job.status == 'running':
+        _kd_spawn_index_job(job.job_id)
+    return jsonify({'success': True, **_kd_index_status_payload(library, job)})
+
+
+@app.route('/api/kb/duplicate-check/index/rebuild', methods=['POST'])
+@login_required
+def kb_duplicate_index_rebuild():
+    payload = request.json or {}
+    library = str(payload.get('library') or 'knowledge_base_v1').strip()
+    mode = str(payload.get('mode') or 'incremental').strip()
+    if library not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+        return jsonify({'success': False, 'message': '索引范围无效'}), 400
+    if mode not in ('incremental', 'full', 'failed'):
+        return jsonify({'success': False, 'message': '索引模式无效'}), 400
+    try:
+        _sm_validate_embedding_config(_sm_load_embedding_config())
+    except Exception as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    active = KBDuplicateIndexJob.query.filter_by(
+        username=_kd_task_username(),
+        library=library,
+        status='running',
+    ).order_by(KBDuplicateIndexJob.created_ts.desc()).first()
+    if active:
+        _kd_spawn_index_job(active.job_id)
+        return jsonify({
+            'success': False,
+            'message': '当前知识库已有索引任务正在执行',
+            'job_id': active.job_id,
+        }), 409
+    job_id = str(uuid.uuid4())
+    now = time.time()
+    job = KBDuplicateIndexJob(
+        job_id=job_id,
+        username=_kd_task_username(),
+        library=library,
+        mode=mode,
+        status='running',
+        message='索引任务已创建',
+        config_snapshot_json=_kd_json_dump(_kd_config_snapshot()),
+        created_ts=now,
+        updated_ts=now,
+    )
+    db.session.add(job)
+    db.session.commit()
+    _kd_spawn_index_job(job_id)
+    return jsonify({'success': True, 'job_id': job_id, 'status': 'running', 'mode': mode})
+
+
+@app.route('/api/kb/duplicate-check/index/cancel', methods=['POST'])
+@login_required
+def kb_duplicate_index_cancel():
+    payload = request.json or {}
+    job_id = str(payload.get('job_id') or '').strip()
+    job = KBDuplicateIndexJob.query.get(job_id) if job_id else None
+    if not _kd_index_job_owned(job):
+        return jsonify({'success': False, 'message': '索引任务不存在'}), 404
+    if job.status != 'running':
+        return jsonify({'success': False, 'message': '索引任务当前不可取消'}), 409
+    _kd_update_index_job(job_id, cancel_requested=True, message='正在取消索引任务')
+    return jsonify({'success': True, 'message': '已提交取消请求'})
+
+
+@app.route('/api/kb/duplicate-check/start', methods=['POST'])
+@login_required
+def kb_duplicate_check_start():
+    payload = request.json or {}
+    library = str(payload.get('library') or 'knowledge_base_v1').strip()
+    question = str(payload.get('question') or '').strip()
+    answer = str(payload.get('answer') or '').strip()
+    if library not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+        return jsonify({'success': False, 'message': '查重范围无效'}), 400
+    if not question or not answer:
+        return jsonify({'success': False, 'message': '拟新增问题和拟新增答案均为必填项'}), 400
+    if len(question) > 8000 or len(answer) > 30000:
+        return jsonify({'success': False, 'message': '问题或答案内容过长，请精简后重试'}), 400
+    task_id = str(uuid.uuid4())
+    now = time.time()
+    task = KBDuplicateCheckTask(
+        task_id=task_id,
+        username=_kd_task_username(),
+        library=library,
+        status='running',
+        stage='preparing_index',
+        question=question,
+        answer=answer,
+        product_category_name=str(payload.get('product_category_name') or '').strip()[:1000],
+        product_names_json=_kd_json_dump(_kd_string_list(payload.get('product_names'), limit=100)),
+        source_note=str(payload.get('source_note') or '').strip()[:4000],
+        top_k=20,
+        expanded=False,
+        config_snapshot_json=_kd_json_dump(_kd_config_snapshot()),
+        message='任务已创建，正在准备索引',
+        created_ts=now,
+        updated_ts=now,
+    )
+    db.session.add(task)
+    db.session.commit()
+    _kd_spawn_task(task_id)
+    return jsonify({'success': True, 'task_id': task_id, 'status': 'running'})
+
+
+@app.route('/api/kb/duplicate-check/status', methods=['GET'])
+@login_required
+def kb_duplicate_check_status():
+    task_id = str(request.args.get('task_id') or '').strip()
+    task = KBDuplicateCheckTask.query.get(task_id) if task_id else None
+    if not _kd_task_owned(task):
+        return jsonify({'success': False, 'message': '查重任务不存在'}), 404
+    if task.status == 'running':
+        _kd_spawn_task(task_id)
+    return jsonify({'success': True, **_kd_task_payload(task)})
+
+
+@app.route('/api/kb/duplicate-check/retry', methods=['POST'])
+@login_required
+def kb_duplicate_check_retry():
+    payload = request.json or {}
+    task_id = str(payload.get('task_id') or '').strip()
+    stage = str(payload.get('stage') or 'all').strip()
+    task = KBDuplicateCheckTask.query.get(task_id) if task_id else None
+    if not _kd_task_owned(task):
+        return jsonify({'success': False, 'message': '查重任务不存在'}), 404
+    if stage not in ('all', 'embedding', 'ai'):
+        return jsonify({'success': False, 'message': '仅支持重试 embedding、ai 或全部阶段'}), 400
+    retry_stage = 'ai' if stage == 'ai' and _kd_json_load(task.candidates_json, []) else 'all'
+    _kd_update_task(task_id, status='running', cancel_requested=False, message='正在重试失败阶段')
+    _kd_spawn_task(task_id, retry_stage=retry_stage)
+    return jsonify({'success': True, 'task_id': task_id, 'status': 'running'})
+
+
+@app.route('/api/kb/duplicate-check/expand', methods=['POST'])
+@login_required
+def kb_duplicate_check_expand():
+    payload = request.json or {}
+    task_id = str(payload.get('task_id') or '').strip()
+    task = KBDuplicateCheckTask.query.get(task_id) if task_id else None
+    if not _kd_task_owned(task):
+        return jsonify({'success': False, 'message': '查重任务不存在'}), 404
+    _kd_update_task(
+        task_id,
+        status='running',
+        top_k=50,
+        expanded=True,
+        cancel_requested=False,
+        message='正在扩大检索范围',
+    )
+    _kd_spawn_task(task_id, retry_stage='all')
+    return jsonify({'success': True, 'task_id': task_id, 'status': 'running', 'top_k': 50})
+
+
+@app.route('/api/kb/duplicate-check/decision', methods=['POST'])
+@login_required
+def kb_duplicate_check_decision():
+    payload = request.json or {}
+    task_id = str(payload.get('task_id') or '').strip()
+    decision = str(payload.get('decision') or '').strip()
+    task = KBDuplicateCheckTask.query.get(task_id) if task_id else None
+    if not _kd_task_owned(task):
+        return jsonify({'success': False, 'message': '查重任务不存在'}), 404
+    if decision not in _KD_ACTIONS:
+        return jsonify({'success': False, 'message': '人工结论无效'}), 400
+    _kd_update_task(
+        task_id,
+        human_decision=decision,
+        human_note=str(payload.get('note') or '').strip()[:4000],
+        selected_source_ids_json=_kd_json_dump(_kd_string_list(payload.get('source_ids'), limit=50)),
+    )
+    return jsonify({'success': True, 'message': '人工结论已保存'})
+
+
+@app.route('/api/kb/duplicate-check/cancel', methods=['POST'])
+@login_required
+def kb_duplicate_check_cancel():
+    payload = request.json or {}
+    task_id = str(payload.get('task_id') or '').strip()
+    task = KBDuplicateCheckTask.query.get(task_id) if task_id else None
+    if not _kd_task_owned(task):
+        return jsonify({'success': False, 'message': '查重任务不存在'}), 404
+    _kd_update_task(task_id, cancel_requested=True, message='正在取消任务')
+    return jsonify({'success': True, 'message': '已提交取消请求'})
+
+
+@app.route('/api/kb/duplicate-check/history', methods=['GET'])
+@login_required
+def kb_duplicate_check_history():
+    query = KBDuplicateCheckTask.query.filter_by(username=_kd_task_username())
+    decision = str(request.args.get('decision') or '').strip()
+    category = str(request.args.get('category') or '').strip()
+    if decision:
+        query = query.filter_by(human_decision=decision)
+    if category:
+        query = query.filter(KBDuplicateCheckTask.product_category_name.ilike(f'%{category}%'))
+    tasks = query.order_by(KBDuplicateCheckTask.created_ts.desc()).limit(50).all()
+    return jsonify({
+        'success': True,
+        'items': [_kd_task_payload(task, include_results=False) for task in tasks],
+    })
+
+
+@app.route('/api/kb/duplicate-check/export', methods=['GET'])
+@login_required
+def kb_duplicate_check_export():
+    task_id = str(request.args.get('task_id') or '').strip()
+    task = KBDuplicateCheckTask.query.get(task_id) if task_id else None
+    if not _kd_task_owned(task):
+        return jsonify({'success': False, 'message': '查重任务不存在'}), 404
+    candidates = _kd_json_load(task.candidates_json, [])
+    analysis = _kd_json_load(task.analysis_json, {})
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = '查重结论'
+    summary.append(['字段', '内容'])
+    summary.append(['任务 ID', task.task_id])
+    summary.append(['查重范围', task.library])
+    summary.append(['拟新增问题', task.question])
+    summary.append(['拟新增答案', task.answer])
+    summary.append(['产品品类', task.product_category_name])
+    summary.append(['适用型号', '、'.join(_kd_json_load(task.product_names_json, []))])
+    summary.append(['来源说明', task.source_note])
+    summary.append(['系统覆盖结论', analysis.get('relationship') or ''])
+    summary.append(['系统建议动作', analysis.get('recommended_action') or ''])
+    summary.append(['判断依据', analysis.get('reason') or ''])
+    summary.append(['已覆盖项', '\n'.join(analysis.get('covered_points') or [])])
+    summary.append(['缺失项', '\n'.join(analysis.get('missing_points') or [])])
+    summary.append(['冲突项', '\n'.join(analysis.get('conflicts') or [])])
+    summary.append(['人工结论', task.human_decision or ''])
+    summary.append(['人工备注', task.human_note or ''])
+    summary.append(['Embedding 模型', (_kd_json_load(task.config_snapshot_json, {}).get('embedding') or {}).get('model', '')])
+    summary.append(['AI 模型', (_kd_json_load(task.config_snapshot_json, {}).get('coverage_ai') or {}).get('model', '')])
+    summary.append(['提示词版本', _KD_PROMPT_VERSION])
+    summary.column_dimensions['A'].width = 20
+    summary.column_dimensions['B'].width = 90
+    for row in summary.iter_rows():
+        for cell in row:
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+
+    sheet = workbook.create_sheet('候选明细')
+    sheet.append([
+        'Wiki ID', '标准问题', '答案', '品类', '型号', '召回渠道', '问题相似度',
+        '答案相似度', '命中词', '覆盖结论', '已覆盖项', '缺失项', '冲突项',
+        '建议动作', '判断依据',
+    ])
+    for candidate in candidates:
+        sheet.append([
+            candidate.get('question_wiki_id', ''),
+            candidate.get('question', ''),
+            candidate.get('answer', ''),
+            candidate.get('product_category_name', ''),
+            '、'.join(candidate.get('product_names') or []),
+            '、'.join(candidate.get('channels') or []),
+            candidate.get('question_similarity', 0),
+            candidate.get('answer_similarity', 0),
+            '、'.join(candidate.get('keyword_hits') or []),
+            candidate.get('relationship', ''),
+            '\n'.join(candidate.get('covered_points') or []),
+            '\n'.join(candidate.get('missing_points') or []),
+            '\n'.join(candidate.get('conflicts') or []),
+            candidate.get('recommended_action', ''),
+            candidate.get('reason', ''),
+        ])
+    sheet.freeze_panes = 'A2'
+    for row in sheet.iter_rows():
+        for cell in row:
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+    stream = io.BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+    return send_file(
+        stream,
+        as_attachment=True,
+        download_name=canonical_download_name('duplicate_check_report', 'xlsx', 's02', 'kb8085'),
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
 def _sm_now_iso():
     return _now_iso_with_tz()
 
@@ -14366,30 +16206,83 @@ def _sm_run_compare_job(job_id, username, table, models, faq_items, kb_items, th
         total = len(faq_items or [])
         with _SM_LOCK:
             _SM_JOBS[job_id]['total'] = total
-        _sm_db_update_job(job_id, total=total, status='running', done=0, message='', results_json='')
+            _SM_JOBS[job_id]['message'] = '正在准备 Embedding 向量...'
+        _sm_db_update_job(
+            job_id,
+            total=total,
+            status='running',
+            done=0,
+            message='正在准备 Embedding 向量...',
+            results_json='',
+        )
+
+        embedding_config = _sm_load_embedding_config()
+        algorithm = 'embedding'
+        fallback_reason = ''
+        embedding_model = str(embedding_config.get('model') or '')
+        baseline_vectors = []
+        faq_vectors = []
+        try:
+            all_texts = []
+            for kb in baseline or []:
+                all_texts.extend([kb.get('question') or '', kb.get('answer') or ''])
+            for faq in faq_items or []:
+                faq = faq if isinstance(faq, dict) else {}
+                all_texts.extend([faq.get('question') or '', faq.get('answer') or ''])
+            all_vectors = _sm_get_embeddings(all_texts, embedding_config)
+            baseline_vector_end = len(baseline or []) * 2
+            for offset in range(0, baseline_vector_end, 2):
+                baseline_vectors.append((all_vectors[offset], all_vectors[offset + 1]))
+            for offset in range(baseline_vector_end, len(all_vectors), 2):
+                faq_vectors.append((all_vectors[offset], all_vectors[offset + 1]))
+        except Exception as exc:
+            if not embedding_config.get('fallback_to_ngram'):
+                raise
+            algorithm = 'ngram_fallback'
+            fallback_reason = str(exc or '').strip().replace('\n', ' ')[:240]
+
+        job_message = (
+            f'Embedding：{embedding_model}'
+            if algorithm == 'embedding'
+            else f'Embedding 不可用，已降级字符相似度：{fallback_reason}'
+        )
+        with _SM_LOCK:
+            if job_id in _SM_JOBS:
+                _SM_JOBS[job_id]['message'] = job_message
+        _sm_db_update_job(job_id, message=job_message)
 
         results = []
         done = 0
         last_db_ts = 0.0
-        for f in faq_items or []:
+        for faq_index, f in enumerate(faq_items or []):
             faq = f if isinstance(f, dict) else {}
             fq_raw = str(faq.get('question') or '').strip()
             fa_raw = str(faq.get('answer') or '').strip()
             fm_raw = str(faq.get('models_raw') or faq.get('models') or '').strip()
             fm_text = str(faq.get('models_text') or ('未指定' if not fm_raw else fm_raw)).strip()
-            fq = _sm_norm_for_sim(fq_raw)
-            fa = _sm_norm_for_sim(fa_raw)
             best = None
             best_q = 0.0
             best_a = 0.0
             best_score = -1.0
-            for kb in baseline or []:
+            faq_q_vector = None
+            faq_a_vector = None
+            if algorithm == 'embedding' and faq_index < len(faq_vectors):
+                faq_q_vector, faq_a_vector = faq_vectors[faq_index]
+            fq = _sm_norm_for_sim(fq_raw) if algorithm != 'embedding' else ''
+            fa = _sm_norm_for_sim(fa_raw) if algorithm != 'embedding' else ''
+
+            for kb_index, kb in enumerate(baseline or []):
                 kq_raw = kb.get('question') or ''
                 ka_raw = kb.get('answer') or ''
-                kq = _sm_norm_for_sim(kq_raw)
-                ka = _sm_norm_for_sim(ka_raw)
-                q_sim = _ai_cosine_sim(fq, kq)
-                a_sim = _ai_cosine_sim(fa, ka)
+                if algorithm == 'embedding':
+                    kb_q_vector, kb_a_vector = baseline_vectors[kb_index]
+                    q_sim = _sm_vector_cosine(faq_q_vector, kb_q_vector)
+                    a_sim = _sm_vector_cosine(faq_a_vector, kb_a_vector)
+                else:
+                    kq = _sm_norm_for_sim(kq_raw)
+                    ka = _sm_norm_for_sim(ka_raw)
+                    q_sim = _ai_cosine_sim(fq, kq)
+                    a_sim = _ai_cosine_sim(fa, ka)
                 score = (q_sim + a_sim) / 2.0
                 if score > best_score:
                     best_score = score
@@ -14410,6 +16303,13 @@ def _sm_run_compare_job(job_id, username, table, models, faq_items, kb_items, th
                 kb_q = ''
                 kb_a = ''
                 kb_m = ''
+            if algorithm == 'embedding':
+                reason = _sm_embedding_reason(match_type, best_q, best_a)
+            else:
+                reason = _sm_trim_reason(
+                    f'Embedding不可用，字符相似度降级；{_sm_reason_text(match_type, fq_raw, fa_raw, kb_q, kb_a)}',
+                    80,
+                )
             results.append({
                 'faq': {
                     'row_number': faq.get('row_number'),
@@ -14426,9 +16326,12 @@ def _sm_run_compare_job(job_id, username, table, models, faq_items, kb_items, th
                     'kb_models': kb_m or '',
                     'q_sim': float(best_q),
                     'a_sim': float(best_a),
-                    'score': float(best_score if best_score >= 0 else 0.0)
+                    'score': float(best_score if best_score >= 0 else 0.0),
+                    'algorithm': algorithm,
+                    'embedding_model': embedding_model if algorithm == 'embedding' else '',
+                    'fallback_reason': fallback_reason if algorithm != 'embedding' else '',
                 },
-                'reason': _sm_reason_text(match_type, fq_raw, fa_raw, kb_q, kb_a)
+                'reason': reason,
             })
             done += 1
             with _SM_LOCK:
@@ -14447,9 +16350,16 @@ def _sm_run_compare_job(job_id, username, table, models, faq_items, kb_items, th
             job['status'] = 'done'
             job['done'] = done
             job['results'] = results
+            job['message'] = job_message
             job['ts'] = time.time()
             _SM_JOBS[job_id] = job
-        _sm_db_update_job(job_id, status='done', done=done, results_json=json.dumps(results, ensure_ascii=False))
+        _sm_db_update_job(
+            job_id,
+            status='done',
+            done=done,
+            message=job_message,
+            results_json=json.dumps(results, ensure_ascii=False),
+        )
     except Exception as e:
         traceback.print_exc()
         with _SM_LOCK:
@@ -14473,7 +16383,8 @@ def sm_compare_start():
     models = data.get('models') or []
     faq_items = data.get('faq_items') or []
     kb_items = data.get('kb_items') or []
-    threshold = data.get('threshold', 0.7)
+    embedding_config = _sm_load_embedding_config()
+    threshold = data.get('threshold', embedding_config.get('threshold', 0.75))
     if table not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
         return jsonify({'success': False, 'message': 'Invalid table'}), 400
     if not isinstance(faq_items, list) or len(faq_items) == 0:
@@ -14486,9 +16397,9 @@ def sm_compare_start():
     try:
         threshold = float(threshold)
     except Exception:
-        threshold = 0.7
+        threshold = float(embedding_config.get('threshold', 0.75))
     if threshold <= 0 or threshold > 1:
-        threshold = 0.7
+        threshold = float(embedding_config.get('threshold', 0.75))
 
     _sm_cleanup()
     job_id = str(uuid.uuid4())
@@ -14504,7 +16415,13 @@ def sm_compare_start():
     _sm_db_create_job(job_id, username, len(faq_items))
     t = threading.Thread(target=_sm_run_compare_job, args=(job_id, username, table, models, faq_items, kb_items, threshold), daemon=True)
     t.start()
-    return jsonify({'success': True, 'job_id': job_id})
+    return jsonify({
+        'success': True,
+        'job_id': job_id,
+        'algorithm': 'embedding',
+        'embedding_model': embedding_config.get('model'),
+        'threshold': threshold,
+    })
 
 @app.route('/api/smart_mapping/compare/status', methods=['GET'])
 @login_required
@@ -14541,6 +16458,62 @@ def sm_compare_status():
         'total': out.get('total', 0),
         'done': out.get('done', 0),
         'results': out.get('results', []) if out.get('status') == 'done' else []
+    })
+
+
+@app.route('/api/smart_mapping/embedding/score', methods=['POST'])
+@login_required
+def sm_embedding_score():
+    payload = request.json or {}
+    faq = payload.get('faq') if isinstance(payload.get('faq'), dict) else {}
+    kb = payload.get('kb') if isinstance(payload.get('kb'), dict) else {}
+    faq_question = str(faq.get('question') or '').strip()
+    faq_answer = str(faq.get('answer') or '').strip()
+    kb_question = str(kb.get('question') or '').strip()
+    kb_answer = str(kb.get('answer') or '').strip()
+    if not faq_question or not faq_answer or not kb_question or not kb_answer:
+        return jsonify({'success': False, 'message': 'FAQ 和知识库的问题、答案均不能为空'}), 400
+
+    config = _sm_load_embedding_config()
+    threshold = float(config.get('threshold') or 0.75)
+    try:
+        vectors = _sm_get_embeddings(
+            [faq_question, faq_answer, kb_question, kb_answer],
+            config,
+        )
+        question_score = _sm_vector_cosine(vectors[0], vectors[2])
+        answer_score = _sm_vector_cosine(vectors[1], vectors[3])
+        algorithm = 'embedding'
+        fallback_reason = ''
+        reason = _sm_embedding_reason(
+            _sm_pick_match_type(question_score, answer_score, threshold),
+            question_score,
+            answer_score,
+        )
+    except Exception as exc:
+        if not config.get('fallback_to_ngram'):
+            return jsonify({'success': False, 'message': str(exc)}), 502
+        question_score = _ai_cosine_sim(_sm_norm_for_sim(faq_question), _sm_norm_for_sim(kb_question))
+        answer_score = _ai_cosine_sim(_sm_norm_for_sim(faq_answer), _sm_norm_for_sim(kb_answer))
+        algorithm = 'ngram_fallback'
+        fallback_reason = str(exc or '').strip().replace('\n', ' ')[:240]
+        reason = _sm_trim_reason(
+            f'Embedding不可用，字符相似度降级；{_sm_reason_text(_sm_pick_match_type(question_score, answer_score, threshold), faq_question, faq_answer, kb_question, kb_answer)}',
+            80,
+        )
+
+    match_type = _sm_pick_match_type(question_score, answer_score, threshold)
+    return jsonify({
+        'success': True,
+        'q_sim': question_score,
+        'a_sim': answer_score,
+        'score': (question_score + answer_score) / 2.0,
+        'type': match_type,
+        'reason': reason,
+        'algorithm': algorithm,
+        'embedding_model': config.get('model') if algorithm == 'embedding' else '',
+        'fallback_reason': fallback_reason,
+        'threshold': threshold,
     })
 
 @app.route('/api/smart_mapping/kb/search', methods=['GET'])

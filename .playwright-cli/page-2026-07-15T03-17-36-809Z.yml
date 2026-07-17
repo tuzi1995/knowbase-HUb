@@ -1,0 +1,110 @@
+- generic [ref=f1e1]:
+  - main [ref=f1e2]:
+    - generic [ref=f1e3]:
+      - generic [ref=f1e4]:
+        - generic [ref=f1e5]:
+          - generic [ref=f1e6]: K-matrix
+          - generic [ref=f1e7]:
+            - heading "知识对比" [level=2] [ref=f1e2186]
+            - paragraph [ref=f1e9]: 按 ID 批量导入记录，完成匹配校验、差异摘要与字段详细对比。
+          - generic [ref=f1e10]:
+            - generic [ref=f1e11]:
+              - text: 当前分组：
+              - generic [ref=f1e12]: 核心数据
+            - generic [ref=f1e13]:
+              - text: 当前用户：
+              - generic [ref=f1e14]: admin
+            - generic [ref=f1e15]:
+              - text: 运行环境：
+              - generic [ref=f1e16]: 本地工作台
+        - generic [ref=f1e17]:
+          - button " 使用说明" [ref=f1e18] [cursor=pointer]:
+            - generic [ref=f1e19]: 
+            - text: 使用说明
+          - button "退出" [ref=f1e20] [cursor=pointer]
+      - generic [ref=f1e21]:
+        - complementary [ref=f1e22]:
+          - generic [ref=f1e23]:
+            - generic [ref=f1e24]:
+              - generic [ref=f1e25]:
+                - generic [ref=f1e26]: 模块导航
+                - generic [ref=f1e27]: 按任务分组，保留原有功能入口
+              - button "收起模块导航" [expanded] [ref=f1e28] [cursor=pointer]:
+                - generic [ref=f1e29]: 
+            - generic [ref=f1e30]:
+              - generic [ref=f1e31]:
+                - generic [ref=f1e32]: 核心数据
+                - button "知识库管理" [ref=f1e33] [cursor=pointer]
+                - button "知识对比" [active] [ref=f1e34] [cursor=pointer]
+                - button "机型矩阵管理" [ref=f1e35] [cursor=pointer]
+                - button "多媒体预览" [ref=f1e36] [cursor=pointer]
+              - generic [ref=f1e37]:
+                - generic [ref=f1e38]: 质量管控
+                - button "知识库评分" [ref=f1e39] [cursor=pointer]
+                - button "知识库治理" [ref=f1e40] [cursor=pointer]
+                - button "管控中心" [ref=f1e41] [cursor=pointer]
+              - generic [ref=f1e42]:
+                - generic [ref=f1e43]: 工具与映射
+                - button "数据设置" [ref=f1e44] [cursor=pointer]
+                - button "智能映射" [ref=f1e45] [cursor=pointer]
+              - generic [ref=f1e46]:
+                - generic [ref=f1e47]: 日志与归档
+                - button "修改记录" [ref=f1e48] [cursor=pointer]
+                - button "归档管理" [ref=f1e49] [cursor=pointer]
+        - button "收起模块导航" [expanded]:
+          - generic: 
+        - generic [ref=f1e51]:
+          - generic [ref=f1e52]:
+            - generic [ref=f1e53]: 当前模块
+            - generic [ref=f1e54]: 核心数据 / 知识对比
+          - generic [ref=f1e55]:
+            - text:                                                                                                                             
+            - generic [ref=f1e2188]:
+              - generic [ref=f1e2189]:
+                - generic [ref=f1e2190]:
+                  - generic [ref=f1e2191]: 知识对比
+                  - generic [ref=f1e2192]: 按 ID 批量导入知识库记录，完成匹配校验、字段差异与合并草稿。
+                - generic [ref=f1e2193]:
+                  - button "清空" [ref=f1e2194] [cursor=pointer]
+                  - button "返回知识库" [ref=f1e2195] [cursor=pointer]
+              - generic [ref=f1e2196]:
+                - generic [ref=f1e2197]:
+                  - generic [ref=f1e2198]:
+                    - generic [ref=f1e2199]:
+                      - heading "导入 ID" [level=3] [ref=f1e2200]
+                      - paragraph [ref=f1e2201]: 支持换行、逗号、空格、CSV 文本。也可以从知识库管理勾选后跳转带入。
+                    - generic [ref=f1e2202]:
+                      - generic "对比数据源" [ref=f1e2203]:
+                        - generic [ref=f1e2204]:
+                          - radio "此刻库" [checked] [ref=f1e2205] [cursor=pointer]
+                          - text: 此刻库
+                        - generic [ref=f1e2206]:
+                          - radio "前刻库" [ref=f1e2207] [cursor=pointer]
+                          - text: 前刻库
+                      - button "收起" [ref=f1e2208] [cursor=pointer]
+                  - generic [ref=f1e2209]:
+                    - textbox "粘贴 Wiki ID，例如： ICWIKI202510210009 ICWIKI202409030002 ICWIKI202404232078" [ref=f1e2210]:
+                      - /placeholder: "粘贴 Wiki ID，例如：\nICWIKI202510210009\nICWIKI202409030002\nICWIKI202404232078"
+                    - generic [ref=f1e2211]:
+                      - button "开始对比" [ref=f1e2212] [cursor=pointer]
+                      - button "导入 Excel/CSV" [ref=f1e2213] [cursor=pointer]
+                    - generic [ref=f1e2214]: 请先导入 ID 并点击开始对比。
+                  - generic [ref=f1e2216]:
+                    - generic [ref=f1e2217]:
+                      - generic [ref=f1e2218]:
+                        - heading "差异摘要" [level=3] [ref=f1e2219]
+                        - paragraph [ref=f1e2220]: 等待导入 ID。
+                      - generic [ref=f1e2221]:
+                        - generic [ref=f1e2222]:
+                          - checkbox "只看差异字段" [checked] [ref=f1e2223] [cursor=pointer]
+                          - text: 只看差异字段
+                        - generic [ref=f1e2224]:
+                          - checkbox "显示元数据" [ref=f1e2225] [cursor=pointer]
+                          - text: 显示元数据
+                    - generic [ref=f1e2226]: 暂无对比结果。
+                - generic [ref=f1e2228]:
+                  - generic [ref=f1e2229]: 点击摘要中的字段查看详细对比。
+                  - generic [ref=f1e2231]: 生成合并草稿后，将展示要编辑的主 ID、建议删除的 ID 与字段采用值。
+            - text:                +  
+          - text: +
+  - text: ▾     +                            

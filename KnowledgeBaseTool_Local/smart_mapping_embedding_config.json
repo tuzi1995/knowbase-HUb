@@ -1,0 +1,10 @@
+{
+  "api_url": "https://api.siliconflow.cn/v1/embeddings",
+  "model": "Pro/BAAI/bge-m3",
+  "dimensions": 1024,
+  "threshold": 0.75,
+  "batch_size": 64,
+  "timeout": 60,
+  "fallback_to_ngram": true,
+  "api_key": "sk-swxsksstjfzjhfdaipxwcaigsbckxhbdoveyipcsqiqdrjfd"
+}

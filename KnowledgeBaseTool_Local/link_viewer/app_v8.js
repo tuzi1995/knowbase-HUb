@@ -248,6 +248,16 @@ let kbShowSelectedOnly = false;
 let dangerConfirmResolver = null;
 let kbEditCloseConfirmResolver = null;
 
+function createKBCompareAIState() {
+    return {
+        status: 'idle',
+        result: null,
+        error: '',
+        expanded: true,
+        ignored: false
+    };
+}
+
 let kbCompareState = {
     table: 'knowledge_base_v1',
     ids: [],
@@ -262,6 +272,7 @@ let kbCompareState = {
     importCollapsed: false,
     source: 'manual',
     loading: false,
+    aiMerge: createKBCompareAIState(),
     submittingDraft: false,
     selectedDraftFields: null,
     selectedDraftDeletes: null,
@@ -538,6 +549,7 @@ async function openKbMergeActionEmbedRequest() {
         baseRowId: '',
         fieldChoices: {},
         mergeDraft: null,
+        aiMerge: createKBCompareAIState(),
         submitResult: null
     };
     switchTab('kbCompareView');
@@ -1249,6 +1261,11 @@ const TAB_META = {
         group: '核心数据',
         description: '按 ID 批量导入记录，完成匹配校验、差异摘要与字段详细对比。',
     },
+    kbDuplicateCheckView: {
+        title: '知识查重',
+        group: '核心数据',
+        description: '对拟新增 FAQ 执行语义召回、范围校验、覆盖判断与人工确认。',
+    },
     matrixView: {
         title: '机型矩阵管理',
         group: '核心数据',
@@ -1442,7 +1459,7 @@ function scheduleWorkbenchSidebarHeightUpdate() {
 function normalizeWorkbenchViews() {
     const viewsWrap = document.querySelector('.workbench-views');
     if (!viewsWrap) return;
-    const viewIds = ['kbView', 'kbCompareView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const viewIds = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
     viewIds.forEach(id => {
         const el = document.getElementById(id);
         if (el && el.parentElement !== viewsWrap) viewsWrap.appendChild(el);
@@ -1451,7 +1468,7 @@ function normalizeWorkbenchViews() {
 
 function switchTab(tabId) {
     normalizeWorkbenchViews();
-    const tabs = ['kbView', 'kbCompareView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const tabs = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
     const viewsWrap = document.querySelector('.workbench-views');
     const isQualityControlCenter = tabId === 'controlCenterView';
     [
@@ -1513,6 +1530,8 @@ function switchTab(tabId) {
         if (typeof loadKBTable === 'function') loadKBTable(kbCurrentPage || 1);
     } else if (tabId === 'kbCompareView') {
         if (typeof renderKBCompareResults === 'function') renderKBCompareResults();
+    } else if (tabId === 'kbDuplicateCheckView') {
+        if (typeof kdInit === 'function') kdInit();
     } else if (tabId === 'scoringView') {
         if (typeof isScoringInProgress === 'function' && isScoringInProgress()) {
             if (typeof renderScoringTable === 'function') renderScoringTable(true);
@@ -1567,6 +1586,8 @@ function updateDataSettingsState() {
         if (section && grid) section.insertBefore(panel, grid);
         else if (section) section.appendChild(panel);
     }
+    if (typeof smLoadEmbeddingConfig === 'function') smLoadEmbeddingConfig();
+    if (typeof kdRefreshIndexStatus === 'function') kdRefreshIndexStatus('knowledge_base_v1');
 }
 
 function _hotfixSetStyle(el, styles) {
@@ -1595,10 +1616,25 @@ function applyWorkbenchLayoutHotfix() {
     ['modificationsView', 'archiveView', 'smartMappingView'].forEach(id => {
         const view = document.getElementById(id);
         if (!view || view.classList.contains('d-none') || view.style.display === 'none') return;
+        const isSmartMappingView = id === 'smartMappingView';
         view.classList.add('is-active-view');
-        _hotfixSetStyle(view, { 'display': 'flex', 'flex-direction': 'column', 'height': '100%', 'min-height': '0' });
+        _hotfixSetStyle(view, {
+            'display': 'flex',
+            'flex': isSmartMappingView ? '0 0 auto' : '1 1 auto',
+            'flex-direction': 'column',
+            'height': isSmartMappingView ? 'auto' : '100%',
+            'min-height': isSmartMappingView ? '100%' : '0'
+        });
         const section = view.querySelector('.kb-section');
-        _hotfixSetStyle(section, { 'display': 'flex', 'flex': '1 1 auto', 'flex-direction': 'column', 'min-height': '0', 'overflow': 'hidden', 'padding': '12px', 'gap': '10px' });
+        _hotfixSetStyle(section, {
+            'display': 'flex',
+            'flex': isSmartMappingView ? '0 0 auto' : '1 1 auto',
+            'flex-direction': 'column',
+            'min-height': '0',
+            'overflow': isSmartMappingView ? 'visible' : 'hidden',
+            'padding': '12px',
+            'gap': '10px'
+        });
         _hotfixSetStyle(view.querySelector('.kb-section-title'), { 'margin-bottom': '0' });
     });
 
@@ -1642,6 +1678,15 @@ let smWorkbenchExpanded = new Set();
 let smWorkbenchOtherInfoOpen = new Set();
 let smWorkbenchEventsBound = false;
 let smCacheSaveTimer = null;
+let smEmbeddingConfig = {
+    api_url: 'https://api.siliconflow.cn/v1/embeddings',
+    model: 'Pro/BAAI/bge-m3',
+    dimensions: 1024,
+    threshold: 0.75,
+    api_key_configured: false,
+    api_key_source: '',
+    cache_count: 0
+};
 
 function smGetCompareCacheKeys() {
     const u = String(currentUser || '').trim();
@@ -1790,10 +1835,120 @@ function smSetStatusText(id, text) {
     if (el) el.textContent = text || '';
 }
 
+function smSetEmbeddingConfigStatus(text) {
+    smSetStatusText('smEmbeddingCardStatus', text);
+    smSetStatusText('smEmbeddingConfigStatus', text);
+}
+
+function smOpenEmbeddingConfigDialog() {
+    const dialog = document.getElementById('smEmbeddingConfigDialog');
+    if (!dialog) return;
+    smRenderEmbeddingConfig();
+    if (!dialog.open) dialog.showModal();
+    document.getElementById('smEmbeddingApiUrl')?.focus();
+}
+
+function smCloseEmbeddingConfigDialog() {
+    const dialog = document.getElementById('smEmbeddingConfigDialog');
+    if (!dialog) return;
+    smRenderEmbeddingConfig();
+    if (dialog.open) dialog.close();
+}
+
 function smSetProgress(pct, text) {
     const inner = document.getElementById('smProgressInner');
     if (inner) inner.style.width = `${Math.max(0, Math.min(100, pct || 0))}%`;
     smSetStatusText('smProgressText', text || '');
+}
+
+function smRenderEmbeddingConfig() {
+    const config = smEmbeddingConfig || {};
+    const apiUrl = document.getElementById('smEmbeddingApiUrl');
+    const model = document.getElementById('smEmbeddingModel');
+    const dimensions = document.getElementById('smEmbeddingDimensions');
+    const threshold = document.getElementById('smEmbeddingThreshold');
+    const apiKey = document.getElementById('smEmbeddingApiKey');
+    if (apiUrl) apiUrl.value = String(config.api_url || '');
+    if (model) model.value = String(config.model || '');
+    if (dimensions) dimensions.value = String(config.dimensions || 1024);
+    if (threshold) threshold.value = String(config.threshold || 0.75);
+    if (apiKey) apiKey.value = '';
+
+    const sourceLabels = {
+        environment: '环境变量 Key',
+        custom: '独立配置 Key',
+        ai_config: '复用现有 AI 配置 Key'
+    };
+    const keyText = config.api_key_configured
+        ? (sourceLabels[String(config.api_key_source || '')] || 'API Key 已配置')
+        : 'API Key 未配置';
+    const cacheCount = Number(config.cache_count || 0);
+    smSetEmbeddingConfigStatus(`${keyText} · 已缓存 ${cacheCount} 条向量`);
+    smSetStatusText('smThresholdLabel', `Embedding 阈值：${Number(config.threshold || 0.75).toFixed(2)}`);
+}
+
+function smCollectEmbeddingConfig() {
+    return {
+        api_url: String(document.getElementById('smEmbeddingApiUrl')?.value || '').trim(),
+        model: String(document.getElementById('smEmbeddingModel')?.value || '').trim(),
+        dimensions: Number(document.getElementById('smEmbeddingDimensions')?.value || 1024),
+        threshold: Number(document.getElementById('smEmbeddingThreshold')?.value || 0.75),
+        api_key: String(document.getElementById('smEmbeddingApiKey')?.value || '').trim()
+    };
+}
+
+async function smLoadEmbeddingConfig() {
+    try {
+        const res = await api('/smart_mapping/embedding/config');
+        if (!res || !res.success) throw new Error(res?.message || 'Embedding 配置加载失败');
+        smEmbeddingConfig = { ...smEmbeddingConfig, ...(res.config || {}) };
+        smRenderEmbeddingConfig();
+    } catch (e) {
+        smSetEmbeddingConfigStatus(`配置加载失败：${e?.message || String(e)}`);
+    }
+}
+
+async function smSaveEmbeddingConfig() {
+    const btn = document.getElementById('smEmbeddingSaveBtn');
+    if (btn) btn.disabled = true;
+    smSetEmbeddingConfigStatus('正在保存配置...');
+    try {
+        const res = await api('/smart_mapping/embedding/config', 'POST', smCollectEmbeddingConfig());
+        if (!res || !res.success) throw new Error(res?.message || '保存失败');
+        smEmbeddingConfig = { ...smEmbeddingConfig, ...(res.config || {}) };
+        smRenderEmbeddingConfig();
+        if (typeof showToast === 'function') showToast('Embedding 配置已保存', 'success');
+    } catch (e) {
+        smSetEmbeddingConfigStatus(`保存失败：${e?.message || String(e)}`);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function smTestEmbeddingConfig() {
+    const btn = document.getElementById('smEmbeddingTestBtn');
+    if (btn) btn.disabled = true;
+    smSetEmbeddingConfigStatus('正在测试 Embedding API...');
+    try {
+        const res = await api('/smart_mapping/embedding/test', 'POST', smCollectEmbeddingConfig());
+        if (!res || !res.success) throw new Error(res?.message || '连接失败');
+        smSetEmbeddingConfigStatus(`连接成功 · ${res.model || ''} · ${res.dimensions || 0} 维`);
+        if (typeof showToast === 'function') showToast('Embedding API 连接成功', 'success');
+    } catch (e) {
+        smSetEmbeddingConfigStatus(`连接失败：${e?.message || String(e)}`);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+function smSetAlgorithmStatus(match) {
+    const algorithm = String(match?.algorithm || 'embedding');
+    if (algorithm === 'ngram_fallback') {
+        smSetStatusText('smAlgorithmStatus', '当前算法：字符相似度降级');
+        return;
+    }
+    const model = String(match?.embedding_model || smEmbeddingConfig?.model || '').trim();
+    smSetStatusText('smAlgorithmStatus', `当前算法：Embedding${model ? ` · ${model}` : ''}`);
 }
 
 function smUpdateReadyState() {
@@ -1969,8 +2124,12 @@ async function smInitSmartMapping() {
         if (confirm(msg)) restored = smRestoreCompareCache();
         else smClearCompareCache();
     }
-    await smLoadCatalogAndRenderSelector();
+    await Promise.all([
+        smLoadCatalogAndRenderSelector(),
+        smLoadEmbeddingConfig()
+    ]);
     if (restored) smRenderWorkbench();
+    if (restored && smWorkbenchRows.length > 0) smSetAlgorithmStatus(smWorkbenchRows[0]?.match);
     smUpdateReadyState();
 }
 
@@ -2203,7 +2362,7 @@ async function smStartCompare() {
         if (smFaqItems.length === 0 || smKbItems.length === 0) throw new Error('请先导入包含两张工作表的对比Excel');
         const res = await api('/smart_mapping/compare/start', 'POST', {
             table: 'knowledge_base_v1',
-            threshold: 0.7,
+            threshold: Number(smEmbeddingConfig?.threshold || 0.75),
             faq_items: smFaqItems,
             kb_items: smKbItems
         });
@@ -2228,7 +2387,8 @@ async function smPollCompareStatus() {
         const done = Number(res.done || 0);
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
         if (res.status === 'running') {
-            smSetProgress(Math.max(1, pct), `比对中：${done}/${total}`);
+            const phase = String(res.message || '').trim();
+            smSetProgress(Math.max(1, pct), phase || `比对中：${done}/${total}`);
             await new Promise(r => setTimeout(r, 350));
             continue;
         }
@@ -2261,6 +2421,10 @@ async function smPollCompareStatus() {
                 pageSize: smWorkbenchFilter.pageSize || 50
             };
             smRenderWorkbench();
+            smSetAlgorithmStatus(smWorkbenchRows[0]?.match);
+            if (String(smWorkbenchRows[0]?.match?.algorithm || '') === 'ngram_fallback' && typeof showToast === 'function') {
+                showToast('Embedding API 不可用，本次已使用字符相似度完成比对', 'warning');
+            }
             smUpdateReadyState();
             smSaveCompareCache();
             return;
@@ -3107,7 +3271,7 @@ async function smDoManualSearch() {
     }
 }
 
-function smPickManualMatch(resultIndex) {
+async function smPickManualMatch(resultIndex) {
     const idx = smManualSearchRowIdx;
     if (idx === null || idx === undefined) return;
     const row = smWorkbenchRows[idx];
@@ -3124,19 +3288,43 @@ function smPickManualMatch(resultIndex) {
     row.match.kb_question = kbQ;
     row.match.kb_answer = kbA;
     row.match.kb_models = kbM;
-    const fq = smNormForSim(row.faq?.question || '');
-    const fa = smNormForSim(row.faq?.answer || '');
-    const kq = smNormForSim(kbQ);
-    const ka = smNormForSim(kbA);
-    const qSim = smCosineSim(fq, kq);
-    const aSim = smCosineSim(fa, ka);
-    row.match.q_sim = qSim;
-    row.match.a_sim = aSim;
-    row.match.score = (qSim + aSim) / 2;
-    row.match.type = smPickMatchType(qSim, aSim, 0.7);
+    smSetStatusText('smSearchStatus', '正在计算 Embedding 相似度...');
+    try {
+        const scoreRes = await api('/smart_mapping/embedding/score', 'POST', {
+            faq: {
+                question: String(row.faq?.question || ''),
+                answer: String(row.faq?.answer || '')
+            },
+            kb: { question: kbQ, answer: kbA }
+        });
+        if (!scoreRes || !scoreRes.success) throw new Error(scoreRes?.message || 'Embedding 评分失败');
+        row.match.q_sim = Number(scoreRes.q_sim || 0);
+        row.match.a_sim = Number(scoreRes.a_sim || 0);
+        row.match.score = Number(scoreRes.score || 0);
+        row.match.type = String(scoreRes.type || '无匹配');
+        row.match.algorithm = String(scoreRes.algorithm || 'embedding');
+        row.match.embedding_model = String(scoreRes.embedding_model || '');
+        row.match.fallback_reason = String(scoreRes.fallback_reason || '');
+        if (!row.reasonEdited) row.reason = String(scoreRes.reason || '');
+    } catch (e) {
+        const fq = smNormForSim(row.faq?.question || '');
+        const fa = smNormForSim(row.faq?.answer || '');
+        const kq = smNormForSim(kbQ);
+        const ka = smNormForSim(kbA);
+        const qSim = smCosineSim(fq, kq);
+        const aSim = smCosineSim(fa, ka);
+        row.match.q_sim = qSim;
+        row.match.a_sim = aSim;
+        row.match.score = (qSim + aSim) / 2;
+        row.match.type = smPickMatchType(qSim, aSim, Number(smEmbeddingConfig?.threshold || 0.75));
+        row.match.algorithm = 'ngram_fallback';
+        row.match.embedding_model = '';
+        row.match.fallback_reason = e?.message || String(e);
+        if (!row.reasonEdited) row.reason = `Embedding不可用，字符相似度降级；${smBuildReason(row.match.type, row.faq?.question, row.faq?.answer, kbQ, kbA)}`.slice(0, 80);
+    }
     row.mode = row.match.type === '无匹配' ? 'create' : (row.mode === 'create' ? 'create' : 'update');
-    if (!row.reasonEdited) row.reason = smBuildReason(row.match.type, row.faq?.question, row.faq?.answer, kbQ, kbA);
     row.decision = 'pending';
+    smSetAlgorithmStatus(row.match);
     smCloseSearchModal();
     smRenderWorkbench();
     smUpdateReadyState();
@@ -9227,6 +9415,861 @@ function toggleKBSelectAll() {
     }
 }
 
+const KD_DRAFT_STORAGE_PREFIX = 'kb_duplicate_check_draft_v1';
+const KD_TASK_STORAGE_PREFIX = 'kb_duplicate_check_task_v1';
+const KD_RELATIONSHIP_LABELS = {
+    fully_covered: '完整覆盖',
+    partially_covered: '部分覆盖',
+    collectively_covered: '多条合计覆盖',
+    conflicting: '存在冲突',
+    unrelated: '无有效覆盖'
+};
+const KD_ACTION_LABELS = {
+    no_add: '无需新增',
+    update_existing: '扩充现有知识',
+    compare_merge: '对比并合并',
+    create_new: '新增知识',
+    manual_review: '人工确认'
+};
+const KD_CHANNEL_LABELS = {
+    embedding: 'Embedding',
+    embedding_intent: '问题语义',
+    embedding_content: '答案语义',
+    structured: '结构化',
+    ngram_fallback: '字符降级',
+    ai: 'AI 覆盖判断'
+};
+let kdState = {
+    initialized: false,
+    catalog: {},
+    taskId: '',
+    data: null,
+    indexData: null,
+    selectedIds: new Set(),
+    pollTimer: null,
+    indexTimer: null,
+    draftTimer: null
+};
+
+function kdStorageKey(prefix) {
+    return `${prefix}:${String(currentUser || 'local').trim() || 'local'}`;
+}
+
+function kdSelectedValues(select) {
+    return select ? Array.from(select.selectedOptions || []).map(option => option.value).filter(Boolean) : [];
+}
+
+function kdSetSelectedValues(select, values) {
+    if (!select) return;
+    const selected = new Set((values || []).map(value => String(value)));
+    Array.from(select.options || []).forEach(option => {
+        option.selected = selected.has(option.value);
+    });
+}
+
+function kdSetFormError(message = '') {
+    const element = document.getElementById('kdFormError');
+    if (!element) return;
+    element.textContent = message;
+    element.classList.toggle('d-none', !message);
+}
+
+function kdCollectInput() {
+    return {
+        library: document.querySelector('input[name="kdLibrary"]:checked')?.value || 'knowledge_base_v1',
+        question: String(document.getElementById('kdQuestion')?.value || '').trim(),
+        answer: String(document.getElementById('kdAnswer')?.value || '').trim(),
+        product_category_name: String(document.getElementById('kdCategory')?.value || '').trim(),
+        product_names: kdSelectedValues(document.getElementById('kdModels')),
+        source_note: String(document.getElementById('kdSourceNote')?.value || '').trim()
+    };
+}
+
+function kdScheduleDraftSave() {
+    const status = document.getElementById('kdDraftStatus');
+    if (status) status.textContent = '有未保存修改';
+    if (kdState.draftTimer) clearTimeout(kdState.draftTimer);
+    kdState.draftTimer = setTimeout(() => kdSaveDraft(false), 500);
+}
+
+function kdSaveDraft(notifyUser = false) {
+    try {
+        const payload = { ...kdCollectInput(), saved_at: Date.now() };
+        localStorage.setItem(kdStorageKey(KD_DRAFT_STORAGE_PREFIX), JSON.stringify(payload));
+        const status = document.getElementById('kdDraftStatus');
+        if (status) status.textContent = '草稿已保存';
+        if (notifyUser && typeof showToast === 'function') showToast('查重草稿已保存', 'success');
+    } catch (error) {
+        const status = document.getElementById('kdDraftStatus');
+        if (status) status.textContent = '草稿保存失败';
+        if (notifyUser && typeof showToast === 'function') showToast('草稿保存失败', 'error');
+    }
+}
+
+function kdRestoreDraft() {
+    try {
+        const raw = localStorage.getItem(kdStorageKey(KD_DRAFT_STORAGE_PREFIX));
+        if (!raw) return;
+        const draft = JSON.parse(raw);
+        if (!draft || typeof draft !== 'object') return;
+        const library = document.querySelector(`input[name="kdLibrary"][value="${_escapeAttr(draft.library || 'knowledge_base_v1')}"]`);
+        if (library) library.checked = true;
+        const question = document.getElementById('kdQuestion');
+        const answer = document.getElementById('kdAnswer');
+        const category = document.getElementById('kdCategory');
+        const source = document.getElementById('kdSourceNote');
+        if (question) question.value = String(draft.question || '');
+        if (answer) answer.value = String(draft.answer || '');
+        if (category) category.value = String(draft.product_category_name || '');
+        if (source) source.value = String(draft.source_note || '');
+        kdRenderModelOptions(draft.product_names || [], { silent: true });
+        const status = document.getElementById('kdDraftStatus');
+        if (status) status.textContent = '已恢复本地草稿';
+    } catch (_) {}
+}
+
+async function kdLoadCatalog() {
+    try {
+        const response = await api('/kb/product_catalog');
+        kdState.catalog = response && typeof response === 'object' && !Array.isArray(response) ? response : {};
+    } catch (_) {
+        kdState.catalog = {};
+    }
+    const select = document.getElementById('kdCategory');
+    if (!select) return;
+    const current = select.value;
+    const categories = Object.keys(kdState.catalog).sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'));
+    select.innerHTML = '<option value="">未指定</option>' + categories
+        .map(category => `<option value="${_escapeAttr(category)}">${escapeHtml(category)}</option>`)
+        .join('');
+    if (current && categories.includes(current)) select.value = current;
+    kdRenderModelOptions(null, { silent: true });
+}
+
+function kdRenderModelOptions(selectedValues = null, options = {}) {
+    const category = String(document.getElementById('kdCategory')?.value || '');
+    const select = document.getElementById('kdModels');
+    if (!select) return;
+    const previous = selectedValues || kdSelectedValues(select);
+    let models = [];
+    if (category && Array.isArray(kdState.catalog[category])) {
+        models = kdState.catalog[category];
+    } else {
+        Object.values(kdState.catalog).forEach(items => {
+            if (Array.isArray(items)) models.push(...items);
+        });
+    }
+    models = Array.from(new Set(models.map(value => String(value || '').trim()).filter(Boolean)))
+        .sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'));
+    select.innerHTML = models.map(model => `<option value="${_escapeAttr(model)}">${escapeHtml(model)}</option>`).join('');
+    kdSetSelectedValues(select, previous);
+    if (!options.silent) kdScheduleDraftSave();
+}
+
+function kdBindDraftEvents() {
+    ['kdQuestion', 'kdAnswer', 'kdCategory', 'kdModels', 'kdSourceNote'].forEach(id => {
+        const element = document.getElementById(id);
+        if (!element || element.dataset.kdDraftBound === '1') return;
+        element.dataset.kdDraftBound = '1';
+        element.addEventListener(id === 'kdModels' || id === 'kdCategory' ? 'change' : 'input', kdScheduleDraftSave);
+    });
+    document.querySelectorAll('input[name="kdLibrary"]').forEach(element => {
+        if (element.dataset.kdDraftBound === '1') return;
+        element.dataset.kdDraftBound = '1';
+        element.addEventListener('change', () => {
+            kdScheduleDraftSave();
+            kdRefreshIndexStatus();
+        });
+    });
+}
+
+async function kdInit() {
+    if (!kdState.initialized) {
+        kdState.initialized = true;
+        await kdLoadCatalog();
+        kdRestoreDraft();
+        kdBindDraftEvents();
+        try {
+            kdState.taskId = localStorage.getItem(kdStorageKey(KD_TASK_STORAGE_PREFIX)) || '';
+        } catch (_) {}
+    }
+    await kdRefreshIndexStatus();
+    if (kdState.taskId) {
+        await kdRefreshStatus();
+    } else {
+        kdRender();
+    }
+}
+
+function kdIndexLibrary() {
+    return document.querySelector('input[name="kdLibrary"]:checked')?.value || 'knowledge_base_v1';
+}
+
+function kdScheduleIndexPoll(delay = 900, library = '') {
+    if (kdState.indexTimer) clearTimeout(kdState.indexTimer);
+    kdState.indexTimer = setTimeout(() => kdRefreshIndexStatus(library), delay);
+}
+
+async function kdRefreshIndexStatus(libraryOverride = '') {
+    const library = libraryOverride || kdIndexLibrary();
+    const shouldRenderWorkbench = !libraryOverride || kdIndexLibrary() === library;
+    try {
+        const response = await api(`/kb/duplicate-check/index/status?library=${encodeURIComponent(library)}`);
+        if (!response?.success) throw new Error(response?.message || '索引状态加载失败');
+        kdState.indexData = response;
+        if (shouldRenderWorkbench) kdRenderIndexStatus();
+        if (library === 'knowledge_base_v1') kdRenderDataSettingsIndexStatus(response);
+        if (response.job?.status === 'running') kdScheduleIndexPoll(900, library);
+    } catch (error) {
+        kdState.indexData = {
+            library,
+            ready: 0,
+            pending: 0,
+            failed: 0,
+            cache_count: 0,
+            embedding: { api_key_configured: false },
+            status_error: error?.message || String(error)
+        };
+        if (shouldRenderWorkbench) kdRenderIndexStatus();
+        if (library === 'knowledge_base_v1') kdRenderDataSettingsIndexStatus(kdState.indexData);
+    }
+}
+
+function kdRenderDataSettingsIndexStatus(data = {}) {
+    const button = document.getElementById('syncDuplicateIndexBtn');
+    const status = document.getElementById('syncDuplicateIndexStatus');
+    if (!button || !status) return;
+
+    const job = data.job || null;
+    const running = job?.status === 'running';
+    const keyConfigured = !!data.embedding?.api_key_configured;
+    const ready = Number(data.ready || 0);
+    const pending = Number(data.pending || 0);
+    const failed = Number(data.failed || 0);
+    const total = Number(data.total || 0);
+    const icon = button.querySelector('i');
+    const label = button.querySelector('span');
+
+    button.disabled = running || !keyConfigured;
+    if (icon) icon.className = running ? 'fas fa-spinner fa-spin' : 'fas fa-sync-alt';
+    if (label) label.textContent = running ? '同步索引中' : '增量同步索引';
+
+    if (data.status_error) {
+        status.textContent = `索引状态获取失败：${data.status_error}`;
+    } else if (!keyConfigured) {
+        status.textContent = '需先配置 Embedding API Key';
+    } else if (running) {
+        const jobTotal = Number(job.total || total || 0);
+        const jobDone = Number(job.done || 0);
+        status.textContent = jobTotal > 0
+            ? `索引同步中：${jobDone}/${jobTotal}`
+            : (job.message || '正在准备索引');
+    } else if (job?.status === 'failed' || job?.status === 'partial_failed' || failed > 0) {
+        status.textContent = job?.error || data.last_error || `索引存在 ${failed} 条失败项`;
+    } else if (total > 0 && ready === total) {
+        status.textContent = `索引已就绪：${ready}/${total}`;
+    } else if (pending > 0) {
+        status.textContent = `待同步 ${pending} 条知识`;
+    } else {
+        status.textContent = '查重索引尚未建立';
+    }
+}
+
+function kdRenderIndexStatus() {
+    const data = kdState.indexData || {};
+    const job = data.job || null;
+    const running = job?.status === 'running';
+    const keyConfigured = !!data.embedding?.api_key_configured;
+    const total = Number(data.total || 0);
+    const ready = Number(data.ready || 0);
+    const pending = Number(data.pending || 0);
+    const failed = Number(data.failed || 0);
+    const setText = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = String(value);
+    };
+    setText('kdIndexReady', ready);
+    setText('kdIndexPending', pending);
+    setText('kdIndexFailed', failed);
+    setText('kdIndexCache', Number(data.cache_count || 0));
+
+    const title = document.getElementById('kdIndexTitle');
+    const badge = document.getElementById('kdIndexBadge');
+    const message = document.getElementById('kdIndexMessage');
+    const progress = document.getElementById('kdIndexProgressBar');
+    let titleText = '知识索引未初始化';
+    let badgeText = '未就绪';
+    let badgeClass = 'kd-index-badge';
+    let messageText = data.status_error || '';
+    let percent = 0;
+    if (!keyConfigured) {
+        titleText = 'Embedding API Key 未配置';
+        badgeText = '配置缺失';
+        badgeClass += ' is-warning';
+        messageText = data.status_error || `当前模型：${data.embedding?.model || '未配置'}，请先在智能映射中配置独立 API Key。`;
+    } else if (running) {
+        const jobTotal = Number(job.total || total || 0);
+        const jobDone = Number(job.done || 0);
+        titleText = '正在构建知识检索索引';
+        badgeText = '处理中';
+        badgeClass += ' is-running';
+        messageText = job.message || '正在准备索引';
+        percent = jobTotal > 0 ? Math.round((jobDone / jobTotal) * 100) : 3;
+    } else if (job?.status === 'failed' || job?.status === 'partial_failed' || failed > 0) {
+        titleText = '索引存在失败项';
+        badgeText = '需要重试';
+        badgeClass += ' is-warning';
+        messageText = job?.error || data.last_error || `${failed} 条知识需要重试。`;
+        percent = total > 0 ? Math.round((ready / total) * 100) : 0;
+    } else if (total > 0 && ready === total) {
+        titleText = '知识检索索引已就绪';
+        badgeText = '可查重';
+        badgeClass += ' is-ready';
+        const updated = data.last_indexed_at ? new Date(data.last_indexed_at).toLocaleString() : '时间未知';
+        messageText = `${data.embedding?.model || 'Embedding'} · ${data.embedding?.dimensions || 0} 维 · 最近更新 ${updated}`;
+        percent = 100;
+    } else if (pending > 0) {
+        titleText = '索引有待处理知识';
+        badgeText = '待同步';
+        badgeClass += ' is-warning';
+        messageText = `${pending} 条知识等待生成向量。`;
+        percent = total > 0 ? Math.round((ready / total) * 100) : 0;
+    } else {
+        messageText = `${data.embedding?.model || 'Embedding'} · ${data.embedding?.dimensions || 0} 维`;
+    }
+    if (title) title.textContent = titleText;
+    if (badge) {
+        badge.textContent = badgeText;
+        badge.className = badgeClass;
+    }
+    if (message) message.textContent = messageText;
+    if (progress) progress.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+
+    const setDisabled = (id, disabled) => {
+        const element = document.getElementById(id);
+        if (element) element.disabled = disabled;
+    };
+    setDisabled('kdIndexSyncBtn', running || !keyConfigured);
+    setDisabled('kdIndexRebuildBtn', running || !keyConfigured);
+    setDisabled('kdIndexRetryBtn', running || !keyConfigured || (failed + pending === 0));
+    const cancelButton = document.getElementById('kdIndexCancelBtn');
+    cancelButton?.classList.toggle('d-none', !running);
+}
+
+async function kdStartIndex(mode, libraryOverride = '') {
+    if (!['incremental', 'full', 'failed'].includes(mode)) return;
+    if (mode === 'full' && !confirm('确认检查全部知识并重建检索索引？已有向量缓存会继续复用。')) return;
+    const library = libraryOverride || kdIndexLibrary();
+    const shouldRenderWorkbench = !libraryOverride || kdIndexLibrary() === library;
+    if (library === 'knowledge_base_v1') {
+        kdRenderDataSettingsIndexStatus({
+            ...(kdState.indexData || {}),
+            library,
+            status_error: '',
+            embedding: kdState.indexData?.embedding || { api_key_configured: true },
+            job: { status: 'running', message: '正在创建索引任务' }
+        });
+    }
+    try {
+        const response = await api('/kb/duplicate-check/index/rebuild', 'POST', { library, mode });
+        if (!response?.success && !response?.job_id) {
+            throw new Error(response?.message || '索引任务创建失败');
+        }
+        kdState.indexData = {
+            ...(kdState.indexData || {}),
+            library,
+            status_error: '',
+            job: {
+                job_id: response.job_id,
+                mode,
+                status: 'running',
+                total: Number(kdState.indexData?.total || 0),
+                done: 0,
+                message: '索引任务已创建'
+            }
+        };
+        if (shouldRenderWorkbench) kdRenderIndexStatus();
+        if (library === 'knowledge_base_v1') kdRenderDataSettingsIndexStatus(kdState.indexData);
+        kdScheduleIndexPoll(100, library);
+    } catch (error) {
+        if (shouldRenderWorkbench) kdSetFormError(error?.message || String(error));
+        if (library === 'knowledge_base_v1') {
+            kdRenderDataSettingsIndexStatus({
+                ...(kdState.indexData || {}),
+                library,
+                job: null,
+                status_error: error?.message || String(error)
+            });
+        }
+        if (typeof showToast === 'function') showToast(error?.message || '索引任务创建失败', 'error');
+    }
+}
+
+async function kdCancelIndex() {
+    const jobId = kdState.indexData?.job?.job_id;
+    if (!jobId || kdState.indexData?.job?.status !== 'running') return;
+    try {
+        const response = await api('/kb/duplicate-check/index/cancel', 'POST', { job_id: jobId });
+        if (!response?.success) throw new Error(response?.message || '取消失败');
+        kdState.indexData.job.message = '正在取消索引任务';
+        kdRenderIndexStatus();
+        kdScheduleIndexPoll(300);
+    } catch (error) {
+        kdSetFormError(error?.message || String(error));
+    }
+}
+
+function kdSetBusy(busy) {
+    const button = document.getElementById('kdStartBtn');
+    if (!button) return;
+    button.disabled = busy;
+    button.innerHTML = busy
+        ? '<i class="fas fa-spinner fa-spin"></i><span>正在创建任务</span>'
+        : '<i class="fas fa-search"></i><span>开始查重</span>';
+}
+
+async function kdStartCheck() {
+    const payload = kdCollectInput();
+    kdSetFormError('');
+    if (!payload.question || !payload.answer) {
+        kdSetFormError('请填写拟新增问题和拟新增答案。');
+        return;
+    }
+    kdSetBusy(true);
+    kdSaveDraft(false);
+    try {
+        const response = await api('/kb/duplicate-check/start', 'POST', payload);
+        if (!response?.success) throw new Error(response?.message || '任务创建失败');
+        kdState.taskId = response.task_id;
+        kdState.selectedIds.clear();
+        kdState.data = {
+            task_id: response.task_id,
+            status: 'running',
+            stage: 'preparing_index',
+            message: '任务已创建，正在准备索引',
+            index: { total: 0, done: 0 },
+            candidates: [],
+            completed_channels: [],
+            failed_stages: [],
+            analysis: {}
+        };
+        localStorage.setItem(kdStorageKey(KD_TASK_STORAGE_PREFIX), kdState.taskId);
+        kdRender();
+        kdSchedulePoll(100);
+    } catch (error) {
+        kdSetFormError(error?.message || String(error));
+    } finally {
+        kdSetBusy(false);
+    }
+}
+
+function kdSchedulePoll(delay = 800) {
+    if (kdState.pollTimer) clearTimeout(kdState.pollTimer);
+    kdState.pollTimer = setTimeout(() => kdRefreshStatus(), delay);
+}
+
+async function kdRefreshStatus() {
+    if (!kdState.taskId) return;
+    try {
+        const response = await api(`/kb/duplicate-check/status?task_id=${encodeURIComponent(kdState.taskId)}`);
+        if (!response?.success) throw new Error(response?.message || '任务状态加载失败');
+        kdState.data = response;
+        kdRender();
+        if (response.status === 'running') kdSchedulePoll();
+    } catch (error) {
+        kdSetFormError(error?.message || String(error));
+    }
+}
+
+function kdStageIndex(stage) {
+    const order = ['preparing_index', 'recalling', 'ai_analyzing', 'completed'];
+    return Math.max(0, order.indexOf(stage));
+}
+
+function kdProgressPercent(data) {
+    const stage = data?.stage || 'preparing_index';
+    if (stage === 'preparing_index') {
+        const total = Number(data?.index?.total || 0);
+        const done = Number(data?.index?.done || 0);
+        return total > 0 ? Math.min(35, Math.round((done / total) * 35)) : 5;
+    }
+    if (stage === 'recalling') return 52;
+    if (stage === 'ai_analyzing') return 76;
+    if (stage === 'completed' || data?.status === 'done' || data?.status === 'partial_failed') return 100;
+    return 0;
+}
+
+function kdRenderChannels(data) {
+    const completed = data?.completed_channels || [];
+    const failed = data?.failed_stages || [];
+    const items = [];
+    completed.forEach(channel => {
+        items.push(`<span class="kd-channel is-complete"><i class="fas fa-check"></i>${escapeHtml(KD_CHANNEL_LABELS[channel] || channel)}</span>`);
+    });
+    failed.forEach(channel => {
+        items.push(`<span class="kd-channel is-failed"><i class="fas fa-exclamation-triangle"></i>${escapeHtml(KD_CHANNEL_LABELS[channel] || channel)}失败</span>`);
+    });
+    return items.length ? items.join('') : '<span class="kd-channel">等待执行召回渠道</span>';
+}
+
+function kdPointList(title, items, className = '') {
+    const values = Array.isArray(items) ? items : [];
+    return `<div class="kd-summary-block ${className}">
+        <span>${escapeHtml(title)}</span>
+        ${values.length ? `<ul>${values.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>` : '<p>无</p>'}
+    </div>`;
+}
+
+function kdRenderSummary(data) {
+    const element = document.getElementById('kdSummary');
+    if (!element) return;
+    const analysis = data?.analysis || {};
+    if (!analysis.reason && data?.status === 'running') {
+        element.classList.add('d-none');
+        element.innerHTML = '';
+        return;
+    }
+    const relation = KD_RELATIONSHIP_LABELS[analysis.relationship] || '待人工确认';
+    const action = KD_ACTION_LABELS[analysis.recommended_action] || '人工确认';
+    const confidence = Number(analysis.confidence || 0);
+    element.classList.remove('d-none');
+    element.innerHTML = `
+        <div class="kd-summary-head">
+            <div>
+                <span>整体覆盖结论</span>
+                <strong>${escapeHtml(relation)}</strong>
+            </div>
+            <div class="kd-summary-action">
+                <span>建议动作</span>
+                <strong>${escapeHtml(action)}</strong>
+            </div>
+            <div class="kd-summary-confidence">
+                <span>置信度</span>
+                <strong>${confidence > 0 ? `${Math.round(confidence * 100)}%` : '待确认'}</strong>
+            </div>
+        </div>
+        <p class="kd-summary-reason">${escapeHtml(analysis.reason || 'AI 判断未完成，请根据候选人工确认。')}</p>
+        <div class="kd-summary-grid">
+            ${kdPointList('已覆盖项', analysis.covered_points, 'is-covered')}
+            ${kdPointList('缺失项', analysis.missing_points, 'is-missing')}
+            ${kdPointList('冲突项', analysis.conflicts, 'is-conflict')}
+        </div>`;
+}
+
+function kdCandidateRelationshipClass(relationship) {
+    if (relationship === 'fully_covered' || relationship === 'collectively_covered') return 'is-covered';
+    if (relationship === 'conflicting') return 'is-conflict';
+    if (relationship === 'partially_covered') return 'is-partial';
+    return 'is-neutral';
+}
+
+function kdRenderCandidates(data) {
+    const list = document.getElementById('kdCandidateList');
+    const meta = document.getElementById('kdCandidateMeta');
+    if (!list || !meta) return;
+    const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+    const availableIds = new Set(candidates.map(candidate => candidate.question_wiki_id));
+    kdState.selectedIds = new Set(Array.from(kdState.selectedIds).filter(id => availableIds.has(id)));
+    meta.textContent = data?.status === 'running'
+        ? `已召回 ${candidates.length} 条，结果仍在更新`
+        : `共 ${candidates.length} 条候选`;
+    if (!candidates.length) {
+        if (data?.status === 'running') {
+            list.innerHTML = '<div class="kd-skeleton"></div><div class="kd-skeleton"></div><div class="kd-skeleton"></div>';
+        } else {
+            list.innerHTML = '<div class="kd-candidate-empty"><strong>未发现高相关候选</strong><span>请扩大检索范围或人工确认后再决定是否新增。</span></div>';
+        }
+        kdUpdateCompareButton();
+        return;
+    }
+    list.innerHTML = candidates.map((candidate, index) => {
+        const id = String(candidate.question_wiki_id || '');
+        const checked = kdState.selectedIds.has(id) ? 'checked' : '';
+        const relationship = KD_RELATIONSHIP_LABELS[candidate.relationship] || '待判断';
+        const score = Math.max(Number(candidate.question_similarity || 0), Number(candidate.answer_similarity || 0));
+        const answer = String(candidate.answer || '');
+        const excerpt = answer.length > 180 ? `${answer.slice(0, 180)}…` : answer;
+        const models = (candidate.product_names || []).join('、') || '未指定型号';
+        const channels = (candidate.channels || []).map(channel => KD_CHANNEL_LABELS[channel] || channel).join('、');
+        const keywordHits = (candidate.keyword_hits || []).slice(0, 6);
+        return `<article class="kd-candidate ${checked ? 'is-selected' : ''}">
+            <div class="kd-candidate-top">
+                <label class="kd-candidate-check" title="选择候选">
+                    <input type="checkbox" onchange="kdToggleCandidate('${_escapeAttr(id)}', this.checked)" ${checked}>
+                </label>
+                <div class="kd-candidate-title">
+                    <button type="button" class="kd-id-link" onclick="kdOpenDetail(${index})">${escapeHtml(id)}</button>
+                    <strong>${escapeHtml(candidate.question || '未命名知识')}</strong>
+                </div>
+                <span class="kd-relationship ${kdCandidateRelationshipClass(candidate.relationship)}">${escapeHtml(relationship)}</span>
+            </div>
+            <div class="kd-candidate-meta">
+                <span>${escapeHtml(candidate.product_category_name || '未指定品类')}</span>
+                <span>${escapeHtml(channels || '本地召回')}</span>
+                <span>相关度 ${Math.round(score * 100)}%</span>
+            </div>
+            <p class="kd-candidate-answer">${escapeHtml(excerpt || '暂无答案')}</p>
+            <div class="kd-candidate-models">
+                <span class="kd-candidate-models-label">适用型号</span>
+                <span class="kd-candidate-models-value">${escapeHtml(models)}</span>
+            </div>
+            <div class="kd-candidate-evidence">
+                <span>${keywordHits.length ? `命中：${escapeHtml(keywordHits.join('、'))}` : '无明确关键词命中'}</span>
+                <span>${escapeHtml(candidate.reason || '等待覆盖判断')}</span>
+            </div>
+            <button type="button" class="btn-ghost kd-detail-btn" onclick="kdOpenDetail(${index})"><i class="fas fa-eye"></i><span>查看详情</span></button>
+        </article>`;
+    }).join('');
+    kdUpdateCompareButton();
+}
+
+function kdToggleCandidate(id, checked) {
+    if (checked) kdState.selectedIds.add(id);
+    else kdState.selectedIds.delete(id);
+    kdRenderCandidates(kdState.data || {});
+}
+
+function kdUpdateCompareButton() {
+    const button = document.getElementById('kdCompareBtn');
+    if (!button) return;
+    const count = kdState.selectedIds.size;
+    button.disabled = count < 2;
+    button.querySelector('span').textContent = count ? `进入知识对比（${count}）` : '进入知识对比';
+}
+
+function kdOpenDetail(index) {
+    const candidate = kdState.data?.candidates?.[index];
+    const dialog = document.getElementById('kdCandidateDialog');
+    if (!candidate || !dialog) return;
+    const id = document.getElementById('kdDialogId');
+    const title = document.getElementById('kdDialogTitle');
+    const body = document.getElementById('kdDialogBody');
+    if (id) id.textContent = candidate.question_wiki_id || '';
+    if (title) title.textContent = candidate.question || '候选详情';
+    if (body) {
+        body.innerHTML = `
+            <div class="kd-dialog-meta">
+                <span>${escapeHtml(candidate.product_category_name || '未指定品类')}</span>
+                <span>${escapeHtml((candidate.product_names || []).join('、') || '未指定型号')}</span>
+                <span>${escapeHtml((candidate.channels || []).map(channel => KD_CHANNEL_LABELS[channel] || channel).join('、'))}</span>
+            </div>
+            <section><h4>现有答案</h4><div class="kd-dialog-copy">${escapeHtml(candidate.answer || '暂无答案')}</div></section>
+            <div class="kd-dialog-analysis">
+                ${kdPointList('已覆盖项', candidate.covered_points, 'is-covered')}
+                ${kdPointList('缺失项', candidate.missing_points, 'is-missing')}
+                ${kdPointList('冲突项', candidate.conflicts, 'is-conflict')}
+            </div>
+            <section><h4>判断依据</h4><div class="kd-dialog-copy">${escapeHtml(candidate.reason || '等待判断')}</div></section>`;
+    }
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+    if (body) body.scrollTop = 0;
+}
+
+function kdRender() {
+    const data = kdState.data;
+    const empty = document.getElementById('kdEmptyState');
+    const workspace = document.getElementById('kdTaskWorkspace');
+    if (!data) {
+        empty?.classList.remove('d-none');
+        workspace?.classList.add('d-none');
+        return;
+    }
+    empty?.classList.add('d-none');
+    workspace?.classList.remove('d-none');
+    const title = document.getElementById('kdProgressTitle');
+    const message = document.getElementById('kdProgressMessage');
+    const badge = document.getElementById('kdTaskStatusBadge');
+    const stageLabels = {
+        preparing_index: '准备检索索引',
+        recalling: '执行候选召回',
+        ai_analyzing: '分析覆盖关系',
+        completed: '等待人工确认',
+        cancelled: '任务已取消'
+    };
+    if (title) title.textContent = stageLabels[data.stage] || '查重任务';
+    if (message) message.textContent = data.message || '';
+    if (badge) {
+        const statusLabels = {
+            running: '处理中',
+            done: '已完成',
+            partial_failed: '部分失败',
+            failed: '失败',
+            cancelled: '已取消'
+        };
+        badge.textContent = statusLabels[data.status] || data.status || '未知';
+        badge.className = `kd-status-badge is-${String(data.status || 'unknown').replace(/_/g, '-')}`;
+    }
+    const currentStage = kdStageIndex(data.stage);
+    document.querySelectorAll('#kdStageTrack .kd-stage').forEach((element, index) => {
+        element.classList.toggle('is-complete', index < currentStage || data.stage === 'completed');
+        element.classList.toggle('is-active', index === currentStage && data.stage !== 'completed');
+    });
+    const progress = document.getElementById('kdProgressBar');
+    if (progress) progress.style.width = `${kdProgressPercent(data)}%`;
+    const channelStatus = document.getElementById('kdChannelStatus');
+    if (channelStatus) channelStatus.innerHTML = kdRenderChannels(data);
+
+    const isRunning = data.status === 'running';
+    const failedStages = data.failed_stages || [];
+    const setDisabled = (id, disabled) => {
+        const element = document.getElementById(id);
+        if (element) element.disabled = disabled;
+    };
+    setDisabled('kdExpandBtn', isRunning || !!data.expanded);
+    setDisabled('kdRetryBtn', isRunning || !failedStages.length);
+    setDisabled('kdExportBtn', isRunning || !data.task_id);
+    setDisabled('kdCancelBtn', !isRunning);
+    kdRenderSummary(data);
+    kdRenderCandidates(data);
+
+    const review = document.getElementById('kdHumanReview');
+    review?.classList.toggle('d-none', isRunning);
+    const decision = document.getElementById('kdDecision');
+    const note = document.getElementById('kdDecisionNote');
+    const reviewStatus = document.getElementById('kdReviewStatus');
+    if (decision && data.human_decision) decision.value = data.human_decision;
+    if (note && data.human_note && document.activeElement !== note) note.value = data.human_note;
+    if (reviewStatus) reviewStatus.textContent = data.human_decision ? '结论已保存' : '尚未保存';
+}
+
+async function kdRetryFailed() {
+    if (!kdState.taskId || kdState.data?.status === 'running') return;
+    const failed = kdState.data?.failed_stages || [];
+    const stage = failed.length === 1 && failed[0] === 'ai' ? 'ai' : 'all';
+    try {
+        await api('/kb/duplicate-check/retry', 'POST', { task_id: kdState.taskId, stage });
+        kdState.data.status = 'running';
+        kdState.data.stage = stage === 'ai' ? 'ai_analyzing' : 'preparing_index';
+        kdState.data.message = '正在重试失败步骤';
+        kdRender();
+        kdSchedulePoll(100);
+    } catch (error) {
+        kdSetFormError(error?.message || String(error));
+    }
+}
+
+async function kdExpandSearch() {
+    if (!kdState.taskId || kdState.data?.status === 'running') return;
+    try {
+        await api('/kb/duplicate-check/expand', 'POST', { task_id: kdState.taskId });
+        kdState.data.status = 'running';
+        kdState.data.stage = 'preparing_index';
+        kdState.data.expanded = true;
+        kdState.data.message = '正在扩大检索范围';
+        kdRender();
+        kdSchedulePoll(100);
+    } catch (error) {
+        kdSetFormError(error?.message || String(error));
+    }
+}
+
+async function kdCancelTask() {
+    if (!kdState.taskId || kdState.data?.status !== 'running') return;
+    try {
+        await api('/kb/duplicate-check/cancel', 'POST', { task_id: kdState.taskId });
+        kdState.data.message = '正在取消任务';
+        kdRender();
+        kdSchedulePoll(300);
+    } catch (error) {
+        kdSetFormError(error?.message || String(error));
+    }
+}
+
+function kdExportReport() {
+    if (!kdState.taskId || kdState.data?.status === 'running') return;
+    const link = document.createElement('a');
+    link.href = `${API_BASE}/kb/duplicate-check/export?task_id=${encodeURIComponent(kdState.taskId)}`;
+    link.download = canonicalDownloadName('duplicate_check_report', 'xlsx', 's02');
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+}
+
+async function kdSaveDecision() {
+    if (!kdState.taskId) return;
+    const decision = String(document.getElementById('kdDecision')?.value || 'manual_review');
+    const note = String(document.getElementById('kdDecisionNote')?.value || '').trim();
+    try {
+        const response = await api('/kb/duplicate-check/decision', 'POST', {
+            task_id: kdState.taskId,
+            decision,
+            note,
+            source_ids: Array.from(kdState.selectedIds)
+        });
+        if (!response?.success) throw new Error(response?.message || '保存失败');
+        kdState.data.human_decision = decision;
+        kdState.data.human_note = note;
+        kdState.data.selected_source_ids = Array.from(kdState.selectedIds);
+        kdRender();
+        if (typeof showToast === 'function') showToast('人工结论已保存', 'success');
+    } catch (error) {
+        kdSetFormError(error?.message || String(error));
+    }
+}
+
+function kdOpenCompare() {
+    const ids = Array.from(kdState.selectedIds);
+    if (ids.length < 2) {
+        if (typeof showToast === 'function') showToast('请至少勾选 2 条候选进入知识对比', 'warning');
+        return;
+    }
+    setKBCompareTable(kdState.data?.library || 'knowledge_base_v1');
+    const input = document.getElementById('kbCompareIdInput');
+    if (input) input.value = ids.join('\n');
+    kbCompareState.source = 'duplicate_check';
+    switchTab('kbCompareView');
+    setTimeout(() => runKBCompareImport(), 0);
+}
+
+async function kdClearWorkspace() {
+    const input = kdCollectInput();
+    const hasContent = input.question || input.answer || input.source_note || kdState.taskId;
+    if (hasContent && !confirm('确认清空当前查重输入和页面结果？')) return;
+    if (kdState.taskId && kdState.data?.status === 'running') {
+        try {
+            await api('/kb/duplicate-check/cancel', 'POST', { task_id: kdState.taskId });
+        } catch (_) {}
+    }
+    if (kdState.pollTimer) clearTimeout(kdState.pollTimer);
+    if (kdState.draftTimer) clearTimeout(kdState.draftTimer);
+    kdState.taskId = '';
+    kdState.data = null;
+    kdState.selectedIds.clear();
+    ['kdQuestion', 'kdAnswer', 'kdSourceNote'].forEach(id => {
+        const element = document.getElementById(id);
+        if (element) element.value = '';
+    });
+    const category = document.getElementById('kdCategory');
+    if (category) category.value = '';
+    kdRenderModelOptions([], { silent: true });
+    document.querySelector('input[name="kdLibrary"][value="knowledge_base_v1"]')?.click();
+    try {
+        localStorage.removeItem(kdStorageKey(KD_DRAFT_STORAGE_PREFIX));
+        localStorage.removeItem(kdStorageKey(KD_TASK_STORAGE_PREFIX));
+    } catch (_) {}
+    const status = document.getElementById('kdDraftStatus');
+    if (status) status.textContent = '草稿未保存';
+    kdSetFormError('');
+    kdRender();
+}
+
+window.kdInit = kdInit;
+window.kdSaveDraft = kdSaveDraft;
+window.kdRenderModelOptions = kdRenderModelOptions;
+window.kdStartIndex = kdStartIndex;
+window.kdCancelIndex = kdCancelIndex;
+window.kdStartCheck = kdStartCheck;
+window.kdRetryFailed = kdRetryFailed;
+window.kdExpandSearch = kdExpandSearch;
+window.kdCancelTask = kdCancelTask;
+window.kdExportReport = kdExportReport;
+window.kdSaveDecision = kdSaveDecision;
+window.kdOpenCompare = kdOpenCompare;
+window.kdClearWorkspace = kdClearWorkspace;
+window.kdToggleCandidate = kdToggleCandidate;
+window.kdOpenDetail = kdOpenDetail;
+
 const KB_COMPARE_FIELDS = [
     { key: 'question', label: '问题', field: 'question', type: 'text', group: '内容' },
     { key: 'answer', label: '答案', field: 'answer', type: 'text', group: '内容' },
@@ -9276,6 +10319,8 @@ const KB_COMPARE_DEFAULT_MERGE_FIELDS = new Set([
     'file_urls',
     'link_url'
 ]);
+
+const KB_COMPARE_AI_FIELD_KEYS = new Set(['question', 'answer', 'similar_questions']);
 
 function getSelectedKBTable() {
     const checked = document.querySelector('input[name="kbTable"]:checked');
@@ -9593,7 +10638,65 @@ function buildKBCompareMergeDraft() {
         createdAt: Date.now(),
         fields,
         digest,
-        unsupportedFields
+        unsupportedFields,
+        aiGenerated: false,
+        aiRecommendation: null
+    };
+}
+
+function buildKBCompareAIRecords() {
+    return (kbCompareState.rows || []).map(row => ({
+        question_wiki_id: getKBCompareRowId(row),
+        question: row.question || '',
+        answer: row.answer || '',
+        similar_questions: row.similar_questions || '',
+        product_name: row.product_name || '',
+        product_category_name: row.product_category_name || '',
+        question_type: row.question_type || '',
+        answer_type: row.answer_type || '',
+        link_type: row.link_type || '',
+        link_url: row.link_url || ''
+    }));
+}
+
+function getKBCompareAIFieldValue(key, result) {
+    if (!result) return '';
+    if (key === 'similar_questions') {
+        const items = Array.isArray(result.similar_questions)
+            ? result.similar_questions
+            : parseSmartListValue(result.similar_questions || '', { splitOnAsciiComma: true });
+        return items.map(item => String(item || '').trim()).filter(Boolean).join('\n');
+    }
+    return String(result[key] || '').trim();
+}
+
+function applyKBCompareAIResultToDraft(draft, result) {
+    if (!draft || !result?.recommend_merge) return draft;
+    const fields = (draft.fields || []).map(field => {
+        if (!KB_COMPARE_AI_FIELD_KEYS.has(field.key)) return field;
+        const value = getKBCompareAIFieldValue(field.key, result);
+        return {
+            ...field,
+            mode: 'ai',
+            sourceId: '',
+            sourceLabel: 'AI 综合当前记录',
+            value,
+            displayValue: value,
+            changed: normalizeKBCompareDraftValue(value, KB_COMPARE_FIELDS.find(item => item.key === field.key))
+                !== normalizeKBCompareDraftValue(field.baseValue, KB_COMPARE_FIELDS.find(item => item.key === field.key)),
+            manuallyChosen: false
+        };
+    });
+    const digest = { ...(draft.digest || {}) };
+    fields.forEach(field => {
+        if (KB_COMPARE_AI_FIELD_KEYS.has(field.key) && field.formField) digest[field.formField] = field.value;
+    });
+    return {
+        ...draft,
+        fields,
+        digest,
+        aiGenerated: true,
+        aiRecommendation: result
     };
 }
 
@@ -9668,9 +10771,11 @@ function renderKBCompareFrame() {
         runBtn.textContent = kbCompareState.loading ? '对比中...' : '开始对比';
     }
     if (draftBtn) {
-        draftBtn.disabled = rows.length < 2 || kbCompareState.loading;
-        draftBtn.textContent = kbCompareState.mergeDraft ? '重新生成合并草稿' : '生成合并草稿';
-        draftBtn.title = rows.length < 2 ? '请至少匹配 2 条记录后生成合并草稿' : '按当前主记录和字段采用值生成合并草稿';
+        draftBtn.disabled = rows.length < 2 || kbCompareState.loading || kbCompareState.aiMerge?.status === 'loading';
+        draftBtn.textContent = kbCompareState.aiMerge?.status === 'loading'
+            ? 'AI 分析中...'
+            : (kbCompareState.mergeDraft ? '重新生成 AI 草稿' : 'AI 生成合并草稿');
+        draftBtn.title = rows.length < 2 ? '请至少匹配 2 条记录后生成 AI 合并草稿' : '先由 AI 判断是否建议合并，再生成三个内容字段的草稿';
     }
 }
 
@@ -9798,13 +10903,15 @@ function renderKBCompareTextValue(row, field, baseText) {
 
 function renderKBCompareDraftActionButton() {
     const rows = kbCompareState.rows || [];
-    const disabled = rows.length < 2 || kbCompareState.loading;
+    const disabled = rows.length < 2 || kbCompareState.loading || kbCompareState.aiMerge?.status === 'loading';
     const label = kbCompareState.loading
         ? '对比中...'
-        : (kbCompareState.mergeDraft ? '重新生成合并草稿' : '生成合并草稿');
+        : (kbCompareState.aiMerge?.status === 'loading'
+            ? 'AI 分析中...'
+            : (kbCompareState.mergeDraft ? '重新生成 AI 草稿' : 'AI 生成合并草稿'));
     const title = rows.length < 2
-        ? '请至少匹配 2 条记录后生成合并草稿'
-        : '按当前主记录和字段采用值生成合并草稿';
+        ? '请至少匹配 2 条记录后生成 AI 合并草稿'
+        : '先由 AI 判断是否建议合并，再生成三个内容字段的草稿';
     return `<button type="button" id="kbCompareGenerateDraftBtn" class="primary-btn btn-primary-gradient kb-compare-generate-draft-btn" onclick="generateKBCompareMergeDraft()" ${disabled ? 'disabled' : ''} title="${_escapeAttr(title)}">${escapeHtml(label)}</button>`;
 }
 
@@ -9912,6 +11019,117 @@ function renderKBCompareDraftValue(value, limit = 220) {
     if (!text) return '<span class="kb-compare-muted">-</span>';
     const short = text.length > limit ? `${text.slice(0, limit)}...` : text;
     return `<div class="kb-compare-draft-value" title="${_escapeAttr(text)}">${escapeHtml(short)}</div>`;
+}
+
+function toggleKBCompareAIExpanded() {
+    if (!kbCompareState.aiMerge) return;
+    kbCompareState.aiMerge.expanded = !kbCompareState.aiMerge.expanded;
+    renderKBCompareAIRecommendation();
+}
+
+function renderKBCompareAIRecommendation() {
+    const el = document.getElementById('kbCompareAIRecommendation');
+    if (!el) return;
+    const ai = kbCompareState.aiMerge || createKBCompareAIState();
+    const result = ai.result || {};
+    const data = result.data || result;
+    const hasRows = (kbCompareState.rows || []).length >= 2;
+    const visible = hasRows && ai.status !== 'idle';
+    el.classList.toggle('d-none', !visible);
+    if (!visible) {
+        el.innerHTML = '';
+        return;
+    }
+
+    if (ai.status === 'loading') {
+        el.innerHTML = `
+            <div class="kb-compare-ai-head">
+                <div>
+                    <span class="kb-compare-ai-kicker"><i class="fas fa-robot" aria-hidden="true"></i> AI 合并建议</span>
+                    <h3>正在判断是否建议合并</h3>
+                    <p>正在比较问题意图、答案事实和适用边界，完成后仍需人工确认。</p>
+                </div>
+                <span class="kb-compare-ai-badge is-loading">分析中</span>
+            </div>
+            <div class="kb-compare-ai-skeleton" aria-label="AI 正在分析">
+                <span></span><span></span><span></span>
+            </div>
+        `;
+        return;
+    }
+
+    if (ai.status === 'error') {
+        el.innerHTML = `
+            <div class="kb-compare-ai-head">
+                <div>
+                    <span class="kb-compare-ai-kicker"><i class="fas fa-robot" aria-hidden="true"></i> AI 合并建议</span>
+                    <h3>AI 判断未完成</h3>
+                    <p class="kb-compare-ai-error">${escapeHtml(ai.error || '暂时无法完成 AI 判断。')}</p>
+                </div>
+                <span class="kb-compare-ai-badge is-error">需要重试</span>
+            </div>
+            <div class="kb-compare-ai-actions">
+                <button type="button" class="primary-btn btn-sm" onclick="generateKBCompareMergeDraft()"><i class="fas fa-rotate-right" aria-hidden="true"></i> 重试 AI 判断</button>
+                <button type="button" class="action-btn btn-sm" onclick="useKBCompareRuleMergeDraft()">按现有规则生成草稿</button>
+            </div>
+        `;
+        return;
+    }
+
+    const recommended = !!data.recommend_merge;
+    const confidence = Math.round(Number(data.confidence || 0) * 100);
+    const conflicts = Array.isArray(data.conflicts) ? data.conflicts.filter(Boolean) : [];
+    const generatedContent = recommended && ai.expanded
+        ? `
+            <div class="kb-compare-ai-content">
+                <div class="kb-compare-ai-field">
+                    <span>问题</span>
+                    <strong>${escapeHtml(data.question || '-')}</strong>
+                </div>
+                <div class="kb-compare-ai-field">
+                    <span>答案</span>
+                    <div>${escapeHtml(data.answer || '-')}</div>
+                </div>
+                <div class="kb-compare-ai-field">
+                    <span>相似问题</span>
+                    <div class="kb-compare-ai-list">${(Array.isArray(data.similar_questions) ? data.similar_questions : []).map(item => `<span>${escapeHtml(item)}</span>`).join('') || '<em>无</em>'}</div>
+                </div>
+            </div>
+        `
+        : '';
+    const conflictHtml = conflicts.length
+        ? `<div class="kb-compare-ai-conflicts"><span>需要留意</span><ul>${conflicts.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>`
+        : '';
+    const actionHtml = recommended
+        ? `
+            <button type="button" class="action-btn btn-sm" onclick="toggleKBCompareAIExpanded()">${ai.expanded ? '收起生成内容' : '查看生成内容'}</button>
+            <button type="button" class="primary-btn btn-sm" onclick="generateKBCompareMergeDraft()"><i class="fas fa-rotate-right" aria-hidden="true"></i> 重新生成</button>
+        `
+        : `
+            <button type="button" class="action-btn btn-sm" onclick="generateKBCompareMergeDraft()"><i class="fas fa-rotate-right" aria-hidden="true"></i> 重新分析</button>
+            <button type="button" class="primary-btn btn-sm" onclick="useKBCompareRuleMergeDraft()">仍按现有规则生成草稿</button>
+        `;
+    const footerNote = ai.ignored
+        ? '当前草稿已忽略 AI 结论，按现有字段规则生成。'
+        : (recommended
+            ? '问题、答案、相似问题将写入合并草稿，其余字段沿用当前记录策略。'
+            : '未生成可提交的 AI 草稿，删除建议也不会自动启用。');
+    el.innerHTML = `
+        <div class="kb-compare-ai-head">
+            <div>
+                <span class="kb-compare-ai-kicker"><i class="fas fa-robot" aria-hidden="true"></i> AI 合并建议</span>
+                <h3>${recommended ? '建议合并' : '不建议合并'}</h3>
+                <p>${escapeHtml(data.reason || '暂无判断原因。')}</p>
+            </div>
+            <span class="kb-compare-ai-badge ${recommended ? 'is-recommended' : 'is-not-recommended'}">${recommended ? '建议合并' : '不建议合并'} · ${confidence}%</span>
+        </div>
+        ${conflictHtml}
+        ${generatedContent}
+        <div class="kb-compare-ai-footer">
+            <span>${footerNote}</span>
+            <div class="kb-compare-ai-actions">${actionHtml}</div>
+        </div>
+    `;
 }
 
 function ensureKBCompareDraftSelection(draft) {
@@ -10046,7 +11264,7 @@ function renderKBCompareMergeDraft() {
         <div class="kb-compare-draft-head">
             <div>
                 <h3>合并草稿</h3>
-                <p>编辑 ${escapeHtml(draft.editId)}，建议删除 ${draft.deleteIds.length} 条，字段变更 ${changedFields.length} 项；已选择提交 ${selectedChangedFields.length} 项字段变更、${selectedDeleteCount} 条删除建议。</p>
+                <p>编辑 ${escapeHtml(draft.editId)}，建议删除 ${draft.deleteIds.length} 条，字段变更 ${changedFields.length} 项；已选择提交 ${selectedChangedFields.length} 项字段变更、${selectedDeleteCount} 条删除建议。${draft.aiGenerated ? '问题、答案、相似问题由 AI 生成，其余字段沿用当前记录策略。' : ''}</p>
             </div>
             <div class="kb-compare-draft-action-stack">
                 <button type="button" class="primary-btn btn-primary-gradient" onclick="openKBCompareDraftEditor()">打开编辑主记录</button>
@@ -10119,7 +11337,7 @@ function renderKBCompareMergeDraft() {
                                     <span>${escapeHtml(field.group || '字段')}</span>
                                 </div>
                             </td>
-                            <td><span class="kb-compare-strategy-chip is-${escapeHtml(field.mode)}">${field.manuallyChosen ? '手动采用' : field.mode === 'merge' ? '合并取并集' : field.mode === 'fallback' ? '主记录补空' : '沿用主记录'}</span></td>
+                            <td><span class="kb-compare-strategy-chip is-${escapeHtml(field.mode)}">${field.manuallyChosen ? '手动采用' : field.mode === 'ai' ? 'AI 综合生成' : field.mode === 'merge' ? '合并取并集' : field.mode === 'fallback' ? '主记录补空' : '沿用主记录'}</span></td>
                             <td>${escapeHtml(field.sourceLabel || '-')}</td>
                             <td>${field.changed ? '<span class="kb-compare-badge is-diff">将更新</span>' : '<span class="kb-compare-badge">不变</span>'}</td>
                             <td>${renderKBCompareDraftValue(field.displayValue || field.value)}</td>
@@ -10139,6 +11357,7 @@ function renderKBCompareResults() {
     renderKBCompareValidation();
     renderKBCompareSummary();
     renderKBCompareDetail();
+    renderKBCompareAIRecommendation();
     renderKBCompareMergeDraft();
 }
 
@@ -10191,6 +11410,7 @@ async function runKBCompareImport() {
         baseRowId: '',
         fieldChoices: {},
         mergeDraft: null,
+        aiMerge: createKBCompareAIState(),
         loading: true
     };
     renderKBCompareResults();
@@ -10211,6 +11431,7 @@ async function runKBCompareImport() {
             baseRowId: baseRow ? getKBCompareRowId(baseRow) : '',
             fieldChoices: {},
             mergeDraft: null,
+            aiMerge: createKBCompareAIState(),
             submitResult: null,
             loading: false
         };
@@ -10234,6 +11455,7 @@ function setKBCompareBaseRow(rowId) {
     if (!exists) return;
     kbCompareState.baseRowId = id;
     kbCompareState.mergeDraft = null;
+    kbCompareState.aiMerge = createKBCompareAIState();
     kbCompareState.submitResult = null;
     renderKBCompareResults();
 }
@@ -10246,6 +11468,7 @@ function setKBCompareFieldChoice(fieldKey, rowId) {
     if (!field || !exists || !isKBCompareEditableField(field)) return;
     kbCompareState.fieldChoices = { ...(kbCompareState.fieldChoices || {}), [key]: id };
     kbCompareState.mergeDraft = null;
+    kbCompareState.aiMerge = createKBCompareAIState();
     kbCompareState.submitResult = null;
     renderKBCompareResults();
 }
@@ -10255,19 +11478,81 @@ function toggleKBCompareImportCollapsed(force) {
     renderKBCompareResults();
 }
 
-function generateKBCompareMergeDraft() {
+async function generateKBCompareMergeDraft() {
+    const baselineDraft = buildKBCompareMergeDraft();
+    if (!baselineDraft) {
+        if (typeof showToast === 'function') showToast('请至少匹配 2 条记录后生成 AI 合并草稿', 'warning');
+        return;
+    }
+
+    const previousDraft = kbCompareState.mergeDraft;
+    kbCompareState.aiMerge = {
+        ...createKBCompareAIState(),
+        status: 'loading'
+    };
+    kbCompareState.submitResult = null;
+    renderKBCompareResults();
+
+    try {
+        const res = await api('/kb/compare/ai_merge', 'POST', {
+            base_id: baselineDraft.editId,
+            records: buildKBCompareAIRecords()
+        });
+        if (!res || !res.success || !res.data) {
+            throw new Error(res?.message || 'AI 未返回合并判断');
+        }
+
+        const result = res.data;
+        if (result.recommend_merge) {
+            const draft = applyKBCompareAIResultToDraft(baselineDraft, result);
+            kbCompareState.mergeDraft = draft;
+            resetKBCompareDraftSelection(draft);
+        } else {
+            kbCompareState.mergeDraft = null;
+            kbCompareState.selectedDraftFields = null;
+            kbCompareState.selectedDraftDeletes = null;
+        }
+        kbCompareState.aiMerge = {
+            ...createKBCompareAIState(),
+            status: 'success',
+            result
+        };
+        if (typeof showToast === 'function') {
+            showToast(result.recommend_merge ? 'AI 建议合并，已生成内容草稿' : 'AI 暂不建议合并，请先复核原因', result.recommend_merge ? 'success' : 'warning');
+        }
+    } catch (e) {
+        kbCompareState.mergeDraft = previousDraft || null;
+        kbCompareState.aiMerge = {
+            ...createKBCompareAIState(),
+            status: 'error',
+            error: e?.message || String(e)
+        };
+        if (typeof showToast === 'function') showToast(`AI 合并判断失败：${e?.message || String(e)}`, 'error');
+    }
+
+    renderKBCompareResults();
+    const target = kbCompareState.aiMerge.status === 'error' || !kbCompareState.mergeDraft
+        ? document.getElementById('kbCompareAIRecommendation')
+        : document.getElementById('kbCompareMergeDraft');
+    try { target?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch {}
+}
+
+function useKBCompareRuleMergeDraft() {
     const draft = buildKBCompareMergeDraft();
     if (!draft) {
-        if (typeof showToast === 'function') showToast('请至少匹配 2 条记录后生成合并草稿', 'warning');
+        if (typeof showToast === 'function') showToast('请至少匹配 2 条记录后生成规则草稿', 'warning');
         return;
     }
     kbCompareState.mergeDraft = draft;
     resetKBCompareDraftSelection(draft);
+    kbCompareState.aiMerge = {
+        ...(kbCompareState.aiMerge || createKBCompareAIState()),
+        ignored: true
+    };
     kbCompareState.submitResult = null;
     renderKBCompareResults();
-    const el = document.getElementById('kbCompareMergeDraft');
-    try { el?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch {}
-    if (typeof showToast === 'function') showToast('已生成合并草稿', 'success');
+    try { document.getElementById('kbCompareMergeDraft')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch {}
+    if (typeof showToast === 'function') showToast('已按现有字段规则生成草稿，请人工复核', 'info');
 }
 
 function applyKBCompareDraftDigestToEditor(digest) {
@@ -10465,6 +11750,7 @@ function clearKBCompareWorkspace() {
         importCollapsed: false,
         source: 'manual',
         loading: false,
+        aiMerge: createKBCompareAIState(),
         submittingDraft: false,
         submitResult: null
     };
@@ -10508,6 +11794,7 @@ async function handleKBCompareFileImport(file) {
             baseRowId: '',
             fieldChoices: {},
             mergeDraft: null,
+            aiMerge: createKBCompareAIState(),
             importCollapsed: false,
             loading: false
         };
@@ -10559,6 +11846,8 @@ window.setKBCompareBaseRow = setKBCompareBaseRow;
 window.setKBCompareFieldChoice = setKBCompareFieldChoice;
 window.toggleKBCompareImportCollapsed = toggleKBCompareImportCollapsed;
 window.generateKBCompareMergeDraft = generateKBCompareMergeDraft;
+window.toggleKBCompareAIExpanded = toggleKBCompareAIExpanded;
+window.useKBCompareRuleMergeDraft = useKBCompareRuleMergeDraft;
 window.openKBCompareDraftEditor = openKBCompareDraftEditor;
 window.toggleKBCompareDraftField = toggleKBCompareDraftField;
 window.toggleKBCompareDraftDelete = toggleKBCompareDraftDelete;

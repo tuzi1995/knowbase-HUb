@@ -1,0 +1,257 @@
+- generic [active] [ref=f1e1]:
+  - main [ref=f1e2]:
+    - generic [ref=f1e3]:
+      - generic [ref=f1e4]:
+        - generic [ref=f1e5]:
+          - generic [ref=f1e6]: K-matrix
+          - generic [ref=f1e7]:
+            - heading "知识对比" [level=2] [ref=f1e2178]
+            - paragraph [ref=f1e9]: 按 ID 批量导入记录，完成匹配校验、差异摘要与字段详细对比。
+        - generic [ref=f1e10]:
+          - button " 使用说明" [ref=f1e11] [cursor=pointer]:
+            - generic [ref=f1e12]: 
+            - text: 使用说明
+          - button "退出" [ref=f1e13] [cursor=pointer]
+      - generic [ref=f1e14]:
+        - complementary [ref=f1e15]:
+          - generic [ref=f1e16]:
+            - generic [ref=f1e17]:
+              - generic [ref=f1e18]:
+                - generic [ref=f1e19]: 模块导航
+                - generic [ref=f1e20]: 按任务分组，保留原有功能入口
+              - button "收起模块导航" [expanded] [ref=f1e21] [cursor=pointer]:
+                - generic [ref=f1e22]: 
+            - generic [ref=f1e23]:
+              - generic [ref=f1e24]:
+                - generic [ref=f1e25]: 核心数据
+                - button "知识库管理" [ref=f1e26] [cursor=pointer]
+                - button "知识对比" [ref=f1e27] [cursor=pointer]
+                - button "机型矩阵管理" [ref=f1e28] [cursor=pointer]
+                - button "多媒体预览" [ref=f1e29] [cursor=pointer]
+              - generic [ref=f1e30]:
+                - generic [ref=f1e31]: 质量管控
+                - button "知识库评分" [ref=f1e32] [cursor=pointer]
+                - button "知识库治理" [ref=f1e33] [cursor=pointer]
+                - button "管控中心" [ref=f1e34] [cursor=pointer]
+              - generic [ref=f1e35]:
+                - generic [ref=f1e36]: 工具与映射
+                - button "数据设置" [ref=f1e37] [cursor=pointer]
+                - button "智能映射" [ref=f1e38] [cursor=pointer]
+              - generic [ref=f1e39]:
+                - generic [ref=f1e40]: 日志与归档
+                - button "修改记录" [ref=f1e41] [cursor=pointer]
+                - button "归档管理" [ref=f1e42] [cursor=pointer]
+        - button "收起模块导航" [expanded]:
+          - generic: 
+        - generic [ref=f1e44]:
+          - generic [ref=f1e45]: 核心数据 / 知识对比
+          - generic [ref=f1e47]:
+            - text:                                                                                                                             
+            - generic [ref=f1e2180]:
+              - generic [ref=f1e2181]:
+                - generic [ref=f1e2182]:
+                  - generic [ref=f1e2183]: 知识对比
+                  - generic [ref=f1e2184]: 按 ID 批量导入知识库记录，完成匹配校验、字段差异与合并草稿。
+                - generic [ref=f1e2185]:
+                  - button "清空" [ref=f1e2186] [cursor=pointer]
+                  - button "返回知识库" [ref=f1e2187] [cursor=pointer]
+              - generic [ref=f1e2188]:
+                - generic [ref=f1e2189]:
+                  - generic [ref=f1e2190]:
+                    - generic [ref=f1e2191]:
+                      - heading "导入 ID" [level=3] [ref=f1e2192]
+                      - paragraph [ref=f1e2193]: 已匹配 2 条，未找到 0 条，重复 0 条。
+                    - generic [ref=f1e2194]:
+                      - generic "对比数据源" [ref=f1e2195]:
+                        - generic [ref=f1e2196]:
+                          - radio "此刻库" [checked] [ref=f1e2197] [cursor=pointer]
+                          - text: 此刻库
+                        - generic [ref=f1e2198]:
+                          - radio "前刻库" [ref=f1e2199] [cursor=pointer]
+                          - text: 前刻库
+                      - button "收起" [ref=f1e2200] [cursor=pointer]
+                  - generic [ref=f1e2201]:
+                    - textbox "粘贴 Wiki ID，例如： ICWIKI202510210009 ICWIKI202409030002 ICWIKI202404232078" [ref=f1e2202]:
+                      - /placeholder: "粘贴 Wiki ID，例如：\nICWIKI202510210009\nICWIKI202409030002\nICWIKI202404232078"
+                      - text: ICWIKI202505190020 ICWIKI202511100005
+                    - generic [ref=f1e2203]:
+                      - button "开始对比" [ref=f1e2204] [cursor=pointer]
+                      - button "导入 Excel/CSV" [ref=f1e2205] [cursor=pointer]
+                    - generic [ref=f1e2206]:
+                      - generic [ref=f1e2225]:
+                        - generic [ref=f1e2226]:
+                          - generic [ref=f1e2227]: 导入 ID
+                          - strong [ref=f1e2228]: "2"
+                        - generic [ref=f1e2229]:
+                          - generic [ref=f1e2230]: 已匹配
+                          - strong [ref=f1e2231]: "2"
+                        - generic [ref=f1e2232]:
+                          - generic [ref=f1e2233]: 未找到
+                          - strong [ref=f1e2234]: "0"
+                        - generic [ref=f1e2235]:
+                          - generic [ref=f1e2236]: 重复 ID
+                          - strong [ref=f1e2237]: "0"
+                      - generic [ref=f1e2238]:
+                        - generic [ref=f1e2239]: 已匹配
+                        - generic [ref=f1e2240]:
+                          - generic [ref=f1e2241]: ICWIKI202505190020
+                          - generic [ref=f1e2242]: ICWIKI202511100005
+                      - generic [ref=f1e2243]:
+                        - generic [ref=f1e2244]: 未找到
+                        - generic [ref=f1e2245]: 无
+                      - generic [ref=f1e2247]:
+                        - generic [ref=f1e2248]: 重复输入
+                        - generic [ref=f1e2249]: 无
+                  - generic [ref=f1e2208]:
+                    - generic [ref=f1e2209]:
+                      - generic [ref=f1e2210]:
+                        - heading "差异摘要" [level=3] [ref=f1e2211]
+                        - paragraph [ref=f1e2212]: 此刻库，已匹配 2 条，发现 10 个业务差异字段，元数据差异 1 个。
+                      - generic [ref=f1e2213]:
+                        - generic [ref=f1e2214]:
+                          - checkbox "只看差异字段" [checked] [ref=f1e2215] [cursor=pointer]
+                          - text: 只看差异字段
+                        - generic [ref=f1e2216]:
+                          - checkbox "显示元数据" [ref=f1e2217] [cursor=pointer]
+                          - text: 显示元数据
+                    - table [ref=f1e2252]:
+                      - rowgroup [ref=f1e2253]:
+                        - row [ref=f1e2254]:
+                          - columnheader "字段" [ref=f1e2255]
+                          - columnheader "状态" [ref=f1e2256]
+                          - columnheader "差异值" [ref=f1e2257]
+                          - columnheader "操作" [ref=f1e2258]
+                      - rowgroup [ref=f1e2259]:
+                        - row [ref=f1e2260] [cursor=pointer]:
+                          - cell "问题 内容" [ref=f1e2261]:
+                            - generic [ref=f1e2262]:
+                              - strong [ref=f1e2263]: 问题
+                              - generic [ref=f1e2264]: 内容
+                          - cell "有差异" [ref=f1e2265]
+                          - cell "2" [ref=f1e2267]
+                          - cell [ref=f1e2269]:
+                            - button "查看" [ref=f1e2270]
+                        - row [ref=f1e2271] [cursor=pointer]:
+                          - cell "答案 内容" [ref=f1e2272]:
+                            - generic [ref=f1e2273]:
+                              - strong [ref=f1e2274]: 答案
+                              - generic [ref=f1e2275]: 内容
+                          - cell "有差异" [ref=f1e2276]
+                          - cell "2" [ref=f1e2278]
+                          - cell [ref=f1e2280]:
+                            - button "查看" [ref=f1e2281]
+                        - row [ref=f1e2282] [cursor=pointer]:
+                          - cell "相似问题 内容" [ref=f1e2283]:
+                            - generic [ref=f1e2284]:
+                              - strong [ref=f1e2285]: 相似问题
+                              - generic [ref=f1e2286]: 内容
+                          - cell "有差异" [ref=f1e2287]
+                          - cell "2" [ref=f1e2289]
+                          - cell [ref=f1e2291]:
+                            - button "查看" [ref=f1e2292]
+                        - row [ref=f1e2293] [cursor=pointer]:
+                          - cell "产品型号 适用范围" [ref=f1e2294]:
+                            - generic [ref=f1e2295]:
+                              - strong [ref=f1e2296]: 产品型号
+                              - generic [ref=f1e2297]: 适用范围
+                          - cell "有差异" [ref=f1e2298]
+                          - cell "2" [ref=f1e2300]
+                          - cell [ref=f1e2302]:
+                            - button "查看" [ref=f1e2303]
+                        - row [ref=f1e2304] [cursor=pointer]:
+                          - cell "问题类型 类型" [ref=f1e2305]:
+                            - generic [ref=f1e2306]:
+                              - strong [ref=f1e2307]: 问题类型
+                              - generic [ref=f1e2308]: 类型
+                          - cell "有差异" [ref=f1e2309]
+                          - cell "2" [ref=f1e2311]
+                          - cell [ref=f1e2313]:
+                            - button "查看" [ref=f1e2314]
+                        - row [ref=f1e2315] [cursor=pointer]:
+                          - cell "答案类型 类型" [ref=f1e2316]:
+                            - generic [ref=f1e2317]:
+                              - strong [ref=f1e2318]: 答案类型
+                              - generic [ref=f1e2319]: 类型
+                          - cell "有差异" [ref=f1e2320]
+                          - cell "2" [ref=f1e2322]
+                          - cell [ref=f1e2324]:
+                            - button "查看" [ref=f1e2325]
+                        - row [ref=f1e2326] [cursor=pointer]:
+                          - cell "BM25 治理" [ref=f1e2327]:
+                            - generic [ref=f1e2328]:
+                              - strong [ref=f1e2329]: BM25
+                              - generic [ref=f1e2330]: 治理
+                          - cell "有差异" [ref=f1e2331]
+                          - cell "2" [ref=f1e2333]
+                          - cell [ref=f1e2335]:
+                            - button "查看" [ref=f1e2336]
+                        - row [ref=f1e2337] [cursor=pointer]:
+                          - cell "关键词 治理" [ref=f1e2338]:
+                            - generic [ref=f1e2339]:
+                              - strong [ref=f1e2340]: 关键词
+                              - generic [ref=f1e2341]: 治理
+                          - cell "有差异" [ref=f1e2342]
+                          - cell "2" [ref=f1e2344]
+                          - cell [ref=f1e2346]:
+                            - button "查看" [ref=f1e2347]
+                        - row [ref=f1e2348] [cursor=pointer]:
+                          - cell "外链类型 链接" [ref=f1e2349]:
+                            - generic [ref=f1e2350]:
+                              - strong [ref=f1e2351]: 外链类型
+                              - generic [ref=f1e2352]: 链接
+                          - cell "有差异" [ref=f1e2353]
+                          - cell "2" [ref=f1e2355]
+                          - cell [ref=f1e2357]:
+                            - button "查看" [ref=f1e2358]
+                        - row [ref=f1e2359] [cursor=pointer]:
+                          - cell "外部链接 链接" [ref=f1e2360]:
+                            - generic [ref=f1e2361]:
+                              - strong [ref=f1e2362]: 外部链接
+                              - generic [ref=f1e2363]: 链接
+                          - cell "有差异" [ref=f1e2364]
+                          - cell "2" [ref=f1e2366]
+                          - cell [ref=f1e2368]:
+                            - button "查看" [ref=f1e2369]
+                - generic [ref=f1e2220]:
+                  - generic [ref=f1e2221]:
+                    - generic [ref=f1e2370]:
+                      - generic [ref=f1e2371]:
+                        - heading "问题" [level=3] [ref=f1e2372]
+                        - paragraph [ref=f1e2373]: 发现 2 种取值，涉及 1/2 条记录。当前主记录：ICWIKI202505190020
+                        - generic [ref=f1e2374]:
+                          - generic [ref=f1e2375]: 内容
+                          - generic [ref=f1e2376]: 默认沿用主记录
+                      - generic [ref=f1e2377]:
+                        - generic [ref=f1e2378]:
+                          - generic [ref=f1e2379]: 共有
+                          - generic [ref=f1e2381]: 部分共有
+                          - generic [ref=f1e2383]: 单条独有
+                        - button "AI 生成合并草稿" [ref=f1e2386] [cursor=pointer]
+                    - generic [ref=f1e2387]:
+                      - article [ref=f1e2388]:
+                        - generic [ref=f1e2389]:
+                          - generic [ref=f1e2390]:
+                            - generic [ref=f1e2391]: 记录 1
+                            - generic [ref=f1e2392]:
+                              - button "ICWIKI202505190020" [ref=f1e2393] [cursor=pointer]
+                              - generic [ref=f1e2394]: 主记录
+                            - generic "是否支持定时清洁" [ref=f1e2395]
+                          - generic [ref=f1e2396]:
+                            - generic [ref=f1e2397]: 主记录基准
+                            - button "采用此值" [ref=f1e2398] [cursor=pointer]
+                        - generic [ref=f1e2399]: 是否支持定时清洁
+                      - article [ref=f1e2401]:
+                        - generic [ref=f1e2402]:
+                          - generic [ref=f1e2403]:
+                            - generic [ref=f1e2404]: 记录 2
+                            - button "ICWIKI202511100005" [ref=f1e2406] [cursor=pointer]
+                            - generic "定时任务里如何设置先扫后拖" [ref=f1e2407]
+                          - generic [ref=f1e2408]:
+                            - generic [ref=f1e2409]: 与主记录不同
+                            - button "设为主记录" [ref=f1e2410] [cursor=pointer]
+                            - button "采用此值" [ref=f1e2411] [cursor=pointer]
+                        - generic [ref=f1e2412]: 定时任务里如何设置先扫后拖
+                  - generic [ref=f1e2223]: 确认主记录与字段采用值后，点击“生成合并草稿”。
+            - text:                +  
+          - text: +
+  - text: ▾     +                            

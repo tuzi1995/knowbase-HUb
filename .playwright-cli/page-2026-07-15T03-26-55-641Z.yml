@@ -1,0 +1,512 @@
+- generic [active] [ref=f2e1]:
+  - main [ref=f2e2]:
+    - generic [ref=f2e3]:
+      - generic [ref=f2e4]:
+        - generic [ref=f2e5]:
+          - generic [ref=f2e6]: K-matrix
+          - generic [ref=f2e7]:
+            - heading "知识对比" [level=2] [ref=f2e2227]
+            - paragraph [ref=f2e9]: 按 ID 批量导入记录，完成匹配校验、差异摘要与字段详细对比。
+        - generic [ref=f2e10]:
+          - button " 使用说明" [ref=f2e11] [cursor=pointer]:
+            - generic [ref=f2e12]: 
+            - text: 使用说明
+          - button "退出" [ref=f2e13] [cursor=pointer]
+      - generic [ref=f2e14]:
+        - complementary [ref=f2e15]:
+          - generic [ref=f2e16]:
+            - generic [ref=f2e17]:
+              - generic [ref=f2e18]:
+                - generic [ref=f2e19]: 模块导航
+                - generic [ref=f2e20]: 按任务分组，保留原有功能入口
+              - button "收起模块导航" [expanded] [ref=f2e21] [cursor=pointer]:
+                - generic [ref=f2e22]: 
+            - generic [ref=f2e23]:
+              - generic [ref=f2e24]:
+                - generic [ref=f2e25]: 核心数据
+                - button "知识库管理" [ref=f2e26] [cursor=pointer]
+                - button "知识对比" [ref=f2e27] [cursor=pointer]
+                - button "机型矩阵管理" [ref=f2e28] [cursor=pointer]
+                - button "多媒体预览" [ref=f2e29] [cursor=pointer]
+              - generic [ref=f2e30]:
+                - generic [ref=f2e31]: 质量管控
+                - button "知识库评分" [ref=f2e32] [cursor=pointer]
+                - button "知识库治理" [ref=f2e33] [cursor=pointer]
+                - button "管控中心" [ref=f2e34] [cursor=pointer]
+              - generic [ref=f2e35]:
+                - generic [ref=f2e36]: 工具与映射
+                - button "数据设置" [ref=f2e37] [cursor=pointer]
+                - button "智能映射" [ref=f2e38] [cursor=pointer]
+              - generic [ref=f2e39]:
+                - generic [ref=f2e40]: 日志与归档
+                - button "修改记录" [ref=f2e41] [cursor=pointer]
+                - button "归档管理" [ref=f2e42] [cursor=pointer]
+        - button "收起模块导航" [expanded]:
+          - generic: 
+        - generic [ref=f2e44]:
+          - generic [ref=f2e45]: 核心数据 / 知识对比
+          - generic [ref=f2e47]:
+            - text:                                                                                                                             
+            - generic [ref=f2e2229]:
+              - generic [ref=f2e2230]:
+                - generic [ref=f2e2231]:
+                  - generic [ref=f2e2232]: 知识对比
+                  - generic [ref=f2e2233]: 按 ID 批量导入知识库记录，完成匹配校验、字段差异与合并草稿。
+                - generic [ref=f2e2234]:
+                  - button "清空" [ref=f2e2235] [cursor=pointer]
+                  - button "返回知识库" [ref=f2e2236] [cursor=pointer]
+              - generic [ref=f2e2237]:
+                - generic [ref=f2e2238]:
+                  - generic [ref=f2e2239]:
+                    - generic [ref=f2e2240]:
+                      - heading "导入 ID" [level=3] [ref=f2e2241]
+                      - paragraph [ref=f2e2242]: 已匹配 2 条，未找到 0 条，重复 0 条。
+                    - generic [ref=f2e2243]:
+                      - generic "对比数据源" [ref=f2e2244]:
+                        - generic [ref=f2e2245]:
+                          - radio "此刻库" [checked] [ref=f2e2246] [cursor=pointer]
+                          - text: 此刻库
+                        - generic [ref=f2e2247]:
+                          - radio "前刻库" [ref=f2e2248] [cursor=pointer]
+                          - text: 前刻库
+                      - button "收起" [ref=f2e2249] [cursor=pointer]
+                  - generic [ref=f2e2250]:
+                    - textbox "粘贴 Wiki ID，例如： ICWIKI202510210009 ICWIKI202409030002 ICWIKI202404232078" [ref=f2e2251]:
+                      - /placeholder: "粘贴 Wiki ID，例如：\nICWIKI202510210009\nICWIKI202409030002\nICWIKI202404232078"
+                      - text: ICWIKI202505190020 ICWIKI202511100005
+                    - generic [ref=f2e2252]:
+                      - button "开始对比" [ref=f2e2253] [cursor=pointer]
+                      - button "导入 Excel/CSV" [ref=f2e2254] [cursor=pointer]
+                    - generic [ref=f2e2255]:
+                      - generic [ref=f2e2465]:
+                        - generic [ref=f2e2466]:
+                          - generic [ref=f2e2467]: 导入 ID
+                          - strong [ref=f2e2468]: "2"
+                        - generic [ref=f2e2469]:
+                          - generic [ref=f2e2470]: 已匹配
+                          - strong [ref=f2e2471]: "2"
+                        - generic [ref=f2e2472]:
+                          - generic [ref=f2e2473]: 未找到
+                          - strong [ref=f2e2474]: "0"
+                        - generic [ref=f2e2475]:
+                          - generic [ref=f2e2476]: 重复 ID
+                          - strong [ref=f2e2477]: "0"
+                      - generic [ref=f2e2478]:
+                        - generic [ref=f2e2479]: 已匹配
+                        - generic [ref=f2e2480]:
+                          - generic [ref=f2e2481]: ICWIKI202505190020
+                          - generic [ref=f2e2482]: ICWIKI202511100005
+                      - generic [ref=f2e2483]:
+                        - generic [ref=f2e2484]: 未找到
+                        - generic [ref=f2e2485]: 无
+                      - generic [ref=f2e2487]:
+                        - generic [ref=f2e2488]: 重复输入
+                        - generic [ref=f2e2489]: 无
+                  - generic [ref=f2e2257]:
+                    - generic [ref=f2e2258]:
+                      - generic [ref=f2e2259]:
+                        - heading "差异摘要" [level=3] [ref=f2e2260]
+                        - paragraph [ref=f2e2261]: 此刻库，已匹配 2 条，发现 10 个业务差异字段，元数据差异 1 个。
+                      - generic [ref=f2e2262]:
+                        - generic [ref=f2e2263]:
+                          - checkbox "只看差异字段" [checked] [ref=f2e2264] [cursor=pointer]
+                          - text: 只看差异字段
+                        - generic [ref=f2e2265]:
+                          - checkbox "显示元数据" [ref=f2e2266] [cursor=pointer]
+                          - text: 显示元数据
+                    - table [ref=f2e2492]:
+                      - rowgroup [ref=f2e2493]:
+                        - row [ref=f2e2494]:
+                          - columnheader "字段" [ref=f2e2495]
+                          - columnheader "状态" [ref=f2e2496]
+                          - columnheader "差异值" [ref=f2e2497]
+                          - columnheader "操作" [ref=f2e2498]
+                      - rowgroup [ref=f2e2499]:
+                        - row [ref=f2e2500] [cursor=pointer]:
+                          - cell "问题 内容" [ref=f2e2501]:
+                            - generic [ref=f2e2502]:
+                              - strong [ref=f2e2503]: 问题
+                              - generic [ref=f2e2504]: 内容
+                          - cell "有差异" [ref=f2e2505]
+                          - cell "2" [ref=f2e2507]
+                          - cell [ref=f2e2509]:
+                            - button "查看" [ref=f2e2510]
+                        - row [ref=f2e2511] [cursor=pointer]:
+                          - cell "答案 内容" [ref=f2e2512]:
+                            - generic [ref=f2e2513]:
+                              - strong [ref=f2e2514]: 答案
+                              - generic [ref=f2e2515]: 内容
+                          - cell "有差异" [ref=f2e2516]
+                          - cell "2" [ref=f2e2518]
+                          - cell [ref=f2e2520]:
+                            - button "查看" [ref=f2e2521]
+                        - row [ref=f2e2522] [cursor=pointer]:
+                          - cell "相似问题 内容" [ref=f2e2523]:
+                            - generic [ref=f2e2524]:
+                              - strong [ref=f2e2525]: 相似问题
+                              - generic [ref=f2e2526]: 内容
+                          - cell "有差异" [ref=f2e2527]
+                          - cell "2" [ref=f2e2529]
+                          - cell [ref=f2e2531]:
+                            - button "查看" [ref=f2e2532]
+                        - row [ref=f2e2533] [cursor=pointer]:
+                          - cell "产品型号 适用范围" [ref=f2e2534]:
+                            - generic [ref=f2e2535]:
+                              - strong [ref=f2e2536]: 产品型号
+                              - generic [ref=f2e2537]: 适用范围
+                          - cell "有差异" [ref=f2e2538]
+                          - cell "2" [ref=f2e2540]
+                          - cell [ref=f2e2542]:
+                            - button "查看" [ref=f2e2543]
+                        - row [ref=f2e2544] [cursor=pointer]:
+                          - cell "问题类型 类型" [ref=f2e2545]:
+                            - generic [ref=f2e2546]:
+                              - strong [ref=f2e2547]: 问题类型
+                              - generic [ref=f2e2548]: 类型
+                          - cell "有差异" [ref=f2e2549]
+                          - cell "2" [ref=f2e2551]
+                          - cell [ref=f2e2553]:
+                            - button "查看" [ref=f2e2554]
+                        - row [ref=f2e2555] [cursor=pointer]:
+                          - cell "答案类型 类型" [ref=f2e2556]:
+                            - generic [ref=f2e2557]:
+                              - strong [ref=f2e2558]: 答案类型
+                              - generic [ref=f2e2559]: 类型
+                          - cell "有差异" [ref=f2e2560]
+                          - cell "2" [ref=f2e2562]
+                          - cell [ref=f2e2564]:
+                            - button "查看" [ref=f2e2565]
+                        - row [ref=f2e2566] [cursor=pointer]:
+                          - cell "BM25 治理" [ref=f2e2567]:
+                            - generic [ref=f2e2568]:
+                              - strong [ref=f2e2569]: BM25
+                              - generic [ref=f2e2570]: 治理
+                          - cell "有差异" [ref=f2e2571]
+                          - cell "2" [ref=f2e2573]
+                          - cell [ref=f2e2575]:
+                            - button "查看" [ref=f2e2576]
+                        - row [ref=f2e2577] [cursor=pointer]:
+                          - cell "关键词 治理" [ref=f2e2578]:
+                            - generic [ref=f2e2579]:
+                              - strong [ref=f2e2580]: 关键词
+                              - generic [ref=f2e2581]: 治理
+                          - cell "有差异" [ref=f2e2582]
+                          - cell "2" [ref=f2e2584]
+                          - cell [ref=f2e2586]:
+                            - button "查看" [ref=f2e2587]
+                        - row [ref=f2e2588] [cursor=pointer]:
+                          - cell "外链类型 链接" [ref=f2e2589]:
+                            - generic [ref=f2e2590]:
+                              - strong [ref=f2e2591]: 外链类型
+                              - generic [ref=f2e2592]: 链接
+                          - cell "有差异" [ref=f2e2593]
+                          - cell "2" [ref=f2e2595]
+                          - cell [ref=f2e2597]:
+                            - button "查看" [ref=f2e2598]
+                        - row [ref=f2e2599] [cursor=pointer]:
+                          - cell "外部链接 链接" [ref=f2e2600]:
+                            - generic [ref=f2e2601]:
+                              - strong [ref=f2e2602]: 外部链接
+                              - generic [ref=f2e2603]: 链接
+                          - cell "有差异" [ref=f2e2604]
+                          - cell "2" [ref=f2e2606]
+                          - cell [ref=f2e2608]:
+                            - button "查看" [ref=f2e2609]
+                - generic [ref=f2e2269]:
+                  - generic [ref=f2e2270]:
+                    - generic [ref=f2e2610]:
+                      - generic [ref=f2e2611]:
+                        - heading "问题" [level=3] [ref=f2e2612]
+                        - paragraph [ref=f2e2613]: 发现 2 种取值，涉及 1/2 条记录。当前主记录：ICWIKI202505190020
+                        - generic [ref=f2e2614]:
+                          - generic [ref=f2e2615]: 内容
+                          - generic [ref=f2e2616]: 默认沿用主记录
+                      - generic [ref=f2e2617]:
+                        - generic [ref=f2e2618]:
+                          - generic [ref=f2e2619]: 共有
+                          - generic [ref=f2e2621]: 部分共有
+                          - generic [ref=f2e2623]: 单条独有
+                        - button "重新生成 AI 草稿" [ref=f2e2626] [cursor=pointer]
+                    - generic [ref=f2e2627]:
+                      - article [ref=f2e2628]:
+                        - generic [ref=f2e2629]:
+                          - generic [ref=f2e2630]:
+                            - generic [ref=f2e2631]: 记录 1
+                            - generic [ref=f2e2632]:
+                              - button "ICWIKI202505190020" [ref=f2e2633] [cursor=pointer]
+                              - generic [ref=f2e2634]: 主记录
+                            - generic "是否支持定时清洁" [ref=f2e2635]
+                          - generic [ref=f2e2636]:
+                            - generic [ref=f2e2637]: 主记录基准
+                            - button "采用此值" [ref=f2e2638] [cursor=pointer]
+                        - generic [ref=f2e2639]: 是否支持定时清洁
+                      - article [ref=f2e2641]:
+                        - generic [ref=f2e2642]:
+                          - generic [ref=f2e2643]:
+                            - generic [ref=f2e2644]: 记录 2
+                            - button "ICWIKI202511100005" [ref=f2e2646] [cursor=pointer]
+                            - generic "定时任务里如何设置先扫后拖" [ref=f2e2647]
+                          - generic [ref=f2e2648]:
+                            - generic [ref=f2e2649]: 与主记录不同
+                            - button "设为主记录" [ref=f2e2650] [cursor=pointer]
+                            - button "采用此值" [ref=f2e2651] [cursor=pointer]
+                        - generic [ref=f2e2652]: 定时任务里如何设置先扫后拖
+                  - generic [ref=f2e2655]:
+                    - generic [ref=f2e2656]:
+                      - generic [ref=f2e2657]:
+                        - generic [ref=f2e2658]:
+                          - generic [ref=f2e2659]: 
+                          - text: AI 合并建议
+                        - heading "建议合并" [level=3] [ref=f2e2660]
+                        - paragraph [ref=f2e2661]: 两条记录都围绕定时清洁设置，第二条补充了先扫后拖场景，核心操作路径可以统一。
+                      - generic [ref=f2e2662]: 建议合并 · 86%
+                    - generic [ref=f2e2663]:
+                      - generic [ref=f2e2664]: 需要留意
+                      - list [ref=f2e2665]:
+                        - listitem [ref=f2e2666]: 不同机型的 App 页面名称需要人工复核
+                    - generic [ref=f2e2667]:
+                      - generic [ref=f2e2668]:
+                        - generic [ref=f2e2669]: 问题
+                        - strong [ref=f2e2670]: 如何设置定时清洁和先扫后拖？
+                      - generic [ref=f2e2671]:
+                        - generic [ref=f2e2672]: 答案
+                        - generic [ref=f2e2673]: 打开 Roborock App 并进入设备页面，在定时任务中新增清洁计划。设置执行时间、重复周期和清洁范围，然后选择先扫后拖等清洁模式并保存。
+                      - generic [ref=f2e2674]:
+                        - generic [ref=f2e2675]: 相似问题
+                        - generic [ref=f2e2676]:
+                          - generic [ref=f2e2677]: 怎么预约定时清扫？
+                          - generic [ref=f2e2678]: 每天定时清洁怎么设置？
+                          - generic [ref=f2e2679]: 如何预约先扫后拖？
+                    - generic [ref=f2e2680]:
+                      - generic [ref=f2e2681]: 问题、答案、相似问题将写入合并草稿，其余字段沿用当前记录策略。
+                      - generic [ref=f2e2682]:
+                        - button "收起生成内容" [ref=f2e2683] [cursor=pointer]
+                        - button "重新生成" [ref=f2e2684] [cursor=pointer]:
+                          - generic [ref=f2e2685]: 
+                          - text: 重新生成
+                  - generic [ref=f2e2272]:
+                    - generic [ref=f2e2686]:
+                      - generic [ref=f2e2687]:
+                        - heading "合并草稿" [level=3] [ref=f2e2688]
+                        - paragraph [ref=f2e2689]: 编辑 ICWIKI202505190020，建议删除 1 条，字段变更 4 项；已选择提交 4 项字段变更、1 条删除建议。问题、答案、相似问题由 AI 生成，其余字段沿用当前记录策略。
+                      - generic [ref=f2e2690]:
+                        - button "打开编辑主记录" [ref=f2e2691] [cursor=pointer]
+                        - button "提交到修改记录" [ref=f2e2692] [cursor=pointer]
+                    - generic [ref=f2e2693]: 当前选中 4 个字段变更、1 条删除建议；提交后只把选中项写入修改记录，未选项保留在草稿中继续调整。
+                    - generic [ref=f2e2694]:
+                      - generic [ref=f2e2695]:
+                        - generic [ref=f2e2696]: 编辑主记录
+                        - strong [ref=f2e2697]: ICWIKI202505190020
+                        - generic [ref=f2e2698]: 此刻库
+                      - generic [ref=f2e2699]:
+                        - generic [ref=f2e2700]: 建议删除
+                        - strong [ref=f2e2701]: 1/1
+                        - generic [ref=f2e2702]: 已选择 / 全部
+                      - generic [ref=f2e2703]:
+                        - generic [ref=f2e2704]: 将更新
+                        - strong [ref=f2e2705]: 4/4
+                        - generic [ref=f2e2706]: 已选择 / 差异字段
+                      - generic [ref=f2e2707]:
+                        - generic [ref=f2e2708]: 未自动填入
+                        - strong [ref=f2e2709]: "0"
+                        - generic [ref=f2e2710]: 个字段
+                    - generic [ref=f2e2711]:
+                      - generic [ref=f2e2712]:
+                        - generic [ref=f2e2713]: 编辑 ID
+                        - button "ICWIKI202505190020" [ref=f2e2714] [cursor=pointer]
+                      - generic [ref=f2e2715]:
+                        - generic [ref=f2e2716]:
+                          - generic [ref=f2e2717] [cursor=pointer]:
+                            - checkbox "删除建议" [checked] [ref=f2e2718]
+                            - generic [ref=f2e2719]: 删除建议
+                          - generic [ref=f2e2720]: 1/1
+                        - generic [ref=f2e2722] [cursor=pointer]:
+                          - checkbox "ICWIKI202511100005" [checked] [ref=f2e2723]
+                          - generic [ref=f2e2724]: ICWIKI202511100005
+                    - table [ref=f2e2726]:
+                      - rowgroup [ref=f2e2727]:
+                        - row [ref=f2e2728]:
+                          - columnheader [ref=f2e2729]:
+                            - checkbox "选择全部草稿字段" [checked] [ref=f2e2730] [cursor=pointer]
+                          - columnheader "字段" [ref=f2e2731]
+                          - columnheader "采用策略" [ref=f2e2732]
+                          - columnheader "来源" [ref=f2e2733]
+                          - columnheader "写入状态" [ref=f2e2734]
+                          - columnheader "草稿值" [ref=f2e2735]
+                      - rowgroup [ref=f2e2736]:
+                        - row [ref=f2e2737]:
+                          - cell [ref=f2e2738]:
+                            - checkbox "选择提交 问题" [checked] [ref=f2e2739] [cursor=pointer]
+                          - cell "问题 内容" [ref=f2e2740]:
+                            - generic [ref=f2e2741]:
+                              - strong [ref=f2e2742]: 问题
+                              - generic [ref=f2e2743]: 内容
+                          - cell "AI 综合生成" [ref=f2e2744]
+                          - cell "AI 综合当前记录" [ref=f2e2746]
+                          - cell "将更新" [ref=f2e2747]
+                          - cell "如何设置定时清洁和先扫后拖？" [ref=f2e2749]
+                        - row [ref=f2e2751]:
+                          - cell [ref=f2e2752]:
+                            - checkbox "选择提交 答案" [checked] [ref=f2e2753] [cursor=pointer]
+                          - cell "答案 内容" [ref=f2e2754]:
+                            - generic [ref=f2e2755]:
+                              - strong [ref=f2e2756]: 答案
+                              - generic [ref=f2e2757]: 内容
+                          - cell "AI 综合生成" [ref=f2e2758]
+                          - cell "AI 综合当前记录" [ref=f2e2760]
+                          - cell "将更新" [ref=f2e2761]
+                          - cell "打开 Roborock App 并进入设备页面，在定时任务中新增清洁计划。设置执行时间、重复周期和清洁范围，然后选择先扫后拖等清洁模式并保存。" [ref=f2e2763]
+                        - row [ref=f2e2765]:
+                          - cell [ref=f2e2766]:
+                            - checkbox "选择提交 相似问题" [checked] [ref=f2e2767] [cursor=pointer]
+                          - cell "相似问题 内容" [ref=f2e2768]:
+                            - generic [ref=f2e2769]:
+                              - strong [ref=f2e2770]: 相似问题
+                              - generic [ref=f2e2771]: 内容
+                          - cell "AI 综合生成" [ref=f2e2772]
+                          - cell "AI 综合当前记录" [ref=f2e2774]
+                          - cell "将更新" [ref=f2e2775]
+                          - cell "怎么预约定时清扫？ 每天定时清洁怎么设置？ 如何预约先扫后拖？" [ref=f2e2777]
+                        - row [ref=f2e2779]:
+                          - cell [ref=f2e2780]:
+                            - checkbox "选择提交 产品型号" [checked] [ref=f2e2781] [cursor=pointer]
+                          - cell "产品型号 适用范围" [ref=f2e2782]:
+                            - generic [ref=f2e2783]:
+                              - strong [ref=f2e2784]: 产品型号
+                              - generic [ref=f2e2785]: 适用范围
+                          - cell "合并取并集" [ref=f2e2786]
+                          - cell "合并全部记录" [ref=f2e2788]
+                          - cell "不变" [ref=f2e2789]
+                          - cell "G20S G20S Ultra G30 G30 Space 探索版 G30 U G30S Pro G30S Pro铂金版 G30曜石 P10 Pro P10S P10S Pro 系列 P10S Pro 系列超薄嵌入式 P10S Pure P20 P20 MAX P20 Plus P20 Pro P20 Ultra P20 Ultra Plus P20 Ultra活水版 P20 净立方 P20极光 P20极光 增强版 P20活水版 V20..." [ref=f2e2791]:
+                            - generic "G20S G20S Ultra G30 G30 Space 探索版 G30 U G30S Pro G30S Pro铂金版 G30曜石 P10 Pro P10S P10S Pro 系列 P10S Pro 系列超薄嵌入式 P10S Pure P20 P20 MAX P20 Plus P20 Pro P20 Ultra P20 Ultra Plus P20 Ultra活水版 P20 净立方 P20极光 P20极光 增强版 P20活水版 V20 石头星耀Pro" [ref=f2e2792]: G20S G20S Ultra G30 G30 Space 探索版 G30 U G30S Pro G30S Pro铂金版 G30曜石 P10 Pro P10S P10S Pro 系列 P10S Pro 系列超薄嵌入式 P10S Pure P20 P20 MAX P20 Plus P20 Pro P20 Ultra P20 Ultra Plus P20 Ultra活水版 P20 净立方 P20极光 P20极光 增强版 P20活水版 V20...
+                        - row [ref=f2e2793]:
+                          - cell [ref=f2e2794]:
+                            - checkbox "选择提交 产品分类" [checked] [ref=f2e2795] [cursor=pointer]
+                          - cell "产品分类 适用范围" [ref=f2e2796]:
+                            - generic [ref=f2e2797]:
+                              - strong [ref=f2e2798]: 产品分类
+                              - generic [ref=f2e2799]: 适用范围
+                          - cell "合并取并集" [ref=f2e2800]
+                          - cell "合并全部记录" [ref=f2e2802]
+                          - cell "不变" [ref=f2e2803]
+                          - cell "扫地机" [ref=f2e2805]
+                        - row [ref=f2e2807]:
+                          - cell [ref=f2e2808]:
+                            - checkbox "选择提交 问题类型" [checked] [ref=f2e2809] [cursor=pointer]
+                          - cell "问题类型 类型" [ref=f2e2810]:
+                            - generic [ref=f2e2811]:
+                              - strong [ref=f2e2812]: 问题类型
+                              - generic [ref=f2e2813]: 类型
+                          - cell "沿用主记录" [ref=f2e2814]
+                          - cell "主记录" [ref=f2e2816]
+                          - cell "不变" [ref=f2e2817]
+                          - cell "清洁功能-清洁任务" [ref=f2e2819]
+                        - row [ref=f2e2821]:
+                          - cell [ref=f2e2822]:
+                            - checkbox "选择提交 答案类型" [checked] [ref=f2e2823] [cursor=pointer]
+                          - cell "答案类型 类型" [ref=f2e2824]:
+                            - generic [ref=f2e2825]:
+                              - strong [ref=f2e2826]: 答案类型
+                              - generic [ref=f2e2827]: 类型
+                          - cell "沿用主记录" [ref=f2e2828]
+                          - cell "主记录" [ref=f2e2830]
+                          - cell "不变" [ref=f2e2831]
+                          - cell "混合" [ref=f2e2833]
+                        - row [ref=f2e2835]:
+                          - cell [ref=f2e2836]:
+                            - checkbox "选择提交 BM25" [checked] [ref=f2e2837] [cursor=pointer]
+                          - cell "BM25 治理" [ref=f2e2838]:
+                            - generic [ref=f2e2839]:
+                              - strong [ref=f2e2840]: BM25
+                              - generic [ref=f2e2841]: 治理
+                          - cell "沿用主记录" [ref=f2e2842]
+                          - cell "主记录" [ref=f2e2844]
+                          - cell "不变" [ref=f2e2845]
+                          - cell "是" [ref=f2e2847]
+                        - row [ref=f2e2849]:
+                          - cell [ref=f2e2850]:
+                            - checkbox "选择提交 关键词" [checked] [ref=f2e2851] [cursor=pointer]
+                          - cell "关键词 治理" [ref=f2e2852]:
+                            - generic [ref=f2e2853]:
+                              - strong [ref=f2e2854]: 关键词
+                              - generic [ref=f2e2855]: 治理
+                          - cell "合并取并集" [ref=f2e2856]
+                          - cell "合并全部记录" [ref=f2e2858]
+                          - cell "将更新" [ref=f2e2859]
+                          - cell "先扫后拖" [ref=f2e2861]
+                        - row [ref=f2e2863]:
+                          - cell [ref=f2e2864]:
+                            - checkbox "选择提交 标签" [checked] [ref=f2e2865] [cursor=pointer]
+                          - cell "标签 治理" [ref=f2e2866]:
+                            - generic [ref=f2e2867]:
+                              - strong [ref=f2e2868]: 标签
+                              - generic [ref=f2e2869]: 治理
+                          - cell "合并取并集" [ref=f2e2870]
+                          - cell "合并全部记录" [ref=f2e2872]
+                          - cell "不变" [ref=f2e2873]
+                          - cell "-" [ref=f2e2875]
+                        - row [ref=f2e2876]:
+                          - cell [ref=f2e2877]:
+                            - checkbox "选择提交 图片链接" [checked] [ref=f2e2878] [cursor=pointer]
+                          - cell "图片链接 链接" [ref=f2e2879]:
+                            - generic [ref=f2e2880]:
+                              - strong [ref=f2e2881]: 图片链接
+                              - generic [ref=f2e2882]: 链接
+                          - cell "合并取并集" [ref=f2e2883]
+                          - cell "合并全部记录" [ref=f2e2885]
+                          - cell "不变" [ref=f2e2886]
+                          - cell "https://files.roborock.com/wiz/customer/image/36RLXuHGpMeO21u5OSYABU/5syftEsa1KKBPAtHL5cXVB.png" [ref=f2e2888]
+                        - row [ref=f2e2890]:
+                          - cell [ref=f2e2891]:
+                            - checkbox "选择提交 视频链接" [checked] [ref=f2e2892] [cursor=pointer]
+                          - cell "视频链接 链接" [ref=f2e2893]:
+                            - generic [ref=f2e2894]:
+                              - strong [ref=f2e2895]: 视频链接
+                              - generic [ref=f2e2896]: 链接
+                          - cell "合并取并集" [ref=f2e2897]
+                          - cell "合并全部记录" [ref=f2e2899]
+                          - cell "不变" [ref=f2e2900]
+                          - cell "-" [ref=f2e2902]
+                        - row [ref=f2e2903]:
+                          - cell [ref=f2e2904]:
+                            - checkbox "选择提交 文件链接" [checked] [ref=f2e2905] [cursor=pointer]
+                          - cell "文件链接 链接" [ref=f2e2906]:
+                            - generic [ref=f2e2907]:
+                              - strong [ref=f2e2908]: 文件链接
+                              - generic [ref=f2e2909]: 链接
+                          - cell "合并取并集" [ref=f2e2910]
+                          - cell "合并全部记录" [ref=f2e2912]
+                          - cell "不变" [ref=f2e2913]
+                          - cell "-" [ref=f2e2915]
+                        - row [ref=f2e2916]:
+                          - cell [ref=f2e2917]:
+                            - checkbox "选择提交 外链类型" [checked] [ref=f2e2918] [cursor=pointer]
+                          - cell "外链类型 链接" [ref=f2e2919]:
+                            - generic [ref=f2e2920]:
+                              - strong [ref=f2e2921]: 外链类型
+                              - generic [ref=f2e2922]: 链接
+                          - cell "沿用主记录" [ref=f2e2923]
+                          - cell "主记录" [ref=f2e2925]
+                          - cell "不变" [ref=f2e2926]
+                          - cell "APP内页面" [ref=f2e2928]
+                        - row [ref=f2e2930]:
+                          - cell [ref=f2e2931]:
+                            - checkbox "选择提交 外部链接" [checked] [ref=f2e2932] [cursor=pointer]
+                          - cell "外部链接 链接" [ref=f2e2933]:
+                            - generic [ref=f2e2934]:
+                              - strong [ref=f2e2935]: 外部链接
+                              - generic [ref=f2e2936]: 链接
+                          - cell "合并取并集" [ref=f2e2937]
+                          - cell "合并全部记录" [ref=f2e2939]
+                          - cell "不变" [ref=f2e2940]
+                          - cell "timerTask" [ref=f2e2942]
+            - text:                +  
+          - text: +
+  - text: ▾     +                          
+  - generic [ref=f2e2944]:
+    - generic [ref=f2e2945]: 
+    - generic [ref=f2e2946]:
+      - generic [ref=f2e2947]: 成功
+      - generic [ref=f2e2948]: AI 建议合并，已生成内容草稿
+    - generic [ref=f2e2949] [cursor=pointer]: 
+  - text:  
