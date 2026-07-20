@@ -4453,6 +4453,113 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
     margin: 6px 12px 10px !important;
 }
 
+body.kb-action-embed-mode {
+    overflow: auto;
+    background: #f4f7fb;
+}
+
+body.kb-action-embed-mode .workbench-header,
+body.kb-action-embed-mode .workbench-sidebar,
+body.kb-action-embed-mode .workbench-sidebar-toggle-float,
+body.kb-action-embed-mode .workbench-content-head {
+    display: none !important;
+}
+
+body.kb-action-embed-mode #mainContent,
+body.kb-action-embed-mode .workbench-layout,
+body.kb-action-embed-mode .workbench-main,
+body.kb-action-embed-mode .workbench-content-panel {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    min-height: 100vh;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+}
+
+body.kb-action-embed-mode main {
+    width: 100% !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 100vh !important;
+    padding: 0 !important;
+    overflow: visible !important;
+}
+
+body.kb-action-embed-mode #mainContent {
+    height: auto !important;
+    overflow: visible !important;
+}
+
+body.kb-action-embed-mode #mainContent .workbench-layout {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 0 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+}
+
+body.kb-action-embed-mode #mainContent .workbench-main {
+    grid-column: 1 / -1;
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    height: auto !important;
+    overflow: visible !important;
+}
+
+body.kb-action-embed-mode #mainContent .workbench-content-panel,
+body.kb-action-embed-mode #mainContent .workbench-views,
+body.kb-action-embed-mode #kbCompareView,
+body.kb-action-embed-mode #kbCompareView .kb-compare-section,
+body.kb-action-embed-mode #kbCompareLayout {
+    box-sizing: border-box;
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
+}
+
+body.kb-action-embed-mode .workbench-views {
+    padding: 12px !important;
+}
+
+body.kb-action-embed-mode #kbCompareView .kb-compare-actions {
+    display: none !important;
+}
+
+body.kb-embed-blocked {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    padding: 24px;
+    background: #f4f7fb;
+}
+
+.kb-embed-access-error {
+    width: min(520px, 100%);
+    padding: 24px;
+    border: 1px solid #fecaca;
+    border-radius: 12px;
+    background: #fff;
+    color: #7f1d1d;
+}
+
+.kb-embed-access-error strong {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 18px;
+}
+
+.kb-embed-access-error p {
+    margin: 0;
+    line-height: 1.6;
+}
+
 .kb-compare-section {
     display: flex;
     flex-direction: column;

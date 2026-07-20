@@ -68,6 +68,47 @@ app = Flask(
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 app.config['SESSION_COOKIE_NAME'] = os.environ.get('KMATRIX_SESSION_COOKIE_NAME', 'kmatrix_8085_session')
 
+
+def _normalize_http_origin(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    try:
+        parsed = urlparse(raw)
+        if parsed.scheme.lower() not in {'http', 'https'} or not parsed.hostname:
+            return ''
+        if parsed.username or parsed.password:
+            return ''
+        host = parsed.hostname.lower()
+        if ':' in host:
+            host = f'[{host}]'
+        port = parsed.port
+        default_port = 80 if parsed.scheme.lower() == 'http' else 443
+        authority = f'{host}:{port}' if port and port != default_port else host
+        return f'{parsed.scheme.lower()}://{authority}'
+    except (TypeError, ValueError):
+        return ''
+
+
+def _get_embed_allowed_origins():
+    configured = os.environ.get('KMATRIX_EMBED_ALLOWED_ORIGINS', '').strip()
+    values = configured.split(',') if configured else [
+        'http://127.0.0.1:5175',
+        'http://localhost:5175',
+    ]
+    origins = []
+    for value in values:
+        origin = _normalize_http_origin(value)
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+def _is_embed_origin_allowed(value):
+    origin = _normalize_http_origin(value)
+    return bool(origin and origin in _get_embed_allowed_origins())
+
+
 def _get_cors_allowed_origins():
     default_origins = [
         "http://localhost:8083",
@@ -144,6 +185,10 @@ def apply_no_cache_headers(response):
         response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         response.headers['Pragma'] = 'no-cache'
         response.headers['Expires'] = '0'
+    if response.mimetype == 'text/html' or request.path == '/':
+        frame_ancestors = " ".join(["'self'", *_get_embed_allowed_origins()])
+        response.headers['Content-Security-Policy'] = f'frame-ancestors {frame_ancestors}'
+        response.headers.pop('X-Frame-Options', None)
     return response
 
 # Models
@@ -947,6 +992,18 @@ def init_db():
 @app.route('/')
 def index():
     return send_from_directory(os.path.join(_BASE_DIR, 'link_viewer'), 'index.html')
+
+
+@app.route('/api/embed/validate')
+def validate_embed_origin():
+    host_origin = request.args.get('host_origin', '')
+    normalized = _normalize_http_origin(host_origin)
+    if not normalized:
+        return jsonify({'success': False, 'allowed': False, 'message': '缺少有效的 host_origin'}), 400
+    if not _is_embed_origin_allowed(normalized):
+        return jsonify({'success': False, 'allowed': False, 'message': '当前父页面不在允许嵌入列表中'}), 403
+    return jsonify({'success': True, 'allowed': True, 'host_origin': normalized})
+
 
 @app.route('/login', methods=['POST'])
 def login():

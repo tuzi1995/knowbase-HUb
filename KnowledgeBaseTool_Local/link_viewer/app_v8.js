@@ -372,26 +372,26 @@ function getKbActionEmbedRequest() {
 }
 
 function postKbEditEmbedMessage(type, detail = {}) {
-    if (!kbEditEmbedRequest || !window.parent || window.parent === window) return;
+    if (!kbEditEmbedRequest?.hostOrigin || !window.parent || window.parent === window) return;
     try {
         window.parent.postMessage({
             source: KB_EMBED_MESSAGE_SOURCE,
             type,
             ...detail,
-        }, kbEditEmbedRequest.hostOrigin || '*');
+        }, kbEditEmbedRequest.hostOrigin);
     } catch {
         // Cross-window notifications are best-effort only.
     }
 }
 
 function postKbActionEmbedMessage(type, detail = {}) {
-    if (!kbActionEmbedRequest || !window.parent || window.parent === window) return;
+    if (!kbActionEmbedRequest?.hostOrigin || !window.parent || window.parent === window) return;
     try {
         window.parent.postMessage({
             source: KB_ACTION_MESSAGE_SOURCE,
             type,
             ...detail,
-        }, kbActionEmbedRequest.hostOrigin || '*');
+        }, kbActionEmbedRequest.hostOrigin);
     } catch {
         // Cross-window notifications are best-effort only.
     }
@@ -399,6 +399,32 @@ function postKbActionEmbedMessage(type, detail = {}) {
 
 function getKbActionChangeSource(fallback = '') {
     return String(kbActionEmbedRequest?.changeSource || fallback || '').trim();
+}
+
+async function validateKbEmbedHostOrigin(request) {
+    const hostOrigin = String(request?.hostOrigin || '').trim();
+    if (!hostOrigin) throw new Error('嵌入模式必须提供有效的 host_origin');
+    const result = await api(`/embed/validate?host_origin=${encodeURIComponent(hostOrigin)}`);
+    if (!result?.success || !result?.allowed || result.host_origin !== hostOrigin) {
+        throw new Error(result?.message || '当前父页面无权嵌入此模块');
+    }
+}
+
+function renderKbEmbedAccessError(message) {
+    document.body.classList.add('kb-embed-blocked');
+    const loginPanel = document.getElementById('loginPanel');
+    const mainContent = document.getElementById('mainContent');
+    if (loginPanel) loginPanel.style.display = 'none';
+    if (mainContent) mainContent.style.display = 'none';
+    const panel = document.createElement('main');
+    panel.className = 'kb-embed-access-error';
+    panel.setAttribute('role', 'alert');
+    const title = document.createElement('strong');
+    title.textContent = '无法打开嵌入工作区';
+    const detail = document.createElement('p');
+    detail.textContent = String(message || '当前父页面未获授权。');
+    panel.append(title, detail);
+    document.body.appendChild(panel);
 }
 
 let kbEditEmbedHostListenerBound = false;
@@ -409,7 +435,7 @@ function bindKbEditEmbedHostListener() {
     window.addEventListener('message', (event) => {
         if (!kbEditEmbedRequest || !window.parent || window.parent === window) return;
         if (event.source !== window.parent) return;
-        if (kbEditEmbedRequest.hostOrigin && event.origin !== kbEditEmbedRequest.hostOrigin) return;
+        if (event.origin !== kbEditEmbedRequest.hostOrigin) return;
         const data = event.data || {};
         if (data.source !== KB_EMBED_MESSAGE_SOURCE) return;
         if (data.type !== 'replace_field') return;
@@ -478,7 +504,10 @@ async function openKbEditEmbedRequest() {
             const item = await fetchKbEditEmbedItem(kbEditEmbedRequest.id);
             await openKBEditModal(kbEditEmbedRequest.id, { item });
         }
-        postKbEditEmbedMessage('ready', { kbId: kbEditEmbedRequest.id || '' });
+        postKbEditEmbedMessage('ready', {
+            kbId: kbEditEmbedRequest.id || '',
+            changeSource: kbEditEmbedRequest.changeSource || ''
+        });
         return true;
     } catch (e) {
         const message = e?.message || String(e);
@@ -528,7 +557,7 @@ async function openKbDeleteActionEmbedRequest() {
         changeSource: kbActionEmbedRequest?.changeSource || ''
     });
     if (typeof showToast === 'function') {
-        showToast(`已从 DataLoop 带入 ${ids.length} 条待复核删除 KB`, 'info');
+        showToast(`已从${kbActionEmbedRequest?.changeSource || '外部工作台'}带入 ${ids.length} 条待复核删除 KB`, 'info');
     }
 }
 
@@ -539,7 +568,7 @@ async function openKbMergeActionEmbedRequest() {
     if (input) input.value = ids.join('\n');
     kbCompareState = {
         ...kbCompareState,
-        source: 'dataloop',
+        source: 'external_embed',
         ids,
         duplicateIds: [],
         missingIds: [],
@@ -562,7 +591,7 @@ async function openKbMergeActionEmbedRequest() {
         changeSource: kbActionEmbedRequest?.changeSource || ''
     });
     if (typeof showToast === 'function') {
-        showToast(`已从 DataLoop 带入 ${ids.length} 条待合并 KB`, 'info');
+        showToast(`已从${kbActionEmbedRequest?.changeSource || '外部工作台'}带入 ${ids.length} 条待对比 KB`, 'info');
     }
 }
 
@@ -11724,11 +11753,18 @@ async function submitKBCompareMergeDraft() {
             changeSource: getKbActionChangeSource('知识对比')
         });
     } catch (e) {
+        const message = e?.message || String(e);
         kbCompareState.submitResult = {
             success: false,
-            message: `提交失败：${e?.message || String(e)}`
+            message: `提交失败：${message}`
         };
         if (typeof showToast === 'function') showToast(kbCompareState.submitResult.message, 'error');
+        postKbActionEmbedMessage('error', {
+            action: 'merge',
+            kbIds: draft?.ids || kbCompareState.ids || [],
+            changeSource: getKbActionChangeSource('知识对比'),
+            message
+        });
     } finally {
         kbCompareState.submittingDraft = false;
         renderKBCompareResults();
@@ -13994,6 +14030,7 @@ function closeKBEditModal(options = {}) {
         postKbEditEmbedMessage('closed', {
             kbId: kbEditEmbedRequest?.id || __kbEditDraftContextId || '',
             saved: kbEditEmbedSaved,
+            changeSource: kbEditEmbedRequest?.changeSource || '',
         });
     };
 
@@ -15210,7 +15247,6 @@ function __kbParseTagNames(input) {
 async function saveKBItem() {
     const { data, tagNames } = __kbEditBuildSubmitPayload();
     const savedDiffs = __kbEditBuildSavedDiffs();
-    const remoteUpdateTimeBefore = String((__kbEditCurrentPreviewItem || {}).update_time || '').trim();
     
     const btn = document.getElementById('saveKBItemBtn');
     __kbEditSaving = true;
@@ -15238,6 +15274,11 @@ async function saveKBItem() {
             console.error('[DEBUG] Save Failed:', errorMsg);
             console.error('[DEBUG] Full Response:', JSON.stringify(res, null, 2));
             alert('保存失败: ' + errorMsg);
+            postKbEditEmbedMessage('error', {
+                kbId: kbEditEmbedRequest?.id || data.question_wiki_id || '',
+                changeSource: kbEditEmbedRequest?.changeSource || '',
+                message: errorMsg,
+            });
             return;
         }
         
@@ -15280,10 +15321,12 @@ async function saveKBItem() {
         kbEditEmbedSaved = true;
         postKbEditEmbedMessage('saved', {
             kbId: savedWikiId,
+            changeSource: kbEditEmbedRequest?.changeSource || '',
             noChange: !!res.no_change,
-            diffs: savedDiffs,
-            remoteUpdateTimeBefore,
-            remoteUpdateTimeAfter: String(res.update_time || res.current_update_time || '').trim(),
+            changedFieldCount: Array.isArray(savedDiffs) ? savedDiffs.length : 0,
+            updateTime: String(res.update_time || res.current_update_time || '').trim(),
+            modLogOk: typeof res.mod_log_ok === 'boolean' ? res.mod_log_ok : undefined,
+            warning: String(res.warning || '').trim(),
         });
         const qualityContext = __kbEditQualityContext;
         closeKBEditModal({ force: true });
@@ -15298,6 +15341,11 @@ async function saveKBItem() {
         if (typeof loadModifications === 'function') loadModifications(1);
     } catch (e) {
         alert('保存异常: ' + e.message);
+        postKbEditEmbedMessage('error', {
+            kbId: kbEditEmbedRequest?.id || data.question_wiki_id || '',
+            changeSource: kbEditEmbedRequest?.changeSource || '',
+            message: e?.message || String(e),
+        });
     } finally {
         __kbEditSaving = false;
         btn.disabled = false;
@@ -20642,6 +20690,14 @@ function enableAllTableColumnResize() {
 window.addEventListener('DOMContentLoaded', async () => {
   kbEditEmbedRequest = getKbEditEmbedRequest();
   kbActionEmbedRequest = getKbActionEmbedRequest();
+  if (kbEditEmbedRequest || kbActionEmbedRequest) {
+    try {
+      await validateKbEmbedHostOrigin(kbEditEmbedRequest || kbActionEmbedRequest);
+    } catch (e) {
+      renderKbEmbedAccessError(e?.message || String(e));
+      return;
+    }
+  }
   if (kbEditEmbedRequest) {
     document.body.classList.add('kb-edit-embed-mode');
     bindKbEditEmbedHostListener();
