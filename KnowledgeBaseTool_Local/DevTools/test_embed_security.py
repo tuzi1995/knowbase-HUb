@@ -72,6 +72,39 @@ class TestEmbedSecurity(unittest.TestCase):
         self.assertIn('width: 100% !important;', block)
         self.assertIn('min-width: 0 !important;', block)
 
+    def test_compare_embed_uses_inner_scroll_container(self):
+        js = (self.APP_ROOT / 'link_viewer' / 'app_v8.js').read_text(encoding='utf-8')
+        css = (self.APP_ROOT / 'link_viewer' / 'extra_styles.css').read_text(encoding='utf-8')
+        html_selector = 'html.kb-action-embed-mode {'
+        html_block = css.split(html_selector, 1)[1].split('}', 1)[0]
+        body_selector = 'body.kb-action-embed-mode {'
+        body_block = css.split(body_selector, 1)[1].split('}', 1)[0]
+        self.assertIn("document.documentElement.classList.add('kb-action-embed-mode');", js)
+        self.assertIn('overflow: hidden;', html_block)
+        self.assertIn('height: 100vh;', body_block)
+        views_selector = 'body.kb-action-embed-mode #mainContent .workbench-views {'
+        views_block = css.split(views_selector, 1)[1].split('}', 1)[0]
+        self.assertIn('overflow-y: auto !important;', views_block)
+        self.assertIn('min-height: 0 !important;', views_block)
+        self.assertIn("document.querySelector('#mainContent .workbench-views')", js)
+
+    def test_compare_embed_keeps_panels_in_the_same_scroll_flow(self):
+        js = (self.APP_ROOT / 'link_viewer' / 'app_v8.js').read_text(encoding='utf-8')
+        css = (self.APP_ROOT / 'link_viewer' / 'extra_styles.css').read_text(encoding='utf-8')
+        self.assertIn('class="kb-compare-draft-footer"', js)
+        header_actions_selector = 'body.kb-action-embed-mode .kb-compare-draft-action-stack {'
+        header_actions_block = css.split(header_actions_selector, 1)[1].split('}', 1)[0]
+        self.assertIn('display: none !important;', header_actions_block)
+        import_selector = 'body.kb-action-embed-mode .kb-compare-import-panel {'
+        import_block = css.split(import_selector, 1)[1].split('}', 1)[0]
+        self.assertIn('position: static;', import_block)
+        self.assertIn('max-height: none;', import_block)
+        footer_selector = 'body.kb-action-embed-mode .kb-compare-draft-footer {'
+        footer_block = css.split(footer_selector, 1)[1].split('}', 1)[0]
+        self.assertIn('position: static;', footer_block)
+        self.assertNotIn('position: fixed;', footer_block)
+        self.assertNotIn('bottom:', footer_block)
+
 
 if __name__ == '__main__':
     unittest.main()

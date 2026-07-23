@@ -4453,8 +4453,14 @@ body.kb-edit-embed-mode #kbEditModal .kb-answer-meta-row {
     margin: 6px 12px 10px !important;
 }
 
+html.kb-action-embed-mode {
+    overflow: hidden;
+}
+
 body.kb-action-embed-mode {
-    overflow: auto;
+    min-height: 0;
+    height: 100vh;
+    overflow: hidden;
     background: #f4f7fb;
 }
 
@@ -4529,6 +4535,81 @@ body.kb-action-embed-mode .workbench-views {
 
 body.kb-action-embed-mode #kbCompareView .kb-compare-actions {
     display: none !important;
+}
+
+body.kb-action-embed-mode #mainContent,
+body.kb-action-embed-mode #mainContent .workbench-layout,
+body.kb-action-embed-mode #mainContent .workbench-main,
+body.kb-action-embed-mode #mainContent .workbench-content-panel {
+    height: 100vh !important;
+    min-height: 0 !important;
+}
+
+body.kb-action-embed-mode #mainContent {
+    overflow: hidden !important;
+}
+
+body.kb-action-embed-mode #mainContent .workbench-layout,
+body.kb-action-embed-mode #mainContent .workbench-main,
+body.kb-action-embed-mode #mainContent .workbench-content-panel {
+    overflow: hidden !important;
+}
+
+body.kb-action-embed-mode #mainContent .workbench-content-panel {
+    display: flex !important;
+    flex-direction: column !important;
+}
+
+body.kb-action-embed-mode #mainContent .workbench-views {
+    display: flex !important;
+    flex: 1 1 auto !important;
+    flex-direction: column !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+}
+
+body.kb-action-embed-mode .kb-compare-import-panel {
+    position: static;
+    max-height: none;
+    overflow: visible;
+}
+
+body.kb-action-embed-mode .kb-compare-draft-action-stack {
+    display: none !important;
+}
+
+.kb-compare-draft-footer {
+    display: none;
+}
+
+body.kb-action-embed-mode .kb-compare-draft-footer {
+    position: static;
+    width: 100%;
+    margin-top: 12px;
+    box-sizing: border-box;
+    min-height: 64px;
+    padding: 10px 14px;
+    border-top: 1px solid #CBD5E1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: #FFFFFF;
+    box-shadow: none;
+}
+
+body.kb-action-embed-mode .kb-compare-draft-footer > span {
+    color: #475569;
+    font-size: 12px;
+}
+
+body.kb-action-embed-mode .kb-compare-draft-footer > div {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 body.kb-embed-blocked {

@@ -17,7 +17,7 @@ import shutil
 import sys
 from array import array
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from datetime import datetime
 from urllib.parse import urlparse
 from flask import Flask, request, jsonify, send_from_directory, send_file, Response, stream_with_context
@@ -3710,6 +3710,127 @@ def _kb_compare_ai_confidence(value):
     return round(max(0.0, min(1.0, number)), 3)
 
 
+def _kb_compare_question_core(value):
+    """Normalize away generic question wording before comparing intent phrasing."""
+    text = _kb_compare_ai_text(value, 8000).lower()
+    for phrase in (
+        '麻烦问一下', '我想问一下', '请问一下', '麻烦问下', '想问一下', '想问下',
+        '是否可以', '该怎么办', '怎么办', '该如何', '该怎么', '该怎样',
+        '请问', '如何', '怎么', '怎样', '能不能', '能否', '可以吗', '行不行',
+    ):
+        text = text.replace(phrase, '')
+    return re.sub(r'[^0-9a-z\u4e00-\u9fff]+', '', text)
+
+
+def _kb_compare_questions_too_similar(left, right):
+    left_core = _kb_compare_question_core(left)
+    right_core = _kb_compare_question_core(right)
+    if not left_core or not right_core:
+        return False
+    if left_core == right_core:
+        return True
+    if min(len(left_core), len(right_core)) < 4:
+        return False
+
+    left_counts = Counter(left_core)
+    right_counts = Counter(right_core)
+    shared = sum((left_counts & right_counts).values())
+    overlap = (2 * shared) / (len(left_core) + len(right_core))
+    length_ratio = min(len(left_core), len(right_core)) / max(len(left_core), len(right_core))
+    return length_ratio >= 0.75 and overlap >= 0.88
+
+
+def _kb_compare_distinct_similar_questions(question, values):
+    items = _parse_similar_questions(values)
+    accepted = []
+    for item in items:
+        if _kb_compare_questions_too_similar(question, item):
+            continue
+        if any(_kb_compare_questions_too_similar(existing, item) for existing in accepted):
+            continue
+        accepted.append(item)
+    return accepted
+
+
+def _kb_compare_is_product_comparison_question(value):
+    text = _kb_compare_ai_text(value, 8000).lower()
+    return any(marker in text for marker in (
+        '产品对比', '型号对比', '对比', '比较', '区别', '差别', '差异', '相比',
+        '哪款', '哪个型号', '哪个好', '哪个适合', '更好', '更适合', '如何选择', '怎么选',
+        ' vs ', ' versus ',
+    ))
+
+
+def _kb_compare_product_scope_terms(records):
+    terms = []
+    seen = set()
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        for field in ('product_name', 'product_category_name'):
+            raw = _kb_compare_ai_text(record.get(field), 4000)
+            parts = re.split(r'[,，、/;；|\n]+', raw)
+            parts.extend(re.findall(r'[A-Za-z]+\d[A-Za-z0-9-]*', raw))
+            for part in parts:
+                term = part.strip().strip('[]{}()（）"\'')
+                key = term.lower()
+                if len(key) < 2 or key in seen:
+                    continue
+                seen.add(key)
+                terms.append(term)
+    return terms
+
+
+def _kb_compare_unneeded_product_terms(question, records):
+    text = _kb_compare_ai_text(question, 8000).lower()
+    matched = [term for term in _kb_compare_product_scope_terms(records) if term.lower() in text]
+    if _kb_compare_is_product_comparison_question(question) or ('还是' in text and len(matched) >= 2):
+        return []
+    return matched
+
+
+def _kb_compare_question_identity(value):
+    text = _kb_compare_ai_text(value, 8000).lower()
+    return re.sub(r'[^0-9a-z\u4e00-\u9fff]+', '', text)
+
+
+def _kb_compare_validate_coverage_checks(question, similar_questions, answer, raw_checks):
+    expected_questions = [question] + list(similar_questions or [])
+    expected = {
+        _kb_compare_question_identity(item): item
+        for item in expected_questions
+        if _kb_compare_question_identity(item)
+    }
+    if not isinstance(raw_checks, list):
+        raise ValueError('覆盖复检必须返回 coverage_checks 数组')
+
+    answer_identity = _kb_compare_question_identity(answer)
+    checks_by_key = {}
+    for raw in raw_checks:
+        if not isinstance(raw, dict):
+            continue
+        check_question = _kb_compare_ai_text(raw.get('question'), 8000)
+        key = _kb_compare_question_identity(check_question)
+        if not key or key not in expected or key in checks_by_key:
+            continue
+        if _kb_compare_ai_bool(raw.get('answerable')) is not True:
+            raise ValueError(f'覆盖复检未通过：答案不能完整回答“{expected[key]}”')
+        evidence = _kb_compare_ai_text(raw.get('evidence'), 2000)
+        evidence_identity = _kb_compare_question_identity(evidence)
+        if not evidence_identity or evidence_identity not in answer_identity:
+            raise ValueError(f'覆盖复检未通过：“{expected[key]}”缺少答案原文证据')
+        checks_by_key[key] = {
+            'question': expected[key],
+            'answerable': True,
+            'evidence': evidence,
+        }
+
+    missing = [label for key, label in expected.items() if key not in checks_by_key]
+    if missing:
+        raise ValueError(f'覆盖复检缺少问题：{"；".join(missing)}')
+    return [checks_by_key[_kb_compare_question_identity(item)] for item in expected_questions]
+
+
 def _kb_compare_ai_records(raw_records):
     if not isinstance(raw_records, list):
         return []
@@ -3757,11 +3878,18 @@ def kb_compare_ai_merge():
         '2. 如果功能、步骤、产品范围或限制条件存在无法消解的冲突，建议不合并。\n'
         '3. 产品型号不同不必然禁止合并，但答案必须能同时适用于所有记录；无法确认时不合并。\n'
         '4. 不得补造输入记录中不存在的按钮、能力、参数或结论。\n'
-        '5. 建议合并时，问题要能代表共同意图，答案只保留输入中可核验的事实，相似问题要去重并覆盖原问题的自然问法。\n'
-        '6. 其他字段（型号、分类、类型、治理、链接）由系统按原规则处理，你只能生成 question、answer、similar_questions。\n'
+        '5. 建议合并时，question 是代表共同内容的标准主问题，答案只保留输入中可核验的事实。\n'
+        '6. 除产品对比、型号差异、选型等必须点名对象的问题外，question 和 similar_questions 不得添加或保留产品型号、产品名称、产品分类；这些信息由记录字段承载，避免影响语义召回评分。\n'
+        '7. 如果原问题用斜杠、顿号或并列成分包含多个可独立提问的意图，而生成的 answer 能分别回答，应拆成多个单一问题：保留第一个或最具代表性的意图作为 question，其余意图分别放入 similar_questions，不要继续拼成一个复合问题。\n'
+        '8. 例如“G10主机的重量/基座的重量/主机和基座的净重/产品的毛重是多少？”应生成 question“主机重量是多少”，similar_questions 包含“基座重量是多少”“主机和基座的净重是多少”“产品的毛重是多少”；因为不是产品对比，问法中不保留 G10。\n'
+        '9. similar_questions 用于语义召回：每一条都必须能由生成的 answer 完整回答，可以是与 question 明显不同的用户问法、表达场景、切入角度，或从复合问题中拆出的独立维度。\n'
+        '10. 不要把 question 本身放入 similar_questions；不要只替换“如何/怎么”等少量词、调整语序或增删语气词；相似问题之间也不得近似重复。召回不要求文本完全一致。\n'
+        '11. 不得为了制造差异而扩大功能、产品、条件或答案适用边界。\n'
+        '12. 输出前必须逐条复检 question 和每条 similar_questions 是否能由 answer 完整回答。coverage_checks 必须覆盖全部问题，answerable 只能为 true，evidence 必须逐字引用 answer 中的对应原文；无法找到证据时应修正或删除该问题，不得虚构。\n'
+        '13. 其他字段（型号、分类、类型、治理、链接）由系统按原规则处理，你只能生成 question、answer、similar_questions；coverage_checks 仅作为复检证据。\n'
         '输出结构：\n'
-        '{"recommend_merge": true|false, "confidence": 0-1, "reason": "简洁原因", "conflicts": ["冲突点"], "question": "合并后问题", "answer": "合并后答案", "similar_questions": ["相似问题"]}\n'
-        '当 recommend_merge=false 时，question、answer、similar_questions 必须返回空字符串或空数组。'
+        '{"recommend_merge": true|false, "confidence": 0-1, "reason": "简洁原因", "conflicts": ["冲突点"], "question": "合并后问题", "answer": "合并后答案", "similar_questions": ["相似问题"], "coverage_checks": [{"question": "问题原文", "answerable": true, "evidence": "answer 中的原文片段"}]}\n'
+        '当 recommend_merge=false 时，question、answer 必须为空字符串，similar_questions、coverage_checks 必须为空数组。'
     )
     user_prompt = (
         f'当前主记录 ID：{base_id or records[0]["question_wiki_id"]}\n'
@@ -3787,9 +3915,29 @@ def kb_compare_ai_merge():
             confidence = _kb_compare_ai_confidence(result.get('confidence'))
             question = _kb_compare_ai_text(result.get('question'), 8000) if recommend_merge else ''
             answer = _kb_compare_ai_text(result.get('answer'), 30000) if recommend_merge else ''
-            similar_questions = _parse_similar_questions(result.get('similar_questions'))[:20] if recommend_merge else []
+            similar_questions = _kb_compare_distinct_similar_questions(
+                question,
+                result.get('similar_questions'),
+            )[:20] if recommend_merge else []
             if recommend_merge and (not question or not answer or not similar_questions):
                 raise ValueError('建议合并时必须同时返回问题、答案和相似问题')
+            coverage_checks = []
+            if recommend_merge:
+                questions = [question] + similar_questions
+                scoped_questions = [
+                    (item, _kb_compare_unneeded_product_terms(item, records))
+                    for item in questions
+                ]
+                scoped_questions = [(item, terms) for item, terms in scoped_questions if terms]
+                if scoped_questions:
+                    details = '；'.join(f'{item}（{",".join(terms)}）' for item, terms in scoped_questions)
+                    raise ValueError(f'普通问法不得包含产品型号、名称或分类：{details}')
+                coverage_checks = _kb_compare_validate_coverage_checks(
+                    question,
+                    similar_questions,
+                    answer,
+                    result.get('coverage_checks'),
+                )
 
             return jsonify({
                 'success': True,
@@ -3801,6 +3949,7 @@ def kb_compare_ai_merge():
                     'question': question,
                     'answer': answer,
                     'similar_questions': similar_questions,
+                    'coverage_checks': coverage_checks,
                     'base_id': base_id or records[0]['question_wiki_id'],
                     'source_ids': [record['question_wiki_id'] for record in records],
                 }
@@ -3808,7 +3957,11 @@ def kb_compare_ai_merge():
         except Exception as exc:
             last_error = exc
             if attempt < 2:
-                user_prompt += '\n\n请修正上一轮输出，只返回符合结构的严格 JSON。'
+                error_hint = str(exc).strip()[:500] if isinstance(exc, ValueError) else ''
+                user_prompt += (
+                    f'\n\n上一轮输出未通过校验：{error_hint}。' if error_hint else '\n\n上一轮输出未通过校验。'
+                )
+                user_prompt += '请修正后只返回符合结构的严格 JSON。'
 
     raw_message = str(last_error or '').strip()
     if 'AI 配置不完整' in raw_message:

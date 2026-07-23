@@ -53,3 +53,6 @@ backend/data/
 *.xlsx
 *.xls
 *.pkl
+
+.playwright-cli/
+test-results/

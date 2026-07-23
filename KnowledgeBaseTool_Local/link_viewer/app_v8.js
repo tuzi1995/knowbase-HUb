@@ -597,6 +597,7 @@ async function openKbMergeActionEmbedRequest() {
 
 async function openKbActionEmbedRequest() {
     if (!kbActionEmbedRequest) return false;
+    document.documentElement.classList.add('kb-action-embed-mode');
     document.body.classList.add('kb-action-embed-mode');
     try {
         if (kbActionEmbedRequest.type === 'delete') {
@@ -11375,6 +11376,13 @@ function renderKBCompareMergeDraft() {
                 </tbody>
             </table>
         </div>
+        <div class="kb-compare-draft-footer" aria-label="知识对比提交操作">
+            <span>已选择 ${selectedChangedFields.length} 个字段变更、${selectedDeleteCount} 条删除建议</span>
+            <div>
+                <button type="button" class="action-btn" onclick="openKBCompareDraftEditor()">编辑主记录</button>
+                <button type="button" class="primary-btn" onclick="submitKBCompareMergeDraft()" ${canSubmitDraft ? '' : 'disabled'}>${isSubmitting ? '提交中...' : '提交到修改记录'}</button>
+            </div>
+        </div>
     `;
     el.querySelectorAll('input[data-indeterminate="true"]').forEach(input => {
         input.indeterminate = true;
@@ -11471,6 +11479,10 @@ async function runKBCompareImport() {
     }
 
     renderKBCompareResults();
+    if (kbActionEmbedRequest?.type === 'merge') {
+        const views = document.querySelector('#mainContent .workbench-views');
+        if (views) views.scrollTop = 0;
+    }
 }
 
 function setKBCompareActiveField(fieldKey) {
@@ -20703,6 +20715,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     bindKbEditEmbedHostListener();
   }
   if (kbActionEmbedRequest) {
+    document.documentElement.classList.add('kb-action-embed-mode');
     document.body.classList.add('kb-action-embed-mode');
   }
 
