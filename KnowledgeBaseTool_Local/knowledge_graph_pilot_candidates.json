@@ -1,0 +1,114 @@
+[
+  {
+    "pilot": "密码-账号密码重置重复性",
+    "from_wiki_id": "ICWIKI202506230004",
+    "to_wiki_id": "ICWIKI202506230003",
+    "from_scope": {
+      "topic": "账号密码",
+      "scenario": "查询或找回",
+      "channel": "App",
+      "all_models_explicit": true,
+      "excluded_product_models": ["HOPE Pro"]
+    },
+    "to_scope": {
+      "topic": "账号密码",
+      "scenario": "查询或找回",
+      "channel": "App",
+      "all_models_explicit": true,
+      "excluded_product_models": ["HOPE Pro"]
+    },
+    "from_claims": {
+      "intent": "账号密码找回",
+      "conclusion": "无法查询或找回原账号密码，应在 App 登录页通过忘记密码和验证码重置"
+    },
+    "to_claims": {
+      "intent": "账号密码找回",
+      "conclusion": "无法查询或找回原账号密码，应在 App 登录页通过忘记密码和验证码重置"
+    },
+    "evidence": "两条生产知识的问题表达不同，但答案结论和操作步骤一致；实际型号范围为型号库除 HOPE Pro 外的 117 个型号。"
+  },
+  {
+    "pilot": "WiFi-频段支持真实冲突",
+    "from_wiki_id": "ICWIKI202604170050",
+    "to_wiki_id": "ICWIKI202511110001",
+    "from_scope": {
+      "topic": "WiFi 密码与配网",
+      "scenario": "连接 WiFi",
+      "product_models": ["G30S Pro", "G30S Pro铂金版", "P20 MAX"]
+    },
+    "to_scope": {
+      "topic": "WiFi 密码与配网",
+      "scenario": "连接 WiFi",
+      "product_models": ["G30S Pro", "G30S Pro铂金版", "P20 MAX"]
+    },
+    "from_claims": {
+      "intent": "WiFi 频段支持",
+      "conclusion": "G30S Pro、G30S Pro铂金版和 P20 MAX 支持 2.4G、5G 和双频合一 WiFi 配网",
+      "claim_key": "supported_wifi_bands",
+      "claim_value": "2.4g_5g_dual_band",
+      "mutually_exclusive": true
+    },
+    "to_claims": {
+      "intent": "WiFi 频段支持",
+      "conclusion": "设备仅支持 2.4G WiFi，5G 网络需要关闭或与 2.4G 分开设置",
+      "claim_key": "supported_wifi_bands",
+      "claim_value": "2.4g_only",
+      "mutually_exclusive": true
+    },
+    "evidence": "两条知识对同一组 3 个型号的 WiFi 频段支持给出不能同时成立的结论。"
+  },
+  {
+    "pilot": "WiFi-密码要求是重新配网前置",
+    "from_wiki_id": "ICWIKI202604170050",
+    "to_wiki_id": "ICWIKI202604170049",
+    "from_scope": {
+      "topic": "WiFi 密码与配网",
+      "scenario": "重新连接网络",
+      "product_models": ["G30S Pro", "G30S Pro铂金版", "P20 MAX"]
+    },
+    "to_scope": {
+      "topic": "WiFi 密码与配网",
+      "scenario": "重新连接网络",
+      "product_models": ["G30S Pro", "G30S Pro铂金版", "P20 MAX"]
+    },
+    "from_claims": {
+      "intent": "WiFi 密码要求",
+      "conclusion": "WiFi 名称和密码应符合字符、大小写与空格要求",
+      "outcome_keys": ["wifi_credentials_valid"]
+    },
+    "to_claims": {
+      "intent": "WiFi 重新配网",
+      "conclusion": "重置 WiFi 后在 App 重新添加设备并完成网络检查",
+      "precondition_keys": ["wifi_credentials_valid"]
+    },
+    "evidence": "重新配网答案明确要求先确认 WiFi 名称和密码格式，前者输出结果是后者前置条件。"
+  },
+  {
+    "pilot": "部件-主刷拆卸是错误5处理子流程",
+    "from_wiki_id": "ICWIKI202509020004",
+    "to_wiki_id": "ICWIKI202307243851",
+    "from_scope": {
+      "topic": "主刷维护",
+      "component": "主刷",
+      "product_models": ["P20", "P20 MAX", "P20 Plus", "P20 Ultra", "P20 Ultra Plus", "P20 Ultra活水版", "P20 净立方", "P20活水版"]
+    },
+    "to_scope": {
+      "topic": "主刷维护",
+      "component": "主刷",
+      "product_categories": ["扫地机"]
+    },
+    "from_claims": {
+      "intent": "部件拆卸",
+      "component": "主刷",
+      "conclusion": "主刷可按卡扣、轴承和安装方向步骤拆卸、清理并装回",
+      "procedure_steps": ["取下主刷与主刷罩", "清理主刷刷毛和轴承", "重新安装主刷与主刷罩"]
+    },
+    "to_claims": {
+      "intent": "故障处理",
+      "component": "主刷",
+      "conclusion": "错误5需先拆卸清理主刷，再检查方向、地毯场景和重启状态",
+      "procedure_steps": ["取下主刷与主刷罩", "清理主刷刷毛和轴承", "重新安装主刷与主刷罩", "检查主刷安装方向", "根据地毯场景设置禁区", "重启设备并观察"]
+    },
+    "evidence": "错误5处理的第一段完整包含主刷拆卸、清理和装回步骤，两条知识意图不同但流程存在包含。"
+  }
+]

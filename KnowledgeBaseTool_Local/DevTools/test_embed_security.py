@@ -2,7 +2,7 @@ import os
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import server
 
@@ -35,6 +35,43 @@ class TestEmbedSecurity(unittest.TestCase):
         self.assertFalse(untrusted.get_json()['allowed'])
         self.assertEqual(missing.status_code, 400)
 
+    def test_internal_v1_export_rejects_non_loopback_requests(self):
+        response = self.client.get(
+            '/api/internal/kb/v1/export',
+            environ_base={'REMOTE_ADDR': '10.0.0.8'},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_internal_v1_export_requires_configured_token(self):
+        with patch.dict(os.environ, {'KMATRIX_INTERNAL_READ_TOKEN': 'test-token'}):
+            missing = self.client.get('/api/internal/kb/v1/export')
+        self.assertEqual(missing.status_code, 403)
+
+    def test_internal_v1_export_returns_read_only_csv(self):
+        fake_client = Mock()
+        fake_client.select_all.return_value = [{
+            'question_wiki_id': 'ICWIKI001',
+            'question': '如何使用？',
+            'answer': '请按说明操作。',
+            'similar_questions': ['怎么使用'],
+            'image_urls': [],
+        }]
+        with patch.dict(os.environ, {'KMATRIX_INTERNAL_READ_TOKEN': 'test-token'}), patch.object(
+            server,
+            'get_supabase_client',
+            return_value=fake_client,
+        ):
+            response = self.client.get(
+                '/api/internal/kb/v1/export',
+                headers={'X-KMatrix-Internal-Token': 'test-token'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get('X-KB-Record-Count'), '1')
+        self.assertIn('text/csv', response.headers.get('Content-Type', ''))
+        self.assertIn('ICWIKI001', response.get_data(as_text=True))
+        fake_client.select_all.assert_called_once()
+
     def test_root_response_limits_frame_ancestors(self):
         with patch.dict(os.environ, {
             'KMATRIX_EMBED_ALLOWED_ORIGINS': 'http://127.0.0.1:5175,https://example.test',
@@ -63,6 +100,20 @@ class TestEmbedSecurity(unittest.TestCase):
     def test_modification_source_filter_contains_detection_tool(self):
         html = (self.APP_ROOT / 'link_viewer' / 'index.html').read_text(encoding='utf-8')
         self.assertIn('<option value="知识库内容检测工具">知识库内容检测工具</option>', html)
+
+    def test_edit_save_receipt_precedes_optional_tag_sync(self):
+        js = (self.APP_ROOT / 'link_viewer' / 'app_v8.js').read_text(encoding='utf-8')
+        save_start = js.index('async function saveKBItem()')
+        receipt = js.index("postKbEditEmbedMessage('saved'", save_start)
+        tag_sync = js.index("await api('/kb/item/tags'", save_start)
+        self.assertLess(receipt, tag_sync)
+
+    def test_edit_ready_message_carries_current_record_review_state(self):
+        js = (self.APP_ROOT / 'link_viewer' / 'app_v8.js').read_text(encoding='utf-8')
+        ready_start = js.index("postKbEditEmbedMessage('ready'")
+        ready_block = js[ready_start:js.index('return true;', ready_start)]
+        self.assertIn("reviewStatus: String(item?.review_status || '').trim()", ready_block)
+        self.assertIn("updateTime: String(item?.update_time || '').trim()", ready_block)
 
     def test_compare_embed_forces_workbench_to_single_column(self):
         css = (self.APP_ROOT / 'link_viewer' / 'extra_styles.css').read_text(encoding='utf-8')

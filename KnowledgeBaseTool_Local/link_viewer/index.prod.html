@@ -5,13 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>K-Matrix 助手</title>
   
-  <!-- Google Fonts - 设计系统字体 -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Calistoga&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  
-  <!-- 设计系统 CSS - 必须在其他样式之前加载 -->
-  <link rel="stylesheet" href="design-system.css?v=2">
+  <!-- 设计系统 CSS - 使用本地系统字体，避免外网字体阻塞首屏渲染 -->
+  <link rel="stylesheet" href="design-system.css?v=3">
   
   <!-- 原有样式 -->
   <link rel="stylesheet" href="styles.min.css">
@@ -332,7 +327,9 @@
         <input type="password" id="password" placeholder="密码" class="input-modern" />
         <button id="loginBtn" class="primary-btn btn-primary-gradient btn-lg">登录</button>
       </div>
+      <p id="loginStatus" class="login-status" role="status" aria-live="polite"></p>
     </section>
+    <script src="login_bootstrap.js?v=1"></script>
 
     <section id="mainContent" class="d-none">
       <div class="header-info workbench-header">
@@ -384,6 +381,7 @@
                 <button onclick="switchTab('kbView')" class="tab-modern workbench-nav-btn active" id="tab-kbView">知识库管理</button>
                 <button onclick="switchTab('kbDuplicateCheckView')" class="tab-modern workbench-nav-btn" id="tab-kbDuplicateCheckView">知识查重</button>
                 <button onclick="switchTab('kbCompareView')" class="tab-modern workbench-nav-btn" id="tab-kbCompareView">知识对比</button>
+                <button onclick="switchTab('knowledgeGraphView')" class="tab-modern workbench-nav-btn" id="tab-knowledgeGraphView">知识图谱</button>
                 <button onclick="switchTab('matrixView')" class="tab-modern workbench-nav-btn" id="tab-matrixView">机型矩阵管理</button>
                 <button onclick="switchTab('linkView')" class="tab-modern workbench-nav-btn" id="tab-linkView">多媒体预览</button>
               </div>
@@ -393,6 +391,7 @@
                 <button onclick="switchTab('scoringView')" class="tab-modern workbench-nav-btn" id="tab-scoringView">知识库评分</button>
                 <button onclick="switchTab('governanceView')" class="tab-modern workbench-nav-btn" id="tab-governanceView">知识库治理</button>
                 <button onclick="switchTab('controlCenterView')" class="tab-modern workbench-nav-btn" id="tab-controlCenterView">管控中心</button>
+                <button onclick="switchTab('parameterCheckView')" class="tab-modern workbench-nav-btn" id="tab-parameterCheckView">参数校对</button>
               </div>
 
               <div class="workbench-nav-group" data-nav-group="工具与映射">
@@ -453,10 +452,38 @@
                     <button id="kbPreviewSelectedBtn" class="action-btn btn-secondary-outline">👁️ 仅预览勾选</button>
                     <button id="kbCompareSelectedBtn" onclick="openKBCompareFromSelection()" class="action-btn btn-secondary-outline">🔍 对比选中</button>
                     <button onclick="showRevisionModal()" class="success-btn btn-success-solid" title="将所有修改中/删除中的状态重置为未调整">✅ 已完成修订</button>
+                    <button onclick="openActivityArchiveModal()" class="action-btn btn-secondary-outline" title="保存选中活动内容并从主知识库移除">📦 暂存活动内容</button>
+                    <button onclick="toggleActivityArchivePanel()" class="action-btn btn-secondary-outline" title="查看并恢复已暂存的活动内容">🗂️ 已暂存活动 <span id="activityArchiveCount">0</span></button>
                     <button onclick="deleteSelectedKBItems()" class="danger-btn btn-danger-solid">🗑️ 删除选中</button>
                     <button onclick="switchTab('dataSettingsView')" class="action-btn btn-secondary-outline">⚙️ 数据设置</button>
                 </div>
             </div>
+
+            <section id="activityArchivePanel" class="gov-filter-panel d-none" style="margin-top: 12px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
+                    <strong style="color:#1e293b;">已暂存活动</strong>
+                    <div class="kb-cell-actions-inline">
+                        <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="loadActivityArchives()" title="刷新"><i class="fas fa-rotate"></i></button>
+                        <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="toggleActivityArchivePanel(false)" title="关闭"><i class="fas fa-xmark"></i></button>
+                    </div>
+                </div>
+                <div class="table-container min-h-200 mb-0">
+                    <table class="kb-table">
+                        <thead>
+                            <tr>
+                                <th>活动批次</th>
+                                <th style="width:100px;">内容数</th>
+                                <th style="width:120px;">状态</th>
+                                <th style="width:160px;">暂存时间</th>
+                                <th style="width:100px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="activityArchiveTableBody">
+                            <tr><td colspan="5" class="empty-message">尚未读取暂存活动</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
 
             <!-- Import Panel (Hidden by default) -->
             <div id="importKBPanel" class="gov-filter-panel d-none" style="background: #f8fafc; border-color: #cbd5e1;">
@@ -481,16 +508,22 @@
 	                    </div>
                     <div>
                         <div style="margin-bottom: 8px; font-size: 13px; font-weight: 600;">选择 Excel 文件:</div>
-                        <div style="display: flex; gap: 8px; align-items: center;">
+                        <div class="kb-import-file-actions">
                             <input type="file" id="importFileKB" accept=".xlsx,.xls,.csv" class="input-modern" style="width: 240px; min-height: 36px; padding: 4px 8px;">
+                            <button type="button" id="pullLatestMailBtn" onclick="pullLatestKBMail()" class="action-btn btn-secondary-outline" aria-controls="kbMailPullResult" style="min-height: 36px; padding: 4px 12px;">
+                                <i class="fas fa-envelope-open-text" aria-hidden="true"></i><span>拉取最新邮件</span>
+                            </button>
                             <button onclick="previewCheckDuplicates()" class="action-btn btn-secondary-outline" style="min-height: 36px; padding: 4px 12px;">🔍 查重预览</button>
                             <button onclick="importKB()" id="importBtn" class="primary-btn btn-primary-gradient" style="min-height: 36px; padding: 4px 12px;">开始导入</button>
                             <button onclick="downloadTemplate()" class="action-btn btn-secondary-outline" style="min-height: 36px; padding: 4px 12px;">📥 模板</button>
                         </div>
+                        <div id="kbMailPullStatus" class="kb-mail-pull-status" role="status" aria-live="polite"></div>
+                        <div id="kbMailPullResult" class="kb-mail-pull-result d-none"></div>
                     </div>
                 </div>
                 <div id="checkResult" class="d-none" style="margin-top: 12px; max-height: 200px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; background: white; border-radius: 8px;"></div>
                 <span id="importStatus" class="text-muted" style="margin-top: 8px; display: block; font-size: 13px;"></span>
+                <div id="kbImportSyncAction" class="mapping-actions wrap-actions" style="margin-top: 8px; font-size: 13px;"></div>
             </div>
 
             <!-- Filter Section -->
@@ -1058,8 +1091,299 @@
               </div>
           </form>
       </dialog>
+      <!-- Tab Content: Parameter Check -->
+      <div id="parameterCheckView" class="d-none">
+        <div class="kb-section parameter-check-section">
+          <div class="parameter-check-command-row">
+            <div>
+              <h3>参数校对结果</h3>
+              <p>按参数功能发起全量扫描，后台会自动分段执行并持续写入候选。复核池汇总全部 AI 候选，人工可在扫描未结束时修正初判；工作台不会自动修改知识正文或参数清单。</p>
+            </div>
+            <div class="parameter-check-command-actions">
+              <label class="parameter-check-run-select" for="parameterCheckRunSelect">
+                <span>查看运行</span>
+                <select id="parameterCheckRunSelect" class="input-modern" onchange="changeParameterCheckRun(this.value)" aria-label="选择校对运行">
+                  <option value="">正在加载运行记录</option>
+                </select>
+              </label>
+              <label id="parameterCheckAiViewField" class="parameter-check-run-select" for="parameterCheckAiView">
+                <span>AI 视图</span>
+                <select id="parameterCheckAiView" class="input-modern" onchange="changeParameterCheckAiView(this.value)" aria-label="选择 AI 记录视图">
+                  <option value="queue">全量复核池</option>
+                  <option value="candidates">本次扫描候选</option>
+                  <option value="audit">扫描审计</option>
+                </select>
+              </label>
+              <label class="parameter-check-run-select parameter-check-scan-select" for="parameterCheckScanFeatureId">
+                <span>扫描功能</span>
+                <select id="parameterCheckScanFeatureId" class="input-modern" aria-label="选择要全量扫描的参数功能">
+                  <option value="">正在读取可扫描功能</option>
+                </select>
+              </label>
+              <button type="button" id="parameterCheckAiFeatureScanBtn" class="action-btn btn-secondary-outline parameter-check-refresh-btn" onclick="runParameterCheckAiFeatureScan()" title="按所选参数功能发起全量扫描，后台会自动分段处理">
+                <i class="fas fa-magic" aria-hidden="true"></i><span>扫描该功能</span>
+              </button>
+              <button type="button" class="action-btn btn-secondary-outline parameter-check-refresh-btn" onclick="loadParameterCheckOverview({ force: true })" title="刷新参数校对数据">
+                <i class="fas fa-rotate" aria-hidden="true"></i><span>刷新</span>
+              </button>
+            </div>
+          </div>
 
+          <div id="parameterCheckRuntimeStatus" class="parameter-check-runtime-status" role="status" aria-live="polite">正在读取全量复核池...</div>
 
+          <dl id="parameterCheckSummary" class="parameter-check-summary-strip is-five-columns" aria-label="校对结果汇总">
+            <div><dt>全量候选</dt><dd>-</dd></div>
+            <div><dt>AI 初判与快照一致</dt><dd>-</dd></div>
+            <div><dt>待人工复核</dt><dd>-</dd></div>
+            <div><dt>已人工处理</dt><dd>-</dd></div>
+            <div><dt>运行中扫描</dt><dd>-</dd></div>
+          </dl>
+
+          <div class="gov-filter-panel parameter-check-filter-panel">
+            <div id="parameterCheckFilterGrid" class="parameter-check-filter-grid">
+              <label class="parameter-check-filter-field" for="parameterCheckResultStatus">
+                <span>比较状态</span>
+                <select id="parameterCheckResultStatus" class="input-modern" onchange="loadParameterCheckOverview({ page: 1 })">
+                  <option value="">全部状态</option>
+                  <option value="conflict">存在冲突</option>
+                  <option value="needs_parameter_data">待补参数</option>
+                  <option value="consistent">结果一致</option>
+                </select>
+              </label>
+              <label class="parameter-check-filter-field" for="parameterCheckModelId">
+                <span>适用型号</span>
+                <select id="parameterCheckModelId" class="input-modern" onchange="loadParameterCheckOverview({ page: 1 })">
+                  <option value="">全部型号</option>
+                </select>
+              </label>
+              <label class="parameter-check-filter-field" for="parameterCheckFeatureId">
+                <span>参数功能</span>
+                <select id="parameterCheckFeatureId" class="input-modern" onchange="loadParameterCheckOverview({ page: 1 })">
+                  <option value="">全部功能</option>
+                </select>
+              </label>
+              <label class="parameter-check-filter-field parameter-check-filter-wiki" for="parameterCheckWikiId">
+                <span>知识 Wiki ID</span>
+                <input id="parameterCheckWikiId" class="input-modern" type="search" placeholder="例如：ICWIKI202307246340" onkeydown="if (event.key === 'Enter') loadParameterCheckOverview({ page: 1 })">
+              </label>
+              <div class="parameter-check-filter-actions">
+                <button type="button" class="primary-btn" onclick="loadParameterCheckOverview({ page: 1 })">应用筛选</button>
+                <button type="button" class="action-btn btn-secondary-outline" onclick="resetParameterCheckFilters()">重置</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="table-container parameter-check-table-wrap">
+            <table class="kb-table parameter-check-table">
+              <thead id="parameterCheckTableHead">
+                <tr>
+                  <th>人工状态</th>
+                  <th>型号</th>
+                  <th>参数功能</th>
+                  <th>参考证据</th>
+                  <th>知识 Wiki ID</th>
+                  <th>KB 待核查声明</th>
+                  <th>AI 初判</th>
+                  <th>快照比对</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="parameterCheckTableBody">
+                <tr><td colspan="9" class="empty-message">正在读取参数校对结果...</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pagination-container parameter-check-pagination">
+            <span id="parameterCheckPageInfo" class="page-info">共 0 条</span>
+            <div class="pagination-right">
+              <button type="button" onclick="changeParameterCheckPage(-1)" id="prevParameterCheckPageBtn" disabled class="pagination-btn btn-pagination-modern">上一页</button>
+              <button type="button" onclick="changeParameterCheckPage(1)" id="nextParameterCheckPageBtn" disabled class="pagination-btn btn-pagination-modern">下一页</button>
+            </div>
+          </div>
+
+          <section id="parameterCheckDetail" class="parameter-check-detail" aria-live="polite">
+            <div class="parameter-check-detail-empty">选择一条结果查看知识原文、参数值和判断依据。</div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Tab Content: Knowledge Graph -->
+      <div id="knowledgeGraphView" class="d-none">
+        <div class="kb-section knowledge-graph-section">
+          <div class="knowledge-graph-workbench-head">
+            <div><h3>知识图谱</h3><p>先按品类与主题发现范围和治理状态；单条 Wiki ID 证据仍在关系复核中查看。</p></div>
+            <div class="knowledge-graph-view-tabs" role="tablist" aria-label="知识图谱二级视图">
+              <button id="knowledgeGraphCatalogTab" class="action-btn primary-btn" type="button" role="tab" aria-selected="true" onclick="switchKnowledgeGraphSubView('catalog')"><i class="fas fa-table-cells-large" aria-hidden="true"></i><span>品类图谱工作台</span></button>
+              <button id="knowledgeGraphReviewTab" class="action-btn btn-secondary-outline" type="button" role="tab" aria-selected="false" onclick="switchKnowledgeGraphSubView('review')"><i class="fas fa-clipboard-check" aria-hidden="true"></i><span>关系复核</span></button>
+            </div>
+          </div>
+
+          <section id="knowledgeGraphCatalogView" class="knowledge-graph-catalog-view" role="tabpanel" aria-labelledby="knowledgeGraphCatalogTab">
+            <div class="knowledge-graph-catalog-intro">
+              <div><h4>品类总览</h4><p>产品品类只按已配置的产品矩阵归属；未登记产品范围的知识不会被推断为全量适用。</p></div>
+              <button type="button" class="icon-btn" onclick="loadKnowledgeGraphCatalog({ force: true })" title="刷新品类总览" aria-label="刷新品类总览"><i class="fas fa-rotate" aria-hidden="true"></i></button>
+            </div>
+            <div id="knowledgeGraphCatalogStatus" class="knowledge-graph-status" role="status" aria-live="polite">正在读取品类总览...</div>
+            <dl id="knowledgeGraphCatalogSummary" class="knowledge-graph-summary knowledge-graph-catalog-summary" aria-label="品类图谱工作台概览">
+              <div><dt>已纳入知识</dt><dd>-</dd></div><div><dt>产品适用关系</dt><dd>-</dd></div><div><dt>待复核关系</dt><dd>-</dd></div><div><dt>范围未知</dt><dd>-</dd></div>
+            </dl>
+            <div class="table-container knowledge-graph-table-wrap">
+              <table class="kb-table knowledge-graph-table knowledge-graph-catalog-table">
+                <thead><tr><th>产品品类</th><th>知识数</th><th>产品适用关系</th><th>关系状态</th><th>主题</th><th>范围未知</th><th>进入</th></tr></thead>
+                <tbody id="knowledgeGraphCatalogBody"><tr><td colspan="7" class="empty-message">正在读取品类图谱工作台...</td></tr></tbody>
+              </table>
+            </div>
+            <section class="knowledge-graph-attention-panel" aria-labelledby="knowledgeGraphAttentionTitle">
+              <div class="knowledge-graph-panel-head knowledge-graph-attention-head"><div><h4 id="knowledgeGraphAttentionTitle">待补主题与范围</h4><p>只列出缺少现有侧车主题或已配置产品范围的知识，不根据题目文本推断，也不直接改写来源。</p></div><button type="button" class="icon-btn" onclick="loadKnowledgeGraphAttentionQueue({ force: true })" title="刷新待补清单" aria-label="刷新待补清单"><i class="fas fa-rotate" aria-hidden="true"></i></button></div>
+              <div class="knowledge-graph-attention-controls">
+                <label for="knowledgeGraphAttentionCategory">品类<select id="knowledgeGraphAttentionCategory" class="input-modern" onchange="updateKnowledgeGraphAttentionFilters()"><option value="">全部品类</option></select></label>
+                <label for="knowledgeGraphAttentionReason">原因<select id="knowledgeGraphAttentionReason" class="input-modern" onchange="updateKnowledgeGraphAttentionFilters()"><option value="all">全部待补项</option><option value="topic_missing">待归类</option><option value="topic_stale">主题待复核</option><option value="topic_vocabulary_stale">词表待复核</option><option value="scope_unknown">范围未知</option></select></label>
+              </div>
+              <div id="knowledgeGraphAttentionStatus" class="knowledge-graph-status" role="status" aria-live="polite">正在读取待补清单...</div>
+              <div class="table-container knowledge-graph-table-wrap"><table class="kb-table knowledge-graph-table knowledge-graph-attention-table"><thead><tr><th>Wiki ID</th><th>问题</th><th>当前品类</th><th>当前主题</th><th>待补原因</th><th>进入复核</th></tr></thead><tbody id="knowledgeGraphAttentionBody"><tr><td colspan="6" class="empty-message">正在读取待补清单...</td></tr></tbody></table></div>
+              <div class="knowledge-graph-attention-pagination"><span id="knowledgeGraphAttentionPageMeta"></span><button id="knowledgeGraphAttentionPrevious" type="button" class="icon-btn" onclick="changeKnowledgeGraphAttentionPage(-1)" title="上一页" aria-label="上一页"><i class="fas fa-chevron-left" aria-hidden="true"></i></button><button id="knowledgeGraphAttentionNext" type="button" class="icon-btn" onclick="changeKnowledgeGraphAttentionPage(1)" title="下一页" aria-label="下一页"><i class="fas fa-chevron-right" aria-hidden="true"></i></button></div>
+              <section id="knowledgeGraphTopicAssignmentPanel" class="knowledge-graph-topic-assignment" hidden aria-live="polite"></section>
+            </section>
+            <section class="knowledge-graph-batches-panel" aria-labelledby="knowledgeGraphBatchesTitle">
+              <div class="knowledge-graph-panel-head knowledge-graph-batches-head"><div><h4 id="knowledgeGraphBatchesTitle">候选批次</h4><p>批次只汇总图谱侧车中的候选及其当前复核状态；进入单条关系复核后才可人工处理。</p></div><button type="button" class="icon-btn" onclick="loadKnowledgeGraphCandidateBatches({ force: true })" title="刷新候选批次" aria-label="刷新候选批次"><i class="fas fa-rotate" aria-hidden="true"></i></button></div>
+              <div id="knowledgeGraphBatchesStatus" class="knowledge-graph-status" role="status" aria-live="polite">正在读取候选批次...</div>
+              <div class="table-container knowledge-graph-table-wrap"><table class="kb-table knowledge-graph-table knowledge-graph-batches-table"><thead><tr><th>批次</th><th>品类与主题</th><th>候选与进度</th><th>状态</th><th>创建时间</th><th>查看</th></tr></thead><tbody id="knowledgeGraphBatchesBody"><tr><td colspan="6" class="empty-message">正在读取候选批次...</td></tr></tbody></table></div>
+              <section id="knowledgeGraphBatchDetail" class="knowledge-graph-batch-detail" hidden aria-live="polite"></section>
+            </section>
+            <section id="knowledgeGraphTopicPanel" class="knowledge-graph-topic-panel" hidden aria-live="polite">
+              <div class="knowledge-graph-panel-head knowledge-graph-topic-head"><div><h4 id="knowledgeGraphTopicTitle">主题矩阵</h4><p id="knowledgeGraphTopicMeta"></p></div><button type="button" class="icon-btn" onclick="closeKnowledgeGraphTopics()" title="关闭主题矩阵" aria-label="关闭主题矩阵"><i class="fas fa-xmark" aria-hidden="true"></i></button></div>
+              <div class="knowledge-graph-preview-command"><span>选择 1 至 5 个已归类主题，预览规则候选；预览不会创建关系。</span><button id="knowledgeGraphCatalogPreviewButton" type="button" class="action-btn btn-secondary-outline" onclick="previewKnowledgeGraphCatalogCandidates()"><i class="fas fa-eye" aria-hidden="true"></i><span>预览候选</span></button></div>
+              <div class="table-container knowledge-graph-table-wrap"><table class="kb-table knowledge-graph-table knowledge-graph-topic-table"><thead><tr><th>主题</th><th>知识数</th><th>产品适用关系</th><th>待复核</th><th>当前有效</th><th>治理项</th><th>知识</th><th>预览</th></tr></thead><tbody id="knowledgeGraphTopicsBody"></tbody></table></div>
+              <div id="knowledgeGraphTopicKnowledge" class="knowledge-graph-topic-knowledge"></div>
+              <section id="knowledgeGraphCatalogCandidatePreview" class="knowledge-graph-topic-knowledge" hidden aria-live="polite"></section>
+            </section>
+          </section>
+
+          <div id="knowledgeGraphReviewView" class="d-none" role="tabpanel" aria-labelledby="knowledgeGraphReviewTab">
+          <div class="knowledge-graph-command-row">
+            <div>
+              <h3>知识关系复核</h3>
+              <p>查询知识的机型影响与关系记录；候选只进入复核池，不会修改知识正文或产品矩阵。</p>
+            </div>
+            <div class="knowledge-graph-command-actions">
+              <label class="knowledge-graph-search-field" for="knowledgeGraphWikiId">
+                <span>知识 Wiki ID</span>
+                <input id="knowledgeGraphWikiId" class="input-modern" type="search" placeholder="输入 Wiki ID" onkeydown="if (event.key === 'Enter') loadKnowledgeGraph()">
+              </label>
+              <button type="button" class="primary-btn" onclick="loadKnowledgeGraph()" title="查询知识影响和关系">
+                <i class="fas fa-search" aria-hidden="true"></i><span>查询</span>
+              </button>
+              <button type="button" class="action-btn btn-secondary-outline" onclick="previewKnowledgeGraphBackfill()" title="只读取来源表并生成差异报告">
+                <i class="fas fa-list-check" aria-hidden="true"></i><span>回填预览</span>
+              </button>
+              <button type="button" class="icon-btn" onclick="loadKnowledgeGraph({ force: true })" title="刷新图谱数据" aria-label="刷新图谱数据">
+                <i class="fas fa-rotate" aria-hidden="true"></i>
+              </button>
+            </div>
+          </div>
+
+          <div id="knowledgeGraphStatus" class="knowledge-graph-status" role="status" aria-live="polite">正在读取关系复核概览...</div>
+
+          <dl id="knowledgeGraphSummary" class="knowledge-graph-summary" aria-label="图谱概览">
+            <div><dt>图谱节点</dt><dd>-</dd></div>
+            <div><dt>待复核候选</dt><dd>-</dd></div>
+            <div><dt>当前有效关系</dt><dd>-</dd></div>
+            <div><dt>审计事件</dt><dd>-</dd></div>
+          </dl>
+
+          <section id="knowledgeGraphDetail" class="knowledge-graph-detail" aria-live="polite">
+            <div class="knowledge-graph-empty">输入一条 Wiki ID 查看该知识的产品影响和关系记录。</div>
+          </section>
+
+          <section class="knowledge-graph-candidate-panel">
+            <div class="knowledge-graph-panel-head">
+              <div>
+                <h4>生成关系候选</h4>
+                <p>按“起点知识 → 目标知识”填写。内容关系与流程关系分开判断，结果只进入待复核池。</p>
+              </div>
+              <div class="knowledge-graph-panel-actions">
+                <button type="button" class="action-btn btn-secondary-outline" onclick="expireStaleKnowledgeGraphCandidates()" title="核对知识内容版本并生成重新复核候选">
+                  <i class="fas fa-clock-rotate-left" aria-hidden="true"></i><span>检查失效关系</span>
+                </button>
+                <button type="button" id="knowledgeGraphCandidateToggle" class="action-btn btn-secondary-outline knowledge-graph-candidate-toggle" onclick="toggleKnowledgeGraphCandidatePanel()" aria-expanded="false" aria-controls="knowledgeGraphCandidateBody" title="展开生成候选">
+                  <i class="fas fa-chevron-down" aria-hidden="true"></i><span>展开生成候选</span>
+                </button>
+              </div>
+            </div>
+            <div id="knowledgeGraphCandidateBody" class="knowledge-graph-candidate-grid" hidden>
+              <label for="knowledgeGraphFromWiki"><span>起点知识 Wiki ID</span><input id="knowledgeGraphFromWiki" class="input-modern" type="text" placeholder="起点 Wiki ID"></label>
+              <label for="knowledgeGraphToWiki"><span>目标知识 Wiki ID</span><input id="knowledgeGraphToWiki" class="input-modern" type="text" placeholder="目标 Wiki ID"></label>
+              <label for="knowledgeGraphFromScope"><span>起点适用范围 JSON</span><textarea id="knowledgeGraphFromScope" class="input-modern knowledge-graph-json" spellcheck="false" placeholder='{"topic":"主刷维护","product_models":["P20"],"component":"主刷"}'></textarea></label>
+              <label for="knowledgeGraphToScope"><span>目标适用范围 JSON</span><textarea id="knowledgeGraphToScope" class="input-modern knowledge-graph-json" spellcheck="false" placeholder='{"topic":"主刷维护","product_categories":["扫地机"],"component":"主刷"}'></textarea></label>
+              <label for="knowledgeGraphFromClaims"><span>起点关键结论 JSON</span><textarea id="knowledgeGraphFromClaims" class="input-modern knowledge-graph-json" spellcheck="false" placeholder='{"intent":"部件拆卸","conclusion":"...","procedure_steps":["..."]}'></textarea></label>
+              <label for="knowledgeGraphToClaims"><span>目标关键结论 JSON</span><textarea id="knowledgeGraphToClaims" class="input-modern knowledge-graph-json" spellcheck="false" placeholder='{"intent":"故障处理","conclusion":"...","procedure_steps":["...","..."]}'></textarea></label>
+              <label class="knowledge-graph-evidence-field" for="knowledgeGraphEvidence"><span>补充证据</span><textarea id="knowledgeGraphEvidence" class="input-modern" placeholder="记录人工发现的范围或结论依据。"></textarea></label>
+              <div class="knowledge-graph-candidate-action">
+                <button type="button" class="primary-btn" onclick="generateKnowledgeGraphCandidate()">
+                  <i class="fas fa-code-branch" aria-hidden="true"></i><span>生成候选</span>
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section class="knowledge-graph-edges-panel">
+            <div class="knowledge-graph-panel-head">
+              <div>
+                <h4>关系复核池</h4>
+                <p>确认、驳回和过期均会保留追加式事件记录。</p>
+              </div>
+              <label class="knowledge-graph-filter" for="knowledgeGraphReviewStatus"><span>状态</span><select id="knowledgeGraphReviewStatus" class="input-modern" onchange="loadKnowledgeGraphEdges()"><option value="candidate">待复核候选</option><option value="effective">当前有效</option><option value="confirmed">全部已确认</option><option value="rejected">已驳回</option><option value="expired">已过期/被修订</option></select></label>
+            </div>
+            <div class="table-container knowledge-graph-table-wrap">
+              <table class="kb-table knowledge-graph-table">
+                <thead><tr><th>起点</th><th>关系</th><th>目标</th><th>状态</th><th>置信度</th><th>依据</th><th>审核</th></tr></thead>
+                <tbody id="knowledgeGraphEdgesBody"><tr><td colspan="7" class="empty-message">正在读取关系复核池...</td></tr></tbody>
+              </table>
+            </div>
+            <div id="knowledgeGraphReviewPanel" class="knowledge-graph-review-panel d-none">
+              <div class="knowledge-graph-review-head"><strong id="knowledgeGraphReviewTitle">未选择候选</strong><span id="knowledgeGraphReviewMeta"></span></div>
+              <div id="knowledgeGraphReviewEvidence" class="knowledge-graph-review-evidence" aria-label="候选关系证据对照"></div>
+              <div id="knowledgeGraphGovernanceGuide" class="knowledge-graph-governance-guide" hidden></div>
+              <div id="knowledgeGraphRevisionPanel" class="knowledge-graph-revision-panel" hidden>
+                <div class="knowledge-graph-revision-head">
+                  <strong>人工调整关系</strong>
+                  <button type="button" class="icon-btn" onclick="toggleKnowledgeGraphRevisionPanel(false)" title="关闭关系调整" aria-label="关闭关系调整"><i class="fas fa-xmark" aria-hidden="true"></i></button>
+                </div>
+                <div class="knowledge-graph-revision-grid">
+                  <label for="knowledgeGraphRevisionRelationType"><span>修订后关系</span><select id="knowledgeGraphRevisionRelationType" class="input-modern">
+                    <option value="SPECIALIZES">细化</option>
+                    <option value="EXCEPTION_TO">条件例外</option>
+                    <option value="CONFLICTS_WITH">结论冲突</option>
+                    <option value="OVERLAPS_WITH">范围重叠</option>
+                    <option value="DUPLICATES">疑似重复</option>
+                    <option value="PREREQUISITE_FOR">前置于</option>
+                    <option value="SUBPROCEDURE_OF">子流程</option>
+                    <option value="ROUTES_TO">主题导航</option>
+                    <option value="PARENT_TOPIC_OF">主题父级</option>
+                    <option value="RELATED_TO">相关</option>
+                  </select></label>
+                  <label class="knowledge-graph-revision-swap" for="knowledgeGraphRevisionSwap"><input id="knowledgeGraphRevisionSwap" type="checkbox"><span>交换起点与目标方向</span></label>
+                  <label for="knowledgeGraphRevisionFromScope"><span>起点适用范围 JSON</span><textarea id="knowledgeGraphRevisionFromScope" class="input-modern knowledge-graph-json" spellcheck="false"></textarea></label>
+                  <label for="knowledgeGraphRevisionToScope"><span>目标适用范围 JSON</span><textarea id="knowledgeGraphRevisionToScope" class="input-modern knowledge-graph-json" spellcheck="false"></textarea></label>
+                  <label for="knowledgeGraphRevisionFromConclusion"><span>起点关键结论</span><textarea id="knowledgeGraphRevisionFromConclusion" class="input-modern"></textarea></label>
+                  <label for="knowledgeGraphRevisionToConclusion"><span>目标关键结论</span><textarea id="knowledgeGraphRevisionToConclusion" class="input-modern"></textarea></label>
+                </div>
+                <div class="knowledge-graph-revision-actions">
+                  <button type="button" class="primary-btn" onclick="submitKnowledgeGraphRevision()"><i class="fas fa-check" aria-hidden="true"></i><span>调整后确认</span></button>
+                </div>
+              </div>
+              <label for="knowledgeGraphReviewNote"><span>复核备注</span><textarea id="knowledgeGraphReviewNote" class="input-modern" placeholder="记录确认或驳回依据。"></textarea></label>
+              <div id="knowledgeGraphReviewActions" class="knowledge-graph-review-actions">
+                <button type="button" class="action-btn btn-secondary-outline knowledge-graph-candidate-only" onclick="saveKnowledgeGraphReview('rejected')"><i class="fas fa-xmark" aria-hidden="true"></i><span>驳回候选</span></button>
+                <button type="button" class="action-btn btn-secondary-outline" onclick="toggleKnowledgeGraphRevisionPanel(true)"><i class="fas fa-pen" aria-hidden="true"></i><span>调整关系</span></button>
+                <button type="button" id="knowledgeGraphReviewConfirmButton" class="primary-btn knowledge-graph-candidate-only" onclick="saveKnowledgeGraphReview('confirmed')"><i class="fas fa-check" aria-hidden="true"></i><span>确认关系</span></button>
+              </div>
+            </div>
+          </section>
+          </div>
+        </div>
+      </div>
 
       <!-- Tab Content: Matrix View -->
       <div id="matrixView" class="d-none">
@@ -3128,12 +3452,20 @@
         
         <div class="modal-body mm-modal-body">
             <div class="mm-toolbar">
+                <div class="mm-view-switch" role="tablist" aria-label="机型映射视图">
+                    <button id="modelMappingAuditViewBtn" type="button" class="mm-view-switch-btn active" role="tab" aria-controls="modelMappingAuditView" aria-selected="true" onclick="setModelMappingView('audit')">
+                        <i class="fas fa-table-list"></i> 型号核查
+                    </button>
+                    <button id="modelMappingCategoriesViewBtn" type="button" class="mm-view-switch-btn" role="tab" aria-controls="modelMappingCategoriesView" aria-selected="false" onclick="setModelMappingView('categories')">
+                        <i class="fas fa-folder-tree"></i> 分类编辑
+                    </button>
+                </div>
                 <button onclick="addMappingCategory()" class="primary-btn btn-sm"><i class="fas fa-plus"></i> 新增映射分类</button>
                 <button onclick="openModelMappingImportModal()" class="action-btn btn-sm"><i class="fas fa-file-import"></i> 批量导入</button>
                 <div class="mm-toolbar-spacer"></div>
                 <div class="mm-search-wrap">
                     <i class="fas fa-search mm-search-icon"></i>
-                    <input id="modelMappingSearch" class="mm-search-input" type="text" placeholder="搜索分类或机型..." oninput="renderModelMappingTable()">
+                    <input id="modelMappingSearch" class="mm-search-input" type="text" placeholder="搜索型号或分类..." aria-label="搜索型号或分类" oninput="renderModelMappingTable()">
                 </div>
                 <button onclick="exportModelMappingsJson()" class="action-btn btn-sm" title="导出当前机型分类映射配置（Excel）">
                     <i class="fas fa-file-export"></i> 导出配置
@@ -3141,9 +3473,45 @@
                 <button onclick="saveModelMappings()" class="success-btn btn-sm"><i class="fas fa-save"></i> 保存配置</button>
             </div>
             
-            <div class="mm-grid-container custom-scrollbar">
-                <div id="modelMappingGrid" class="mm-grid"></div>
-            </div>
+            <section id="modelMappingAuditView" class="mm-audit-view" role="tabpanel" aria-labelledby="modelMappingAuditViewBtn">
+                <div class="mm-audit-toolbar">
+                    <div id="modelMappingAuditSummary" class="mm-audit-summary" aria-live="polite"></div>
+                    <div class="mm-audit-filters" role="group" aria-label="型号核查筛选">
+                        <button id="modelMappingAuditFilterAll" type="button" class="active" aria-pressed="true" onclick="setModelMappingAuditFilter('all')">全部</button>
+                        <button id="modelMappingAuditFilterUnmapped" type="button" aria-pressed="false" onclick="setModelMappingAuditFilter('unmapped')">未映射</button>
+                        <button id="modelMappingAuditFilterMulti" type="button" aria-pressed="false" onclick="setModelMappingAuditFilter('multi')">多分类</button>
+                    </div>
+                </div>
+                <div class="mm-audit-table-wrap custom-scrollbar">
+                    <table class="mm-audit-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">型号</th>
+                                <th scope="col">所属分类</th>
+                                <th scope="col">分类数</th>
+                                <th scope="col">状态</th>
+                            </tr>
+                        </thead>
+                        <tbody id="modelMappingAuditBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="modelMappingCategoriesView" class="mm-categories-view" role="tabpanel" aria-labelledby="modelMappingCategoriesViewBtn" hidden>
+                <div class="mm-category-table-wrap custom-scrollbar">
+                    <table class="mm-table mm-category-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">映射分类</th>
+                                <th scope="col">已映射型号</th>
+                                <th scope="col">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="modelMappingTableBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
         </div>
     </div>
   </div>
@@ -3197,6 +3565,31 @@ G10 系列: G10S, G10S Pro"></textarea>
   </div>
 
   <!-- Archive Name Modal (prompt replacement) -->
+  <div id="activityArchiveModal" class="modal" style="z-index: 2100;">
+    <div class="modal-content" style="width: 460px; max-width: 90vw;">
+        <div class="modal-header">
+            <h3>暂存活动内容</h3>
+            <button class="close-modal-btn" onclick="closeActivityArchiveModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="activityArchiveImpact" class="text-muted" style="margin-bottom: 12px; font-size: 13px; line-height: 1.5;"></div>
+            <label for="activityArchiveName" class="form-label">活动批次名称</label>
+            <input
+              type="text"
+              id="activityArchiveName"
+              class="form-control"
+              placeholder="例如：618 活动"
+              onkeydown="if (event.key === 'Enter') confirmActivityArchive()"
+              style="width: 100%;"
+            >
+        </div>
+        <div class="modal-footer">
+            <button onclick="closeActivityArchiveModal()" class="action-btn">取消</button>
+            <button id="activityArchiveConfirmBtn" onclick="confirmActivityArchive()" class="primary-btn">暂存并下架</button>
+        </div>
+    </div>
+  </div>
+
   <div id="archiveNameModal" class="modal" style="z-index: 2100;">
     <div class="modal-content" style="width: 420px; max-width: 90vw;">
         <div class="modal-header">

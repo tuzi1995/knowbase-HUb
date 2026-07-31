@@ -1,6 +1,11 @@
 import os
 import json
 import re
+import hmac
+import ipaddress
+import base64
+import email as email_parser
+import imaplib
 import pandas as pd
 import requests
 import traceback
@@ -18,7 +23,9 @@ import sys
 from array import array
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter, OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.header import decode_header
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 from flask import Flask, request, jsonify, send_from_directory, send_file, Response, stream_with_context
 from flask_sqlalchemy import SQLAlchemy
@@ -32,6 +39,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from scoring_logic import LLMScorer, calculate_product_overlap, load_scoring_config, save_scoring_config, load_ai_config, save_ai_config
 from matrix_submit_validation import validate_submit_changes
+from parameter_check import register_parameter_check_routes
+from knowledge_graph import (
+    init_knowledge_graph_schema,
+    invalidate_relationships_for_source_change,
+    register_knowledge_graph_routes,
+)
+from kb_v1_sync import SYNC_FIELDS, create_import_snapshot, get_snapshot, get_sync_event, update_event_status
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 try:
@@ -109,6 +123,26 @@ def _is_embed_origin_allowed(value):
     return bool(origin and origin in _get_embed_allowed_origins())
 
 
+def _is_internal_kb_read_authorized(remote_addr, presented_token=''):
+    try:
+        if not ipaddress.ip_address(str(remote_addr or '').strip()).is_loopback:
+            return False
+    except ValueError:
+        return False
+
+    configured_token = str(os.environ.get('KMATRIX_INTERNAL_READ_TOKEN') or '').strip()
+    if not configured_token:
+        return True
+    return hmac.compare_digest(configured_token, str(presented_token or '').strip())
+
+
+def _read_v1_sync_rows(client):
+    return client.select_all(
+        'knowledge_base_v1', columns=','.join(SYNC_FIELDS),
+        order_by='question_wiki_id', order_dir='asc', page_size=1000,
+    ) or []
+
+
 def _get_cors_allowed_origins():
     default_origins = [
         "http://localhost:8083",
@@ -129,6 +163,7 @@ def _get_cors_allowed_origins():
 CORS(app, supports_credentials=True, origins=_get_cors_allowed_origins())
 app.config['SECRET_KEY'] = os.environ.get('KMATRIX_SECRET_KEY', 'dev-only-change-me')
 _DB_PATH = os.path.join(_INSTANCE_DIR, 'data.db')
+_KB_V1_SYNC_ARTIFACT_DIR = os.path.join(_INSTANCE_DIR, 'kb_v1_sync_snapshots')
 BADCASE_WORKBENCH_SOURCE = 'badcase标注工作台'
 os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)  # Ensure SQLite folder exists
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + _DB_PATH.replace('\\', '/')
@@ -767,6 +802,35 @@ class ArchiveRecord(db.Model):
     modify_time = db.Column(db.DateTime)
 
 
+class ActivityArchiveBatch(db.Model):
+    """Durable holding area for campaign content removed from the active KB."""
+    __tablename__ = 'activity_archive_batch'
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    batch_name = db.Column(db.String(200), nullable=False)
+    status = db.Column(db.String(24), nullable=False, default='archiving', index=True)
+    record_count = db.Column(db.Integer, nullable=False, default=0)
+    created_by = db.Column(db.String(80), default='')
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    completed_at = db.Column(db.DateTime)
+    restored_at = db.Column(db.DateTime)
+    last_error = db.Column(db.Text, default='')
+
+
+class ActivityArchiveRecord(db.Model):
+    __tablename__ = 'activity_archive_record'
+    id = db.Column(db.Integer, primary_key=True)
+    batch_id = db.Column(db.String(36), db.ForeignKey('activity_archive_batch.id'), nullable=False, index=True)
+    question_wiki_id = db.Column(db.String(100), nullable=False, index=True)
+    record_json = db.Column(db.Text, nullable=False)
+    tag_names_json = db.Column(db.Text, nullable=False, default='[]')
+    original_update_time = db.Column(db.String(100), default='')
+    restored_at = db.Column(db.DateTime)
+
+    __table_args__ = (
+        db.UniqueConstraint('batch_id', 'question_wiki_id', name='uq_activity_archive_batch_wiki'),
+    )
+
+
 class OpsLibraryItem(db.Model):
     __tablename__ = 'ops_library_item'
     id = db.Column(db.Integer, primary_key=True)
@@ -860,6 +924,7 @@ def load_user(user_id):
 def init_db():
     with app.app_context():
         db.create_all()
+        init_knowledge_graph_schema(_DB_PATH)
         cur_con = None
         legacy_con = None
         try:
@@ -994,6 +1059,11 @@ def index():
     return send_from_directory(os.path.join(_BASE_DIR, 'link_viewer'), 'index.html')
 
 
+@app.route('/platform-intro')
+def platform_intro():
+    return send_from_directory(os.path.join(_BASE_DIR, 'link_viewer'), 'platform_intro.html')
+
+
 @app.route('/api/embed/validate')
 def validate_embed_origin():
     host_origin = request.args.get('host_origin', '')
@@ -1003,6 +1073,132 @@ def validate_embed_origin():
     if not _is_embed_origin_allowed(normalized):
         return jsonify({'success': False, 'allowed': False, 'message': '当前父页面不在允许嵌入列表中'}), 403
     return jsonify({'success': True, 'allowed': True, 'host_origin': normalized})
+
+
+@app.route('/api/internal/kb/v1/export', methods=['GET'])
+def export_internal_kb_v1():
+    if not _is_internal_kb_read_authorized(
+        request.remote_addr,
+        request.headers.get('X-KMatrix-Internal-Token', ''),
+    ):
+        return jsonify({'success': False, 'message': 'Forbidden'}), 403
+
+    client = get_supabase_client()
+    if not client:
+        return jsonify({'success': False, 'message': '本地主库未配置'}), 503
+
+    columns = [
+        'question_wiki_id', 'review_status', 'question', 'answer', 'product_name',
+        'product_category_name', 'question_type', 'answer_type', 'similar_questions',
+        'if_bm25', 'error_list', 'keyword_list', 'image_urls', 'video_urls',
+        'file_urls', 'link_type', 'link_url', 'update_time',
+    ]
+    list_columns = {
+        'similar_questions', 'error_list', 'keyword_list', 'image_urls',
+        'video_urls', 'file_urls',
+    }
+
+    try:
+        rows = client.select_all(
+            'knowledge_base_v1',
+            order_by='question_wiki_id',
+            order_dir='asc',
+            columns=','.join(columns),
+            page_size=1000,
+        ) or []
+        frame = pd.DataFrame(rows)
+        for column in columns:
+            if column not in frame.columns:
+                frame[column] = ''
+        frame = frame[columns]
+        for column in list_columns:
+            frame[column] = frame[column].apply(
+                lambda value: ','.join(map(str, value))
+                if isinstance(value, list)
+                else (str(value) if pd.notna(value) else '')
+            )
+
+        output = io.BytesIO()
+        output.write(b'\xef\xbb\xbf')
+        frame.to_csv(output, index=False, encoding='utf-8')
+        output.seek(0)
+        response = send_file(
+            output,
+            as_attachment=True,
+            download_name=canonical_download_name('kb_v1_detection_source', 'csv'),
+            mimetype='text/csv',
+        )
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-KB-Record-Count'] = str(len(rows))
+        return response
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': f'V1 库内容读取失败：{exc}'}), 500
+
+
+@app.route('/api/internal/kb/v1/sync-events/<sync_id>', methods=['GET'])
+def get_internal_kb_v1_sync_event(sync_id):
+    if not _is_internal_kb_read_authorized(request.remote_addr, request.headers.get('X-KMatrix-Internal-Token', '')):
+        return jsonify({'success': False, 'message': 'Forbidden'}), 403
+    event = get_sync_event(_DB_PATH, sync_id)
+    if not event:
+        return jsonify({'success': False, 'message': '同步事件不存在'}), 404
+    return jsonify({'success': True, 'event': event})
+
+
+@app.route('/api/internal/kb/v1/snapshots/<snapshot_id>/export', methods=['GET'])
+def export_internal_kb_v1_snapshot(snapshot_id):
+    if not _is_internal_kb_read_authorized(request.remote_addr, request.headers.get('X-KMatrix-Internal-Token', '')):
+        return jsonify({'success': False, 'message': 'Forbidden'}), 403
+    snapshot = get_snapshot(_DB_PATH, snapshot_id)
+    if not snapshot or not os.path.isfile(snapshot.get('artifact_path') or ''):
+        return jsonify({'success': False, 'message': '固定快照不存在或已损坏'}), 404
+    response = send_file(
+        snapshot['artifact_path'], as_attachment=True,
+        download_name=f'kb_v1_snapshot_{snapshot_id}.csv', mimetype='text/csv',
+    )
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['X-KB-Snapshot-Id'] = snapshot_id
+    response.headers['X-KB-Snapshot-Hash'] = snapshot['snapshot_hash']
+    response.headers['X-KB-Record-Count'] = str(snapshot['record_count'])
+    return response
+
+
+@app.route('/api/internal/kb/v1/sync-events/<sync_id>/ack', methods=['POST'])
+def ack_internal_kb_v1_sync_event(sync_id):
+    if not _is_internal_kb_read_authorized(request.remote_addr, request.headers.get('X-KMatrix-Internal-Token', '')):
+        return jsonify({'success': False, 'message': 'Forbidden'}), 403
+    if not get_sync_event(_DB_PATH, sync_id):
+        return jsonify({'success': False, 'message': '同步事件不存在'}), 404
+    update_event_status(_DB_PATH, sync_id, 'consumed')
+    return jsonify({'success': True, 'sync_id': sync_id, 'status': 'consumed'})
+
+
+@app.route('/api/kb/import-sync-events/<sync_id>/dispatch', methods=['POST'])
+@login_required
+def dispatch_kb_v1_sync_event(sync_id):
+    event = get_sync_event(_DB_PATH, sync_id)
+    if not event:
+        return jsonify({'success': False, 'message': '同步事件不存在'}), 404
+    target = str(os.environ.get('KB_CONTENT_DETECTION_SYNC_URL') or 'http://127.0.0.1:8787/api/integrations/knowbase-hub/import-sync').strip()
+    token = str(os.environ.get('KMATRIX_INTERNAL_READ_TOKEN') or '').strip()
+    payload = {
+        'sync_id': event['sync_id'], 'snapshot_id': event['snapshot_id'],
+        'snapshot_hash': event['snapshot_hash'], 'added_count': len(event['added_ids']),
+        'updated_count': len(event['updated_ids']), 'deleted_count': len(event['deleted_ids']),
+        'source': '8085_v1_import',
+    }
+    try:
+        response = requests.post(target, json=payload, headers={
+            'X-KMatrix-Internal-Token': token,
+        } if token else {}, timeout=10)
+        if response.status_code >= 400:
+            raise RuntimeError(f'HTTP {response.status_code}')
+        update_event_status(_DB_PATH, sync_id, 'dispatched')
+        return jsonify({'success': True, 'sync_id': sync_id, 'status': 'dispatched', 'receipt': response.json()})
+    except Exception as exc:
+        update_event_status(_DB_PATH, sync_id, 'delivery_failed', str(exc))
+        return jsonify({'success': False, 'sync_id': sync_id, 'status': 'delivery_failed', 'message': '导入已成功，下游同步失败，可重试。'}), 502
 
 
 @app.route('/login', methods=['POST'])
@@ -4673,6 +4869,164 @@ def _build_kb_modification_record(source, modifier, change_type, kb_id, before_o
     
     return rec
 
+
+_ACTIVITY_ARCHIVE_ACTIVE_STATUSES = ('archiving', 'archived', 'archive_failed', 'restoring', 'restore_failed')
+
+
+def _activity_archive_require_immediate_persistence(client):
+    # A queued remote write is not sufficient evidence before removing or restoring source content.
+    if isinstance(client, SupabaseClient):
+        client.enable_outbox = False
+    return client
+
+
+def _activity_archive_rows(client, wiki_ids):
+    ids = [str(value or '').strip() for value in (wiki_ids or []) if str(value or '').strip()]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        return []
+    return client.select_all(
+        'knowledge_base_v1',
+        filters={'question_wiki_id': _postgrest_in_str(ids)},
+        columns='*',
+        order_by='question_wiki_id',
+        order_dir='asc',
+        page_size=1000,
+    ) or []
+
+
+def _activity_archive_tags_by_wiki_id(client, wiki_ids):
+    ids = [str(value or '').strip() for value in (wiki_ids or []) if str(value or '').strip()]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        return {}
+
+    mappings = client.select_all(
+        'kb_item_tags',
+        filters={
+            'library_type': 'eq.current',
+            'question_wiki_id': _postgrest_in_str(ids),
+        },
+        columns='question_wiki_id,tag_id',
+        order_by='question_wiki_id',
+        page_size=1000,
+    ) or []
+    tag_ids = list(dict.fromkeys(
+        row.get('tag_id') for row in mappings
+        if isinstance(row, dict) and row.get('tag_id') is not None
+    ))
+    if not tag_ids:
+        return {wiki_id: [] for wiki_id in ids}
+
+    tags = client.select_all(
+        'kb_tags',
+        filters={'id': _postgrest_in_str(tag_ids)},
+        columns='id,name',
+        page_size=1000,
+    ) or []
+    names_by_id = {
+        str(row.get('id')): str(row.get('name')).strip()
+        for row in tags
+        if isinstance(row, dict) and row.get('id') is not None and str(row.get('name') or '').strip()
+    }
+    result = {wiki_id: [] for wiki_id in ids}
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        wiki_id = str(mapping.get('question_wiki_id') or '').strip()
+        tag_name = names_by_id.get(str(mapping.get('tag_id')))
+        if wiki_id and tag_name and tag_name not in result.setdefault(wiki_id, []):
+            result[wiki_id].append(tag_name)
+    return result
+
+
+def _activity_archive_restore_tags(client, wiki_id, tag_names):
+    names = []
+    seen = set()
+    for value in tag_names or []:
+        name = str(value or '').strip()
+        key = name.lower()
+        if name and key not in seen:
+            seen.add(key)
+            names.append(name)
+
+    client.delete('kb_item_tags', {
+        'library_type': 'eq.current',
+        'question_wiki_id': f'eq.{wiki_id}',
+    })
+    if not names:
+        return
+
+    existing = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
+    name_to_id = {
+        str(row.get('name')).strip().lower(): row.get('id')
+        for row in existing
+        if isinstance(row, dict) and row.get('id') is not None and str(row.get('name') or '').strip()
+    }
+    missing = [name for name in names if name.lower() not in name_to_id]
+    if missing:
+        response = client.upsert('kb_tags', [{'name': name} for name in missing], on_conflict='name')
+        if response is None or getattr(response, 'status_code', 500) >= 400:
+            raise RuntimeError(getattr(response, 'text', '') or '恢复活动标签失败')
+        existing = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
+        name_to_id = {
+            str(row.get('name')).strip().lower(): row.get('id')
+            for row in existing
+            if isinstance(row, dict) and row.get('id') is not None and str(row.get('name') or '').strip()
+        }
+
+    tag_ids = [name_to_id[name.lower()] for name in names if name.lower() in name_to_id]
+    if not tag_ids:
+        raise RuntimeError('恢复活动标签失败：未取得标签 ID')
+    response = client.insert('kb_item_tags', [{
+        'library_type': 'current',
+        'question_wiki_id': wiki_id,
+        'tag_id': tag_id,
+    } for tag_id in tag_ids])
+    if response is None or getattr(response, 'status_code', 500) >= 400:
+        raise RuntimeError(getattr(response, 'text', '') or '恢复活动标签映射失败')
+
+
+def _activity_archive_set_index_status(wiki_ids, status, message):
+    ids = [str(value or '').strip() for value in (wiki_ids or []) if str(value or '').strip()]
+    if not ids:
+        return
+    try:
+        KBDuplicateRetrievalIndex.query.filter(
+            KBDuplicateRetrievalIndex.library_type == 'knowledge_base_v1',
+            KBDuplicateRetrievalIndex.question_wiki_id.in_(ids),
+        ).update({
+            'index_status': status,
+            'last_error': message,
+            'updated_ts': time.time(),
+        }, synchronize_session=False)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+
+def _activity_archive_write_modifications(client, rows, actor, change_type):
+    records = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        wiki_id = str(row.get('question_wiki_id') or '').strip()
+        if not wiki_id:
+            continue
+        # 活动暂存会从主知识库下架，因此在修改记录中按标准删除操作呈现。
+        before = _snapshot_mod_fields(row) if change_type in ('activity_archive', 'delete') else None
+        after = _snapshot_mod_fields(row) if change_type == 'activity_restore' else None
+        records.append(_build_kb_modification_record(
+            '活动暂存', actor, change_type, wiki_id, before, after,
+            _compute_mod_changed_fields(before, after), row,
+        ))
+    if not records:
+        return ''
+    response = _supabase_insert_drop_unknown_columns(client, 'knowledge_base_modifications', records)
+    if response is None or getattr(response, 'status_code', 500) >= 400:
+        return getattr(response, 'text', '') if response is not None else '活动操作日志写入失败'
+    return ''
+
 def _extract_change_source_from_change_meta(change_meta):
     meta = _parse_change_meta(change_meta)
     src = meta.get('source') if isinstance(meta, dict) else None
@@ -5520,13 +5874,55 @@ def update_kb_item():
                 latest_kb_update_time=data.get('update_time')
             )
 
+        graph_relation_refresh = {
+            'expired_count': 0,
+            'revalidation_candidate_count': 0,
+            'revalidated_without_relation_count': 0,
+            'relation_changed_count': 0,
+            'source_missing_count': 0,
+            'created_edge_ids': [],
+        }
+        graph_relation_error = ''
+        if kb_id and isinstance(before_row, dict) and changed_fields:
+            future_source_row = dict(before_row)
+            future_source_row.update(data)
+            source_snapshot = {
+                'question_wiki_id': kb_id,
+                'question': str(future_source_row.get('question') or ''),
+                'answer': str(future_source_row.get('answer') or ''),
+                'product_category_name': str(future_source_row.get('product_category_name') or ''),
+                'product_names': _kd_string_list(future_source_row.get('product_name')),
+                'changed_fields': list(changed_fields),
+                'source_update_time': str(data.get('update_time') or ''),
+                'content_hash': _kd_content_hash(future_source_row),
+            }
+            try:
+                graph_relation_refresh = invalidate_relationships_for_source_change(
+                    _DB_PATH,
+                    PRODUCT_CATALOG_FILE,
+                    kb_id,
+                    source_snapshot,
+                    current_user.username if current_user.is_authenticated else 'system',
+                )
+            except Exception as graph_exc:
+                graph_relation_error = str(graph_exc)
+                print(f"[ERROR] Failed to invalidate knowledge graph relations: {graph_exc}")
+
+        warnings = []
+        if not mod_log_ok:
+            warnings.append('修改记录保存失败，但数据已成功保存')
+        if graph_relation_error:
+            warnings.append('知识已保存，但关联关系失效处理失败，请在知识图谱中执行“检查失效关系”')
+
         return jsonify({
             'success': True,
             'question_wiki_id': saved_id or data.get('question_wiki_id') or kb_id,
             'mod_log_ok': mod_log_ok,
             'mod_log_error': mod_log_error,
             'quality_task_updated': quality_task_updated,
-            'warning': '修改记录保存失败，但数据已成功保存' if not mod_log_ok else None
+            'graph_relation_refresh': graph_relation_refresh,
+            'graph_relation_error': graph_relation_error,
+            'warning': '；'.join(warnings) if warnings else None
         })
 
     except Exception as e:
@@ -5627,6 +6023,245 @@ def delete_kb_item():
         print(f"[ERROR] Delete failed: {error_msg}")
         traceback.print_exc()
         return jsonify({'success': False, 'message': error_msg}), 500
+
+
+@app.route('/api/kb/activity-archives', methods=['GET'])
+@login_required
+def list_activity_archives():
+    batches = ActivityArchiveBatch.query.order_by(ActivityArchiveBatch.created_at.desc()).limit(200).all()
+    data = []
+    for batch in batches:
+        restored_count = ActivityArchiveRecord.query.filter_by(batch_id=batch.id).filter(
+            ActivityArchiveRecord.restored_at.isnot(None)
+        ).count()
+        data.append({
+            'id': batch.id,
+            'batch_name': batch.batch_name,
+            'status': batch.status,
+            'record_count': batch.record_count,
+            'restored_count': restored_count,
+            'created_by': batch.created_by,
+            'created_at': batch.created_at.isoformat() + 'Z' if batch.created_at else None,
+            'completed_at': batch.completed_at.isoformat() + 'Z' if batch.completed_at else None,
+            'restored_at': batch.restored_at.isoformat() + 'Z' if batch.restored_at else None,
+            'last_error': batch.last_error or '',
+        })
+    return jsonify({'success': True, 'data': data})
+
+
+@app.route('/api/kb/activity-archives', methods=['POST'])
+@login_required
+def create_activity_archive():
+    payload = request.get_json(silent=True) or {}
+    batch_name = str(payload.get('batch_name') or '').strip()
+    raw_ids = payload.get('ids') or []
+    if isinstance(raw_ids, str):
+        raw_ids = re.split(r'[,，\n]+', raw_ids)
+    ids = [str(value or '').strip() for value in raw_ids if str(value or '').strip()]
+    ids = list(dict.fromkeys(ids))
+    if not batch_name:
+        return jsonify({'success': False, 'message': '请填写活动批次名称'}), 400
+    if len(batch_name) > 200:
+        return jsonify({'success': False, 'message': '活动批次名称不能超过 200 个字符'}), 400
+    if not ids:
+        return jsonify({'success': False, 'message': '请至少选择一条活动知识'}), 400
+    if not bool(payload.get('confirm_archive')):
+        return jsonify({'success': False, 'requires_confirmation': True, 'message': '活动暂存会从主知识库移除选中内容，请确认后继续。'}), 409
+
+    expected_count = payload.get('expected_count')
+    if expected_count is not None:
+        try:
+            if int(expected_count) != len(ids):
+                return jsonify({'success': False, 'message': '待暂存记录数已变化，请重新确认。'}), 409
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'message': 'expected_count 必须是数字'}), 400
+
+    client = get_supabase_client()
+    if not client:
+        return jsonify({'success': False, 'message': '本地主库未配置'}), 500
+    _activity_archive_require_immediate_persistence(client)
+
+    try:
+        already_archived = {
+            row[0]
+            for row in db.session.query(ActivityArchiveRecord.question_wiki_id)
+            .join(ActivityArchiveBatch, ActivityArchiveBatch.id == ActivityArchiveRecord.batch_id)
+            .filter(
+                ActivityArchiveRecord.question_wiki_id.in_(ids),
+                ActivityArchiveBatch.status.in_(_ACTIVITY_ARCHIVE_ACTIVE_STATUSES),
+            ).all()
+        }
+        if already_archived:
+            return jsonify({
+                'success': False,
+                'message': '部分内容已在活动暂存区，不能重复暂存。',
+                'conflict_ids': sorted(already_archived),
+            }), 409
+
+        rows = _activity_archive_rows(client, ids)
+        rows_by_id = {
+            str(row.get('question_wiki_id') or '').strip(): row
+            for row in rows if isinstance(row, dict) and str(row.get('question_wiki_id') or '').strip()
+        }
+        missing_ids = [wiki_id for wiki_id in ids if wiki_id not in rows_by_id]
+        if missing_ids:
+            return jsonify({
+                'success': False,
+                'message': '部分知识已不在主库，请刷新后重试。',
+                'missing_ids': missing_ids,
+            }), 409
+
+        tags_by_wiki_id = _activity_archive_tags_by_wiki_id(client, ids)
+        actor = current_user.username if current_user.is_authenticated else 'system'
+        batch = ActivityArchiveBatch(
+            batch_name=batch_name,
+            status='archiving',
+            record_count=len(ids),
+            created_by=actor,
+        )
+        db.session.add(batch)
+        db.session.flush()
+        db.session.add_all([
+            ActivityArchiveRecord(
+                batch_id=batch.id,
+                question_wiki_id=wiki_id,
+                record_json=_json_dumps_safe(rows_by_id[wiki_id]),
+                tag_names_json=_json_dumps_safe(tags_by_wiki_id.get(wiki_id, [])),
+                original_update_time=str(rows_by_id[wiki_id].get('update_time') or ''),
+            )
+            for wiki_id in ids
+        ])
+        db.session.commit()
+
+        deletion = _delete_kb_items_physical(client, ids)
+        if not deletion.get('success'):
+            batch.status = 'archive_failed'
+            batch.last_error = str(deletion.get('message') or '主库移除失败')[:2000]
+            db.session.commit()
+            return jsonify({
+                'success': False,
+                'batch_id': batch.id,
+                'message': '活动内容快照已保存，但主库移除失败；请勿重复暂存。',
+                'detail': batch.last_error,
+            }), 502
+
+        batch.status = 'archived'
+        batch.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        batch.last_error = ''
+        db.session.commit()
+        _activity_archive_set_index_status(ids, 'inactive', '活动暂存中，已从主知识库移除')
+        log_error = _activity_archive_write_modifications(client, [rows_by_id[wiki_id] for wiki_id in ids], actor, 'delete')
+        warnings = list(deletion.get('warnings') or [])
+        if log_error:
+            warnings.append('活动暂存操作日志写入失败')
+        return jsonify({
+            'success': True,
+            'batch_id': batch.id,
+            'record_count': len(ids),
+            'warnings': warnings,
+        })
+    except Exception as exc:
+        db.session.rollback()
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(exc)}), 500
+
+
+@app.route('/api/kb/activity-archives/<batch_id>/restore', methods=['POST'])
+@login_required
+def restore_activity_archive(batch_id):
+    payload = request.get_json(silent=True) or {}
+    if not bool(payload.get('confirm_restore')):
+        return jsonify({'success': False, 'requires_confirmation': True, 'message': '恢复会将活动内容重新写入主知识库，请确认后继续。'}), 409
+
+    batch = db.session.get(ActivityArchiveBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '活动暂存批次不存在'}), 404
+    if batch.status != 'archived':
+        return jsonify({'success': False, 'message': '只有已暂存的活动批次可以恢复'}), 409
+
+    records = ActivityArchiveRecord.query.filter_by(batch_id=batch.id).order_by(ActivityArchiveRecord.id).all()
+    if not records:
+        return jsonify({'success': False, 'message': '活动暂存批次没有可恢复内容'}), 409
+
+    client = get_supabase_client()
+    if not client:
+        return jsonify({'success': False, 'message': '本地主库未配置'}), 500
+    _activity_archive_require_immediate_persistence(client)
+
+    try:
+        ids = [str(record.question_wiki_id) for record in records]
+        existing_rows = _activity_archive_rows(client, ids)
+        existing_ids = sorted({
+            str(row.get('question_wiki_id') or '').strip()
+            for row in existing_rows if isinstance(row, dict) and str(row.get('question_wiki_id') or '').strip()
+        })
+        if existing_ids:
+            return jsonify({
+                'success': False,
+                'message': '部分活动知识已存在于主库，为避免覆盖已阻止恢复。',
+                'conflict_ids': existing_ids,
+            }), 409
+
+        now = _now_iso_with_tz()
+        restore_rows = []
+        tag_names_by_wiki_id = {}
+        for record in records:
+            row = _json_loads_safe(record.record_json)
+            if not isinstance(row, dict):
+                raise ValueError(f'活动暂存记录 {record.question_wiki_id} 的内容快照无效')
+            row = dict(row)
+            row['question_wiki_id'] = record.question_wiki_id
+            row['review_status'] = 'modifying'
+            row['update_time'] = now
+            restore_rows.append(row)
+            parsed_tags = _json_loads_safe(record.tag_names_json)
+            tag_names_by_wiki_id[record.question_wiki_id] = parsed_tags if isinstance(parsed_tags, list) else []
+
+        response = client.insert('knowledge_base_v1', restore_rows)
+        if response is None or getattr(response, 'status_code', 500) >= 400:
+            raise RuntimeError(getattr(response, 'text', '') if response is not None else '恢复主知识库失败')
+
+        restored_rows = _activity_archive_rows(client, ids)
+        restored_ids = {
+            str(row.get('question_wiki_id') or '').strip()
+            for row in restored_rows if isinstance(row, dict) and str(row.get('question_wiki_id') or '').strip()
+        }
+        missing_ids = [wiki_id for wiki_id in ids if wiki_id not in restored_ids]
+        if missing_ids:
+            raise RuntimeError(f'恢复校验失败，仍缺少 {len(missing_ids)} 条内容')
+
+        warnings = []
+        for wiki_id, tag_names in tag_names_by_wiki_id.items():
+            try:
+                _activity_archive_restore_tags(client, wiki_id, tag_names)
+            except Exception as tag_exc:
+                warnings.append(f'{wiki_id} 的标签未恢复')
+                print(f'[WARN] restore activity archive tags failed for {wiki_id}: {tag_exc}')
+
+        actor = current_user.username if current_user.is_authenticated else 'system'
+        for record in records:
+            record.restored_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        batch.status = 'restored'
+        batch.restored_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        batch.last_error = ''
+        db.session.commit()
+        _activity_archive_set_index_status(ids, 'pending', '活动内容已恢复，等待下一次索引构建')
+        log_error = _activity_archive_write_modifications(client, restore_rows, actor, 'activity_restore')
+        if log_error:
+            warnings.append('活动恢复操作日志写入失败')
+        return jsonify({
+            'success': True,
+            'batch_id': batch.id,
+            'record_count': len(ids),
+            'warnings': warnings,
+        })
+    except Exception as exc:
+        db.session.rollback()
+        batch.status = 'restore_failed'
+        batch.last_error = str(exc)[:2000]
+        db.session.commit()
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(exc)}), 500
 
 @app.route('/api/kb/tags', methods=['GET'])
 @login_required
@@ -11305,6 +11940,10 @@ def _db_not_configured_message():
 def _db_client_unavailable_message():
     return '数据库客户端不可用'
 
+
+register_parameter_check_routes(app, login_required, parse_product_catalog)
+register_knowledge_graph_routes(app, login_required, _DB_PATH, PRODUCT_CATALOG_FILE)
+
 def _db_fetch_failed_message():
     return '数据库查询失败'
 
@@ -12542,6 +13181,354 @@ def _kb_import_column_mapping():
         'Product': 'product_name'
     }
 
+
+_KB_MAIL_ALLOWED_EXTENSIONS = {'.xlsx', '.xls', '.csv'}
+_KB_MAIL_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+_KB_MAIL_CACHE_TTL_SECONDS = 10 * 60
+_KB_MAIL_CACHE_MAX_BYTES = 10 * 1024 * 1024
+_KB_MAIL_KEYCHAIN_ACCOUNT = 'knowbase-hub'
+_KB_MAIL_KEYCHAIN_EMAIL_SERVICE = 'com.kmatrix.knowbase-hub.feishu-imap.email'
+_KB_MAIL_KEYCHAIN_PASSWORD_SERVICE = 'com.kmatrix.knowbase-hub.feishu-imap.password'
+_kb_mail_cache_lock = threading.Lock()
+_kb_mail_cache = None
+_kb_mail_cache_timer = None
+
+
+def _decode_mail_header(value):
+    if not value:
+        return ''
+    parts = []
+    for part, charset in decode_header(str(value)):
+        if isinstance(part, bytes):
+            try:
+                parts.append(part.decode(charset or 'utf-8', errors='replace'))
+            except (LookupError, UnicodeError):
+                parts.append(part.decode('utf-8', errors='replace'))
+        else:
+            parts.append(str(part))
+    return ''.join(parts).strip()
+
+
+def _safe_mail_attachment_name(value):
+    name = _decode_mail_header(value).replace('\x00', '').strip()
+    name = re.sub(r'[<>:"/\\|?*]+', '_', name)
+    if not name or name in {'.', '..'}:
+        return 'attachment'
+    return name[:180]
+
+
+def _read_kb_mail_keychain_value(service):
+    if sys.platform != 'darwin':
+        return ''
+    try:
+        result = subprocess.run(
+            [
+                '/usr/bin/security', 'find-generic-password',
+                '-a', _KB_MAIL_KEYCHAIN_ACCOUNT,
+                '-s', service,
+                '-w',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+    return result.stdout.strip() if result.returncode == 0 else ''
+
+
+def _kb_mail_config():
+    email_address = str(
+        os.environ.get('KMATRIX_IMAP_EMAIL')
+        or _read_kb_mail_keychain_value(_KB_MAIL_KEYCHAIN_EMAIL_SERVICE)
+        or ''
+    ).strip()
+    password = str(
+        os.environ.get('KMATRIX_IMAP_PASSWORD')
+        or _read_kb_mail_keychain_value(_KB_MAIL_KEYCHAIN_PASSWORD_SERVICE)
+        or ''
+    ).strip()
+    if not email_address or not password:
+        raise ValueError('飞书邮箱未配置，请设置 KMATRIX_IMAP_EMAIL/KMATRIX_IMAP_PASSWORD 或 macOS 钥匙串凭证。')
+
+    try:
+        port = int(os.environ.get('KMATRIX_IMAP_PORT', '993'))
+        scan_days = int(os.environ.get('KMATRIX_IMAP_SCAN_DAYS', '7'))
+    except ValueError as exc:
+        raise ValueError('KMATRIX_IMAP_PORT 和 KMATRIX_IMAP_SCAN_DAYS 必须为整数。') from exc
+
+    return {
+        'email': email_address,
+        'password': password,
+        'host': str(os.environ.get('KMATRIX_IMAP_HOST') or 'imap.feishu.cn').strip(),
+        'port': max(1, min(port, 65535)),
+        'keyword': str(os.environ.get('KMATRIX_IMAP_SUBJECT_KEYWORD') or '最新KB').strip(),
+        'scan_days': max(1, min(scan_days, 30)),
+    }
+
+
+def _imap_message_bytes(message_data):
+    for item in message_data or []:
+        if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes):
+            return item[1]
+    return b''
+
+
+def _parse_mail_sent_at(value):
+    raw_value = str(value or '').strip()
+    if not raw_value:
+        return None
+    try:
+        sent_at = parsedate_to_datetime(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if sent_at is None:
+        return None
+    if sent_at.tzinfo is None:
+        sent_at = sent_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return sent_at.astimezone()
+
+
+def _kb_mail_cache_signature(config, matching_messages):
+    mailbox_scope = (
+        str(config.get('email') or ''),
+        str(config.get('host') or ''),
+        int(config.get('port') or 0),
+        str(config.get('keyword') or ''),
+        int(config.get('scan_days') or 0),
+    )
+    message_scope = tuple(
+        (
+            item['message_id'].decode('ascii', errors='replace')
+            if isinstance(item.get('message_id'), bytes)
+            else str(item.get('message_id') or ''),
+            str(item.get('rfc_message_id') or ''),
+            str(item.get('subject') or ''),
+            item['sent_at'].isoformat() if item.get('sent_at') is not None else '',
+        )
+        for item in matching_messages
+    )
+    return mailbox_scope, message_scope
+
+
+def _get_cached_kb_mail(signature):
+    global _kb_mail_cache, _kb_mail_cache_timer
+    now = time.monotonic()
+    with _kb_mail_cache_lock:
+        cache = _kb_mail_cache
+        if (
+            cache is None
+            or cache['signature'] != signature
+            or cache['expires_at'] <= now
+        ):
+            if _kb_mail_cache_timer is not None:
+                _kb_mail_cache_timer.cancel()
+                _kb_mail_cache_timer = None
+            _kb_mail_cache = None
+            return None
+        result = dict(cache['result'])
+    result['cache_hit'] = True
+    return result
+
+
+def _expire_kb_mail_cache(signature, expires_at):
+    global _kb_mail_cache, _kb_mail_cache_timer
+    with _kb_mail_cache_lock:
+        cache = _kb_mail_cache
+        if (
+            cache is not None
+            and cache['signature'] == signature
+            and cache['expires_at'] == expires_at
+        ):
+            _kb_mail_cache = None
+            _kb_mail_cache_timer = None
+
+
+def _cache_kb_mail(signature, result):
+    global _kb_mail_cache, _kb_mail_cache_timer
+    attachment_bytes = sum(
+        max(0, int(attachment.get('size') or 0))
+        for attachment in result.get('attachments') or []
+    )
+    cached = attachment_bytes <= _KB_MAIL_CACHE_MAX_BYTES
+    with _kb_mail_cache_lock:
+        if _kb_mail_cache_timer is not None:
+            _kb_mail_cache_timer.cancel()
+            _kb_mail_cache_timer = None
+        if cached:
+            expires_at = time.monotonic() + _KB_MAIL_CACHE_TTL_SECONDS
+            _kb_mail_cache = {
+                'signature': signature,
+                'expires_at': expires_at,
+                'result': dict(result),
+            }
+            _kb_mail_cache_timer = threading.Timer(
+                _KB_MAIL_CACHE_TTL_SECONDS,
+                _expire_kb_mail_cache,
+                args=(signature, expires_at),
+            )
+            _kb_mail_cache_timer.daemon = True
+            _kb_mail_cache_timer.start()
+        else:
+            _kb_mail_cache = None
+    output = dict(result)
+    output['cache_hit'] = False
+    output['cache_stored'] = cached
+    return output
+
+
+def _clear_kb_mail_cache():
+    global _kb_mail_cache, _kb_mail_cache_timer
+    with _kb_mail_cache_lock:
+        if _kb_mail_cache_timer is not None:
+            _kb_mail_cache_timer.cancel()
+            _kb_mail_cache_timer = None
+        _kb_mail_cache = None
+
+
+def _pull_latest_kb_mail(config, imap_factory=None):
+    factory = imap_factory or imaplib.IMAP4_SSL
+    mailbox = factory(config['host'], config['port'], timeout=20)
+    try:
+        mailbox.login(config['email'], config['password'])
+        status, _ = mailbox.select('INBOX', readonly=True)
+        if status != 'OK':
+            raise RuntimeError('无法以只读方式打开飞书收件箱。')
+
+        since_date = (datetime.now() - timedelta(days=config['scan_days'])).strftime('%d-%b-%Y')
+        status, messages = mailbox.search(None, 'SINCE', since_date)
+        if status != 'OK':
+            raise RuntimeError('飞书邮箱检索失败。')
+
+        message_ids = messages[0].split() if messages and messages[0] else []
+        matching_messages = []
+        for sequence_index, message_id in enumerate(message_ids):
+            status, header_data = mailbox.fetch(
+                message_id,
+                '(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])',
+            )
+            raw_header = _imap_message_bytes(header_data)
+            if status != 'OK' or not raw_header:
+                continue
+
+            header = email_parser.message_from_bytes(raw_header)
+            subject = _decode_mail_header(header.get('Subject'))
+            if config['keyword'] not in subject:
+                continue
+            sent_at = _parse_mail_sent_at(header.get('Date'))
+            matching_messages.append({
+                'message_id': message_id,
+                'rfc_message_id': str(header.get('Message-ID') or '').strip(),
+                'subject': subject,
+                'sent_at': sent_at,
+                'sequence_index': sequence_index,
+            })
+
+        matching_messages.sort(
+            key=lambda item: (
+                item['sent_at'] is not None,
+                item['sent_at'].timestamp() if item['sent_at'] is not None else float('-inf'),
+                item['sequence_index'],
+            ),
+            reverse=True,
+        )
+
+        cache_signature = _kb_mail_cache_signature(config, matching_messages)
+        cached_result = _get_cached_kb_mail(cache_signature)
+        if cached_result is not None:
+            return cached_result
+
+        latest_match_without_attachment = None
+        skipped_matching_mails = 0
+        for match in matching_messages:
+            status, message_data = mailbox.fetch(match['message_id'], '(BODY.PEEK[])')
+            raw_message = _imap_message_bytes(message_data)
+            if status != 'OK' or not raw_message:
+                continue
+
+            message = email_parser.message_from_bytes(raw_message)
+            subject = _decode_mail_header(message.get('Subject'))
+            sent_at = _parse_mail_sent_at(message.get('Date')) or match['sent_at']
+
+            attachments = []
+            ignored_attachments = []
+            for part in message.walk():
+                if part.get_content_disposition() != 'attachment':
+                    continue
+
+                filename = _safe_mail_attachment_name(part.get_filename())
+                extension = os.path.splitext(filename)[1].lower()
+                payload = part.get_payload(decode=True) or b''
+                if extension not in _KB_MAIL_ALLOWED_EXTENSIONS:
+                    ignored_attachments.append({'filename': filename, 'reason': '仅支持 xlsx、xls、csv'})
+                    continue
+                if not payload:
+                    ignored_attachments.append({'filename': filename, 'reason': '附件内容为空'})
+                    continue
+                if len(payload) > _KB_MAIL_MAX_ATTACHMENT_BYTES:
+                    ignored_attachments.append({'filename': filename, 'reason': '附件超过 20 MB'})
+                    continue
+
+                attachments.append({
+                    'filename': filename,
+                    'content_type': part.get_content_type() or 'application/octet-stream',
+                    'size': len(payload),
+                    'sha256': hashlib.sha256(payload).hexdigest(),
+                    'content_base64': base64.b64encode(payload).decode('ascii'),
+                })
+
+            result = {
+                'subject': subject,
+                'sender': _decode_mail_header(message.get('From')),
+                'sent_at': sent_at.isoformat() if sent_at is not None else '',
+                'sent_at_display': sent_at.isoformat(sep=' ', timespec='seconds') if sent_at is not None else '',
+                'sent_at_raw': str(message.get('Date') or '').strip(),
+                'message_id': str(message.get('Message-ID') or '').strip(),
+                'attachments': attachments,
+                'ignored_attachments': ignored_attachments,
+            }
+            if attachments:
+                result['skipped_matching_mails'] = skipped_matching_mails
+                return _cache_kb_mail(cache_signature, result)
+            if latest_match_without_attachment is None:
+                latest_match_without_attachment = result
+            skipped_matching_mails += 1
+        if latest_match_without_attachment is not None:
+            latest_match_without_attachment['skipped_matching_mails'] = skipped_matching_mails
+            return _cache_kb_mail(cache_signature, latest_match_without_attachment)
+        return None
+    finally:
+        try:
+            mailbox.logout()
+        except Exception:
+            pass
+
+
+@app.route('/api/kb/import/mail/latest', methods=['POST'])
+@login_required
+def kb_import_mail_latest():
+    try:
+        config = _kb_mail_config()
+        result = _pull_latest_kb_mail(config)
+        if result is None:
+            return jsonify({
+                'success': False,
+                'message': f"最近 {config['scan_days']} 天没有标题包含“{config['keyword']}”的邮件。",
+            }), 404
+        return jsonify({
+            'success': True,
+            'keyword': config['keyword'],
+            'mail': result,
+        })
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 503
+    except imaplib.IMAP4.error:
+        return jsonify({'success': False, 'message': '飞书邮箱登录失败，请检查邮箱地址和 IMAP 专用密码。'}), 502
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': f'拉取飞书邮件失败：{exc}'}), 502
+
 def _dedupe_kb_compare_ids(raw_ids):
     ids = []
     duplicates = []
@@ -13039,6 +14026,10 @@ def kb_import():
                 except Exception:
                     return jsonify({'success': False, 'message': 'expected_incoming_count 必须为数字'}), 400
 
+        # Capture the authoritative pre-import business state only after all user
+        # confirmations passed, so cancelled imports never create a sync event.
+        before_sync_rows = _read_v1_sync_rows(client)
+
         # Mode 2: Overwrite (Clear all data first)
         if mode == 'overwrite':
             # 0. 先把当前 V1 备份到前刻库 V1T-1，再执行清空与导入（与手动「同步此刻到前刻」同一逻辑）
@@ -13306,6 +14297,17 @@ def kb_import():
             details['deleted_ids'] = delete_missing_result.get('ids', [])
 
         out = {'success': True, 'count': total_inserted, 'stats': stats, 'mode': mode, 'details': details}
+        try:
+            sync_event = create_import_snapshot(
+                _DB_PATH, _KB_V1_SYNC_ARTIFACT_DIR, before_sync_rows,
+                _read_v1_sync_rows(client), mode,
+                current_user.username if current_user.is_authenticated else 'system',
+            )
+            out['sync_event'] = sync_event
+        except Exception as sync_error:
+            # The import is already committed.  Do not hide that result or attempt
+            # a destructive rollback; make the missing downstream event explicit.
+            out['sync_event_error'] = f'固定快照生成失败：{sync_error}'
         if pre_t1_sync_note:
             out['pre_sync_v1_to_t1'] = pre_t1_sync_note
         if score_backup_path:
@@ -19530,6 +20532,12 @@ def copy_matrix_column():
     db.session.commit()
     return jsonify({'success': True, 'updated_count': count})
 
+
+def _preserve_unmatched_matrix_item_on_merge(question_wiki_id, manual_edit, active_wiki_ids):
+    """Keep manual model differences only while their source V1 record still exists."""
+    return bool(manual_edit) and question_wiki_id in active_wiki_ids
+
+
 def _run_matrix_sync(mode='merge'):
     client = get_supabase_client()
     if not client:
@@ -19683,10 +20691,15 @@ def _run_matrix_sync(mode='merge'):
                         db.session.add(matrix_item)
                         added += 1
             
-            # Delete missing (Only if not manual edit)
+            active_wiki_ids = set(kb_map)
+            # Preserve manual model differences, but never retain an ID deleted from V1.
             for key, m in matrix_map.items():
                 if key not in processed_keys:
-                    if not m.manual_edit:
+                    if not _preserve_unmatched_matrix_item_on_merge(
+                        m.question_wiki_id,
+                        m.manual_edit,
+                        active_wiki_ids,
+                    ):
                         db.session.delete(m)
                         deleted += 1
 

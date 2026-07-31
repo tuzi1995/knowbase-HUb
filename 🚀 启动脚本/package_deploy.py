@@ -2,117 +2,106 @@ import os
 import zipfile
 import datetime
 
-DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+RUNTIME_FILES = (
+    "server.py",
+    "scoring_logic.py",
+    "llm_score_evaluator.py",
+    "matrix_submit_validation.py",
+    "parameter_check.py",
+    "knowledge_graph.py",
+    "kb_v1_sync.py",
+)
 
+# These files contain the current product/model definitions but no credentials.
+# Store them with ASCII archive names so Linux unzip does not depend on locale.
+EXTERNAL_RUNTIME_FILES = (
+    ("⚙️ 配置文件/requirements.txt", "requirements.txt"),
+    ("⚙️ 配置文件/product_catalog.json", "product_catalog.json"),
+    ("⚙️ 配置文件/model_mappings.json", "model_mappings.json"),
+)
 
-def _should_skip_file(rel_path: str) -> bool:
-    rp = str(rel_path or "").replace("\\", "/").lower()
-    # Never deploy runtime sqlite databases from local package.
-    if rp.startswith("instance/") and rp.endswith(DB_SUFFIXES):
-        return True
-    return False
+# Credentials and mutable runtime state are deliberately not packaged.  The
+# cloud host keeps its own configuration, and data is transferred by the
+# guarded release procedure after integrity checks and a remote backup.
+EXCLUDED_RUNTIME_FILES = {
+    "ai_config.json",
+    "scoring_config.json",
+    "smart_mapping_embedding_config.json",
+    "supabase_config.json",
+    "supabase_config_local.json",
+}
 
 
 def package_project():
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(project_root)
-    project_root = os.path.join(project_root, 'KnowledgeBaseTool_Local')
+    startup_dir = os.path.dirname(os.path.abspath(__file__))
+    workspace_root = os.path.dirname(startup_dir)
+    project_root = os.path.join(workspace_root, 'KnowledgeBaseTool_Local')
     
     # Check if directory exists
     if not os.path.exists(project_root):
         print(f"Error: Project root directory not found at {project_root}")
         return
         
-    output_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = startup_dir
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_filename = f"KnowledgeBaseTool_Deploy_{timestamp}.zip"
     zip_path = os.path.join(output_dir, zip_filename)
 
-    # Files to include (using glob patterns concept but manual list for precision)
-    # NOTE:
-    # Avoid non-ASCII filenames inside the zip (Linux `unzip` may decode them as mojibake depending on locale).
-    # Use a mapping so we can keep local filenames but store ASCII names in the archive.
-    include_files = [
-        # Core Backend
-        "server.py",
-        "scoring_logic.py",
-        "llm_score_evaluator.py",
-        "requirements.txt",
-        "产品说明书.md",
-        
-        # Configs
-        "scoring_config.json",
-        "supabase_config.json",
-        "supabase_config_local.json",
-        "tag_pool.json",
-        "model_mappings.json",
-        "product_catalog.json",
-        
-        # Scripts (Startup & Debug)
-        "启动服务.bat",
-        "KB1知识库评分工具.bat",
-        "README_DEPLOY.txt",
-        "PROJECT_STRUCTURE.md",
-        
-        # Database Scripts
-        "create_kb_scores.sql",
-        "create_mod_table.sql",
-        "supabase_schema.sql",
-        "update_schema_v2.sql",
-        "update_schema_v3.sql",
-        "migrate_ops_to_supabase.py",
-    ]
-
-    archive_name_overrides = {
-        "启动服务.bat": "start_service.bat",
-        "KB1知识库评分工具.bat": "kb1_score_tool.bat",
-        "产品说明书.md": "product_manual.md",
-    }
-
-    # Directories to include recursively
-    include_dirs = [
-        "link_viewer", # Frontend
-        "prompt",      # Prompts
-        "Scripts",     # Utility Scripts (Optional but safer to include)
-        "instance",
-        "DevTools",
+    include_files = list(RUNTIME_FILES)
+    include_dirs = ["link_viewer", "prompt"]
+    included_script_files = [
+        "Scripts/migrate_parameter_check_postgres.py",
+        "Scripts/primary_db_sync.py",
     ]
 
     print(f"Creating deployment package: {zip_filename}")
     
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        # Add individual files
+        # Add Python runtime modules.  Do not deploy local credentials or
+        # mutable configuration files: cloud configuration stays on the host.
         for filename in include_files:
+            if filename in EXCLUDED_RUNTIME_FILES:
+                continue
             file_path = os.path.join(project_root, filename)
             if os.path.exists(file_path):
-                arcname = archive_name_overrides.get(filename, filename)
-                if arcname != filename:
-                    print(f"Adding file: {filename} -> {arcname}")
-                else:
-                    print(f"Adding file: {filename}")
-                zipf.write(file_path, arcname=arcname)
+                print(f"Adding file: {filename}")
+                zipf.write(file_path, arcname=filename)
             else:
                 print(f"Warning: File not found: {filename}")
 
-        # Add directories
+        for source_rel, archive_name in EXTERNAL_RUNTIME_FILES:
+            source_path = os.path.join(workspace_root, source_rel)
+            if not os.path.exists(source_path):
+                print(f"Warning: External runtime file not found: {source_rel}")
+                continue
+            print(f"Adding external runtime file: {source_rel} -> {archive_name}")
+            zipf.write(source_path, arcname=archive_name)
+
+        for filename in included_script_files:
+            file_path = os.path.join(project_root, filename)
+            if os.path.exists(file_path):
+                print(f"Adding release script: {filename}")
+                zipf.write(file_path, arcname=filename)
+            else:
+                print(f"Warning: Release script not found: {filename}")
+
+        # Add static assets and prompt templates.  Development dependencies,
+        # build outputs, and transient backups are not server runtime inputs.
         for dirname in include_dirs:
             dir_path = os.path.join(project_root, dirname)
             if os.path.exists(dir_path):
                 print(f"Adding directory: {dirname}")
                 for root, dirs, files in os.walk(dir_path):
-                    # Skip __pycache__ and hidden files
-                    dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+                    dirs[:] = [
+                        d for d in dirs
+                        if not d.startswith('.') and d not in {'__pycache__', 'node_modules', 'dist', 'backup', 'backups'}
+                    ]
                     
                     for file in files:
-                        if file.startswith('.') or file.endswith('.pyc'):
+                        if file.startswith('.') or file.endswith('.pyc') or file in EXCLUDED_RUNTIME_FILES:
                             continue
-                            
                         abs_path = os.path.join(root, file)
-                        # Calculate relative path for arcname
                         rel_path = os.path.relpath(abs_path, project_root)
-                        if _should_skip_file(rel_path):
-                            print(f"  Skipping runtime DB: {rel_path}")
-                            continue
                         print(f"  Adding: {rel_path}")
                         zipf.write(abs_path, arcname=rel_path)
             else:

@@ -498,15 +498,18 @@ async function openKbEditEmbedRequest() {
     document.body.classList.add('kb-edit-embed-mode');
     kbEditEmbedSaved = false;
     try {
+        let item = null;
         if (kbEditEmbedRequest.create) {
             await openKBEditModal();
         } else {
-            const item = await fetchKbEditEmbedItem(kbEditEmbedRequest.id);
+            item = await fetchKbEditEmbedItem(kbEditEmbedRequest.id);
             await openKBEditModal(kbEditEmbedRequest.id, { item });
         }
         postKbEditEmbedMessage('ready', {
             kbId: kbEditEmbedRequest.id || '',
-            changeSource: kbEditEmbedRequest.changeSource || ''
+            changeSource: kbEditEmbedRequest.changeSource || '',
+            reviewStatus: String(item?.review_status || '').trim(),
+            updateTime: String(item?.update_time || '').trim(),
         });
         return true;
     } catch (e) {
@@ -1296,6 +1299,11 @@ const TAB_META = {
         group: '核心数据',
         description: '对拟新增 FAQ 执行语义召回、范围校验、覆盖判断与人工确认。',
     },
+    knowledgeGraphView: {
+        title: '知识图谱',
+        group: '核心数据',
+        description: '按品类与主题查看知识范围和治理状态，并保留单条关系的精确复核。',
+    },
     matrixView: {
         title: '机型矩阵管理',
         group: '核心数据',
@@ -1320,6 +1328,11 @@ const TAB_META = {
         title: '管控中心',
         group: '质量管控',
         description: '管理质量任务池、原始问题聚合与任务整改闭环。',
+    },
+    parameterCheckView: {
+        title: '参数校对',
+        group: '质量管控',
+        description: '查看 KB 待核查声明与参数功能清单参考证据的校对结果，保留人工确认边界。',
     },
     dataSettingsView: {
         title: '数据设置',
@@ -1489,7 +1502,7 @@ function scheduleWorkbenchSidebarHeightUpdate() {
 function normalizeWorkbenchViews() {
     const viewsWrap = document.querySelector('.workbench-views');
     if (!viewsWrap) return;
-    const viewIds = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const viewIds = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
     viewIds.forEach(id => {
         const el = document.getElementById(id);
         if (el && el.parentElement !== viewsWrap) viewsWrap.appendChild(el);
@@ -1498,7 +1511,7 @@ function normalizeWorkbenchViews() {
 
 function switchTab(tabId) {
     normalizeWorkbenchViews();
-    const tabs = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const tabs = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
     const viewsWrap = document.querySelector('.workbench-views');
     const isQualityControlCenter = tabId === 'controlCenterView';
     [
@@ -1562,6 +1575,8 @@ function switchTab(tabId) {
         if (typeof renderKBCompareResults === 'function') renderKBCompareResults();
     } else if (tabId === 'kbDuplicateCheckView') {
         if (typeof kdInit === 'function') kdInit();
+    } else if (tabId === 'knowledgeGraphView') {
+        if (typeof switchKnowledgeGraphSubView === 'function') switchKnowledgeGraphSubView('catalog');
     } else if (tabId === 'scoringView') {
         if (typeof isScoringInProgress === 'function' && isScoringInProgress()) {
             if (typeof renderScoringTable === 'function') renderScoringTable(true);
@@ -1574,6 +1589,8 @@ function switchTab(tabId) {
         if (typeof loadGovMonths === 'function') loadGovMonths('', { reuse: true });
     } else if (tabId === 'controlCenterView') {
         if (typeof qcLoadAll === 'function') qcLoadAll();
+    } else if (tabId === 'parameterCheckView') {
+        if (typeof loadParameterCheckOverview === 'function') loadParameterCheckOverview();
     } else if (tabId === 'modificationsView') {
         if (typeof loadModifications === 'function') loadModifications(1);
         const toggle = document.getElementById('modAutoRefreshToggle');
@@ -1585,10 +1602,1820 @@ function switchTab(tabId) {
     } else if (tabId === 'smartMappingView') {
         if (typeof smInitSmartMapping === 'function') smInitSmartMapping();
     }
-    if (typeof enableAllTableDragScroll === 'function') enableAllTableDragScroll();
     if (typeof enableAllTableColumnResize === 'function') enableAllTableColumnResize();
     scheduleWorkbenchSidebarHeightUpdate();
     applyWorkbenchLayoutHotfix();
+}
+
+const KNOWLEDGE_GRAPH_RELATION_META = {
+    APPLIES_TO: { label: '适用于', tone: 'success' },
+    SPECIALIZES: { label: '细化', tone: 'info' },
+    EXCEPTION_TO: { label: '条件例外', tone: 'warning' },
+    CONFLICTS_WITH: { label: '结论冲突', tone: 'danger' },
+    OVERLAPS_WITH: { label: '范围重叠', tone: 'info' },
+    DUPLICATES: { label: '疑似重复', tone: 'muted' },
+    RELATED_TO: { label: '相关', tone: 'muted' },
+    ROUTES_TO: { label: '主题导航', tone: 'muted' },
+    PARENT_TOPIC_OF: { label: '主题父级', tone: 'muted' },
+    PREREQUISITE_FOR: { label: '前置于', tone: 'warning' },
+    SUBPROCEDURE_OF: { label: '子流程', tone: 'info' },
+};
+
+const KNOWLEDGE_GRAPH_REVIEW_META = {
+    candidate: { label: '待复核', tone: 'pending' },
+    confirmed: { label: '已确认', tone: 'success' },
+    rejected: { label: '已驳回', tone: 'muted' },
+    expired: { label: '已过期', tone: 'warning' },
+};
+
+const knowledgeGraphState = {
+    selectedWikiId: '',
+    selectedEdgeId: '',
+    edges: [],
+    catalogSnapshot: {},
+    revisionFromClaims: {},
+    revisionToClaims: {},
+    editingWikiId: '',
+    loading: false,
+    subView: 'catalog',
+    catalogLoading: false,
+    catalogOverview: null,
+    catalogCategory: '',
+    catalogTopic: '',
+    catalogTopics: [],
+    catalogPreviewLoading: false,
+    catalogCandidatePreview: null,
+    candidateBatchesLoading: false,
+    candidateBatches: [],
+    selectedCandidateBatchId: '',
+    attentionLoading: false,
+    attentionCategory: '',
+    attentionReason: 'all',
+    attentionPage: 1,
+    attentionPageSize: 100,
+    attentionQueue: null,
+    topicAssignmentWikiId: '',
+};
+
+function switchKnowledgeGraphSubView(view) {
+    const isCatalog = view !== 'review';
+    knowledgeGraphState.subView = isCatalog ? 'catalog' : 'review';
+    const catalog = document.getElementById('knowledgeGraphCatalogView');
+    const review = document.getElementById('knowledgeGraphReviewView');
+    const catalogTab = document.getElementById('knowledgeGraphCatalogTab');
+    const reviewTab = document.getElementById('knowledgeGraphReviewTab');
+    if (catalog) catalog.classList.toggle('d-none', !isCatalog);
+    if (review) review.classList.toggle('d-none', isCatalog);
+    if (catalogTab) {
+        catalogTab.classList.toggle('primary-btn', isCatalog);
+        catalogTab.classList.toggle('btn-secondary-outline', !isCatalog);
+        catalogTab.setAttribute('aria-selected', String(isCatalog));
+    }
+    if (reviewTab) {
+        reviewTab.classList.toggle('primary-btn', !isCatalog);
+        reviewTab.classList.toggle('btn-secondary-outline', isCatalog);
+        reviewTab.setAttribute('aria-selected', String(!isCatalog));
+    }
+    if (isCatalog) loadKnowledgeGraphCatalog();
+    else loadKnowledgeGraph();
+}
+
+function knowledgeGraphCatalogMetrics(items) {
+    return items.reduce((total, item) => ({
+        knowledge: total.knowledge + Number(item.knowledge_count || 0),
+        products: total.products + Number(item.product_relation_count || 0),
+        candidates: total.candidates + Number(item.candidate_edge_count || 0),
+        unknown: total.unknown + Number(item.scope_unknown_count || 0),
+    }), { knowledge: 0, products: 0, candidates: 0, unknown: 0 });
+}
+
+function bindKnowledgeGraphCatalogActions() {
+    document.querySelectorAll('[data-knowledge-graph-category]').forEach(button => {
+        button.onclick = () => loadKnowledgeGraphCatalogTopics(button.dataset.knowledgeGraphCategory);
+    });
+    document.querySelectorAll('[data-knowledge-graph-topic]').forEach(button => {
+        button.onclick = () => loadKnowledgeGraphCatalogTopics(knowledgeGraphState.catalogCategory, button.dataset.knowledgeGraphTopic);
+    });
+    document.querySelectorAll('[data-knowledge-graph-wiki]').forEach(button => {
+        button.onclick = () => openKnowledgeGraphReview(button.dataset.knowledgeGraphWiki);
+    });
+    document.querySelectorAll('[data-knowledge-graph-batch-id]').forEach(button => {
+        button.onclick = () => loadKnowledgeGraphCandidateBatchDetail(button.dataset.knowledgeGraphBatchId);
+    });
+    document.querySelectorAll('[data-knowledge-graph-batch-wiki]').forEach(button => {
+        button.onclick = () => openKnowledgeGraphReview(button.dataset.knowledgeGraphBatchWiki);
+    });
+    document.querySelectorAll('[data-knowledge-graph-attention-wiki]').forEach(button => {
+        button.onclick = () => openKnowledgeGraphReview(button.dataset.knowledgeGraphAttentionWiki);
+    });
+    document.querySelectorAll('[data-knowledge-graph-topic-assignment]').forEach(button => {
+        button.onclick = () => openKnowledgeGraphTopicAssignment(button.dataset.knowledgeGraphTopicAssignment);
+    });
+}
+
+function renderKnowledgeGraphCatalog(overview) {
+    const items = Array.isArray(overview?.items) ? overview.items : [];
+    const total = overview?.overall_metrics;
+    const metrics = total ? {
+        knowledge: Number(total.knowledge_count || 0),
+        products: Number(total.product_relation_count || 0),
+        candidates: Number(total.candidate_edge_count || 0),
+        unknown: Number(total.scope_unknown_count || 0),
+    } : knowledgeGraphCatalogMetrics(items);
+    const summary = document.getElementById('knowledgeGraphCatalogSummary');
+    const body = document.getElementById('knowledgeGraphCatalogBody');
+    if (summary) {
+        summary.innerHTML = [
+            ['已纳入知识', metrics.knowledge, 'neutral'],
+            ['产品适用关系', metrics.products, 'success'],
+            ['待复核关系', metrics.candidates, 'pending'],
+            ['范围未知', metrics.unknown, 'warning'],
+        ].map(([label, value, tone]) => `<div class="is-${tone}"><dt>${label}</dt><dd>${Number(value).toLocaleString()}</dd></div>`).join('');
+    }
+    if (!body) return;
+    if (!items.length) {
+        body.innerHTML = '<tr><td colspan="7" class="empty-message">当前只读索引中暂无可展示的知识。</td></tr>';
+        return;
+    }
+    body.innerHTML = items.map(item => {
+        const scopeStatus = Number(item.scope_unknown_count || 0) > 0
+            ? `<span class="knowledge-graph-badge is-warning">${Number(item.scope_unknown_count)} 条范围未知</span>`
+            : '<span class="knowledge-graph-badge is-success">已登记范围</span>';
+        const relationStatus = [
+            Number(item.candidate_edge_count || 0) ? `待复核 ${Number(item.candidate_edge_count)}` : '',
+            Number(item.effective_edge_count || 0) ? `有效 ${Number(item.effective_edge_count)}` : '',
+            Number(item.governance_issue_count || 0) ? `治理项 ${Number(item.governance_issue_count)}` : '',
+        ].filter(Boolean).join(' / ') || '暂无知识间关系';
+        return `<tr>
+            <td><strong>${knowledgeGraphEscape(item.category)}</strong></td>
+            <td>${Number(item.knowledge_count || 0).toLocaleString()}</td>
+            <td>${Number(item.product_relation_count || 0).toLocaleString()}</td>
+            <td><small>${knowledgeGraphEscape(relationStatus)}</small></td>
+            <td>${Number(item.topic_count || 0).toLocaleString()}</td>
+            <td>${scopeStatus}</td>
+            <td><button type="button" class="icon-btn" data-knowledge-graph-category="${knowledgeGraphEscape(item.category)}" title="查看主题矩阵" aria-label="查看 ${knowledgeGraphEscape(item.category)} 的主题矩阵"><i class="fas fa-table-list" aria-hidden="true"></i></button></td>
+        </tr>`;
+    }).join('');
+    bindKnowledgeGraphCatalogActions();
+}
+
+async function loadKnowledgeGraphCatalog(options = {}) {
+    if (knowledgeGraphState.catalogLoading && !options.force) return;
+    const status = document.getElementById('knowledgeGraphCatalogStatus');
+    knowledgeGraphState.catalogLoading = true;
+    if (status) status.textContent = '正在读取品类总览...';
+    try {
+        const [result] = await Promise.all([
+            api('/kb/graph/catalog/overview'),
+            loadKnowledgeGraphCandidateBatches(options),
+            loadKnowledgeGraphAttentionQueue(options),
+        ]);
+        knowledgeGraphState.catalogOverview = result;
+        renderKnowledgeGraphCatalog(result);
+        if (status) status.textContent = `已读取 ${Number(result.source_knowledge_count || 0).toLocaleString()} 条知识。产品范围只按已配置的产品矩阵统计；无可靠范围的知识保留在“范围未知”。`;
+    } catch (error) {
+        if (status) status.textContent = `读取品类总览失败：${error.message || error}`;
+    } finally {
+        knowledgeGraphState.catalogLoading = false;
+    }
+}
+
+function renderKnowledgeGraphAttentionQueue(result) {
+    const body = document.getElementById('knowledgeGraphAttentionBody');
+    const category = document.getElementById('knowledgeGraphAttentionCategory');
+    const reason = document.getElementById('knowledgeGraphAttentionReason');
+    const pageMeta = document.getElementById('knowledgeGraphAttentionPageMeta');
+    const previous = document.getElementById('knowledgeGraphAttentionPrevious');
+    const next = document.getElementById('knowledgeGraphAttentionNext');
+    if (!body) return;
+    const items = Array.isArray(result?.items) ? result.items : [];
+    knowledgeGraphState.attentionQueue = result;
+    if (category) {
+        const selected = knowledgeGraphState.attentionCategory;
+        category.innerHTML = `<option value="">全部品类</option>${(result?.available_categories || []).map(value => `<option value="${knowledgeGraphEscape(value)}">${knowledgeGraphEscape(value)}</option>`).join('')}`;
+        category.value = selected;
+    }
+    if (reason) reason.value = knowledgeGraphState.attentionReason;
+    if (!items.length) {
+        body.innerHTML = '<tr><td colspan="6" class="empty-message">当前筛选条件下没有待补主题或范围的知识。</td></tr>';
+    } else {
+        body.innerHTML = items.map(item => {
+            const reasons = (item.attention_reasons || []).map(value => `<span class="knowledge-graph-badge is-warning">${knowledgeGraphEscape(value)}</span>`).join(' ');
+            return `<tr><td><strong>${knowledgeGraphEscape(item.wiki_id)}</strong><small>产品关系 ${Number(item.product_relation_count || 0).toLocaleString()} 条</small></td><td><small>${knowledgeGraphEscape(knowledgeGraphShort(item.question, 130) || '未记录问题文本')}</small></td><td><small>${knowledgeGraphEscape((item.categories || []).join('、') || '范围未知')}</small></td><td><strong>${knowledgeGraphEscape(item.topic || '待归类')}</strong><small>${knowledgeGraphEscape(item.topic_status || '')}</small></td><td>${reasons}</td><td><div class="knowledge-graph-batch-wiki-actions"><button type="button" class="icon-btn" data-knowledge-graph-attention-wiki="${knowledgeGraphEscape(item.wiki_id)}" title="进入关系复核" aria-label="查看 ${knowledgeGraphEscape(item.wiki_id)} 的关系复核"><i class="fas fa-clipboard-check" aria-hidden="true"></i></button><button type="button" class="icon-btn" data-knowledge-graph-topic-assignment="${knowledgeGraphEscape(item.wiki_id)}" title="人工校对主题" aria-label="校对 ${knowledgeGraphEscape(item.wiki_id)} 的主题"><i class="fas fa-tags" aria-hidden="true"></i></button></div></td></tr>`;
+        }).join('');
+    }
+    const total = Number(result?.total || 0);
+    const page = Number(result?.page || 1);
+    const pageSize = Number(result?.page_size || knowledgeGraphState.attentionPageSize);
+    const start = total ? ((page - 1) * pageSize + 1) : 0;
+    const end = Math.min(page * pageSize, total);
+    if (pageMeta) pageMeta.textContent = `显示 ${start.toLocaleString()}-${end.toLocaleString()} / ${total.toLocaleString()} 条`;
+    if (previous) previous.disabled = page <= 1;
+    if (next) next.disabled = end >= total;
+    bindKnowledgeGraphCatalogActions();
+}
+
+async function loadKnowledgeGraphAttentionQueue(options = {}) {
+    if (knowledgeGraphState.attentionLoading && !options.force) return;
+    const status = document.getElementById('knowledgeGraphAttentionStatus');
+    knowledgeGraphState.attentionLoading = true;
+    if (status) status.textContent = '正在读取待补主题与范围清单...';
+    try {
+        const params = new URLSearchParams({
+            reason: knowledgeGraphState.attentionReason,
+            page: String(knowledgeGraphState.attentionPage),
+            page_size: String(knowledgeGraphState.attentionPageSize),
+        });
+        if (knowledgeGraphState.attentionCategory) params.set('category', knowledgeGraphState.attentionCategory);
+        const result = await api(`/kb/graph/catalog/attention?${params.toString()}`);
+        if (!result?.success) throw new Error(result?.message || '读取待补清单失败。');
+        renderKnowledgeGraphAttentionQueue(result);
+        if (status) status.textContent = `待归类 ${Number(result.summary?.topic_missing_count || 0).toLocaleString()} 条，主题待复核 ${Number(result.summary?.topic_stale_count || 0).toLocaleString()} 条，词表待复核 ${Number(result.summary?.topic_vocabulary_stale_count || 0).toLocaleString()} 条，范围未知 ${Number(result.summary?.scope_unknown_count || 0).toLocaleString()} 条。仅用于定位，未推断或写入主题、范围。`;
+    } catch (error) {
+        if (status) status.textContent = `读取待补清单失败：${error.message || error}`;
+        renderKnowledgeGraphAttentionQueue({ items: [], page: 1, page_size: knowledgeGraphState.attentionPageSize, total: 0 });
+    } finally {
+        knowledgeGraphState.attentionLoading = false;
+    }
+}
+
+function updateKnowledgeGraphAttentionFilters() {
+    knowledgeGraphState.attentionCategory = String(document.getElementById('knowledgeGraphAttentionCategory')?.value || '').trim();
+    knowledgeGraphState.attentionReason = String(document.getElementById('knowledgeGraphAttentionReason')?.value || 'all');
+    knowledgeGraphState.attentionPage = 1;
+    loadKnowledgeGraphAttentionQueue({ force: true });
+}
+
+function changeKnowledgeGraphAttentionPage(delta) {
+    const total = Number(knowledgeGraphState.attentionQueue?.total || 0);
+    const maxPage = Math.max(1, Math.ceil(total / knowledgeGraphState.attentionPageSize));
+    const nextPage = Math.min(maxPage, Math.max(1, knowledgeGraphState.attentionPage + Number(delta || 0)));
+    if (nextPage === knowledgeGraphState.attentionPage) return;
+    knowledgeGraphState.attentionPage = nextPage;
+    loadKnowledgeGraphAttentionQueue({ force: true });
+}
+
+function renderKnowledgeGraphTopicAssignment(item, definitions = [], errorMessage = '') {
+    const panel = document.getElementById('knowledgeGraphTopicAssignmentPanel');
+    if (!panel) return;
+    const options = definitions.map(definition => `<option value="${knowledgeGraphEscape(definition.topic_id)}">${knowledgeGraphEscape(definition.display_name)}</option>`).join('');
+    const unavailable = !definitions.length;
+    const select = unavailable
+        ? '<select id="knowledgeGraphTopicAssignmentTopic" class="input-modern" disabled><option>当前品类暂无试点主题</option></select>'
+        : `<select id="knowledgeGraphTopicAssignmentTopic" class="input-modern"><option value="">请选择受控主题</option>${options}</select>`;
+    const status = errorMessage
+        ? `<p class="knowledge-graph-topic-assignment-note is-error">${knowledgeGraphEscape(errorMessage)}</p>`
+        : unavailable
+            ? '<p class="knowledge-graph-topic-assignment-note">该知识的已登记产品品类不在本期词表试点内，保持待归类，不可保存。</p>'
+            : '<p class="knowledge-graph-topic-assignment-note">主题只用于图谱侧车组织，不会修改知识正文、产品矩阵或关系状态。</p>';
+    panel.innerHTML = `<div class="knowledge-graph-topic-assignment-head"><div><strong>人工主题校对 / ${knowledgeGraphEscape(item.wiki_id)}</strong><span>${knowledgeGraphEscape(knowledgeGraphShort(item.question, 180) || '未记录问题文本')}。请先查看关系复核中的来源证据，再记录人工主题。</span></div><button type="button" class="icon-btn" onclick="closeKnowledgeGraphTopicAssignment()" title="关闭主题校对" aria-label="关闭主题校对"><i class="fas fa-xmark" aria-hidden="true"></i></button></div><div class="knowledge-graph-topic-assignment-form"><label>受控主题${select}</label><label>校对依据<textarea id="knowledgeGraphTopicAssignmentNote" class="input-modern" placeholder="记录来源证据、判断依据或需要复查的条件。" ${unavailable ? 'disabled' : ''}></textarea></label><label>确认词<input id="knowledgeGraphTopicAssignmentConfirmation" class="input-modern" placeholder="确认主题校对" ${unavailable ? 'disabled' : ''}></label><button type="button" class="action-btn primary-btn" onclick="saveKnowledgeGraphTopicAssignment()" ${unavailable ? 'disabled' : ''}><i class="fas fa-check" aria-hidden="true"></i><span>保存主题校对</span></button></div>${status}`;
+    if (!unavailable) document.getElementById('knowledgeGraphTopicAssignmentTopic')?.focus();
+}
+
+async function openKnowledgeGraphTopicAssignment(wikiId) {
+    const item = (knowledgeGraphState.attentionQueue?.items || []).find(row => row.wiki_id === wikiId);
+    const panel = document.getElementById('knowledgeGraphTopicAssignmentPanel');
+    if (!item || !panel) return;
+    knowledgeGraphState.topicAssignmentWikiId = wikiId;
+    panel.hidden = false;
+    panel.innerHTML = '<div class="knowledge-graph-topic-assignment-head"><div><strong>人工主题校对</strong><span>正在按已登记产品品类读取受控主题词表...</span></div></div>';
+    try {
+        const category = (item.categories || []).join(',');
+        const result = await api(`/kb/graph/catalog/topic-vocabulary?category=${encodeURIComponent(category)}`);
+        if (!result?.success) throw new Error(result?.message || '读取受控主题词表失败。');
+        if (knowledgeGraphState.topicAssignmentWikiId !== wikiId) return;
+        renderKnowledgeGraphTopicAssignment(item, result.items || []);
+    } catch (error) {
+        if (knowledgeGraphState.topicAssignmentWikiId !== wikiId) return;
+        renderKnowledgeGraphTopicAssignment(item, [], error?.message || '读取受控主题词表失败。');
+    }
+}
+
+function closeKnowledgeGraphTopicAssignment() {
+    const panel = document.getElementById('knowledgeGraphTopicAssignmentPanel');
+    if (panel) panel.hidden = true;
+    knowledgeGraphState.topicAssignmentWikiId = '';
+}
+
+async function saveKnowledgeGraphTopicAssignment() {
+    const wikiId = knowledgeGraphState.topicAssignmentWikiId;
+    const topicSelect = document.getElementById('knowledgeGraphTopicAssignmentTopic');
+    const topicId = String(topicSelect?.value || '').trim();
+    const topicName = String(topicSelect?.selectedOptions?.[0]?.textContent || '').trim();
+    const reviewNote = String(document.getElementById('knowledgeGraphTopicAssignmentNote')?.value || '').trim();
+    const confirmation = String(document.getElementById('knowledgeGraphTopicAssignmentConfirmation')?.value || '').trim();
+    if (!wikiId || !topicId || !reviewNote || confirmation !== '确认主题校对') {
+        if (typeof showToast === 'function') showToast('请选择受控主题，并填写校对依据和“确认主题校对”。', 'warning');
+        return;
+    }
+    try {
+        const result = await api('/kb/graph/catalog/topic-assignments', 'POST', {
+            wiki_id: wikiId,
+            topic_id: topicId,
+            review_note: reviewNote,
+            confirmation_phrase: confirmation,
+        });
+        if (!result?.success) throw new Error(result?.message || '保存主题校对失败。');
+        if (typeof showToast === 'function') showToast(`已保存 ${topicName} 的人工主题校对。`, 'success');
+        closeKnowledgeGraphTopicAssignment();
+        await loadKnowledgeGraphCatalog({ force: true });
+    } catch (error) {
+        if (typeof showToast === 'function') showToast(error?.message || '保存主题校对失败。', 'error');
+    }
+}
+
+function knowledgeGraphBatchStatus(batch) {
+    if (batch?.status === 'rolled_back') return { label: '已回退', tone: 'muted' };
+    return { label: '进行中', tone: 'pending' };
+}
+
+function renderKnowledgeGraphCandidateBatches(result) {
+    const body = document.getElementById('knowledgeGraphBatchesBody');
+    if (!body) return;
+    const items = Array.isArray(result?.items) ? result.items : [];
+    knowledgeGraphState.candidateBatches = items;
+    if (!items.length) {
+        body.innerHTML = '<tr><td colspan="6" class="empty-message">当前没有候选批次。规则预览不会自动创建批次或关系。</td></tr>';
+        return;
+    }
+    body.innerHTML = items.map(batch => {
+        const status = knowledgeGraphBatchStatus(batch);
+        const topics = Array.isArray(batch.topics) && batch.topics.length ? batch.topics.join('、') : '未记录主题';
+        const total = Number(batch.edge_count || 0);
+        const reviewed = Number(batch.reviewed_count || 0);
+        return `<tr>
+            <td><strong>${knowledgeGraphEscape(String(batch.batch_id || '').slice(0, 8))}</strong><small>${knowledgeGraphEscape(batch.created_by || '未记录操作人')}</small></td>
+            <td><strong>${knowledgeGraphEscape(batch.category || '未记录品类')}</strong><small>${knowledgeGraphEscape(topics)}</small></td>
+            <td><strong>${Number(batch.candidate_count || 0).toLocaleString()} 条待复核</strong><small>已处理 ${reviewed.toLocaleString()} / ${total.toLocaleString()}；${Number(batch.cluster_count || 0).toLocaleString()} 个候选簇</small></td>
+            <td><span class="knowledge-graph-badge is-${status.tone}">${knowledgeGraphEscape(status.label)}</span></td>
+            <td><small>${knowledgeGraphEscape(batch.created_at || '未记录')}</small></td>
+            <td><button type="button" class="icon-btn" data-knowledge-graph-batch-id="${knowledgeGraphEscape(batch.batch_id)}" title="查看批次候选簇" aria-label="查看候选批次 ${knowledgeGraphEscape(batch.batch_id)}"><i class="fas fa-list-check" aria-hidden="true"></i></button></td>
+        </tr>`;
+    }).join('');
+    bindKnowledgeGraphCatalogActions();
+}
+
+async function loadKnowledgeGraphCandidateBatches(options = {}) {
+    if (knowledgeGraphState.candidateBatchesLoading && !options.force) return;
+    const status = document.getElementById('knowledgeGraphBatchesStatus');
+    knowledgeGraphState.candidateBatchesLoading = true;
+    if (status) status.textContent = '正在读取候选批次...';
+    try {
+        const result = await api('/kb/graph/catalog/candidate-batches');
+        if (!result?.success) throw new Error(result?.message || '读取候选批次失败。');
+        renderKnowledgeGraphCandidateBatches(result);
+        if (status) status.textContent = result.items?.length
+            ? `已读取 ${Number(result.items.length).toLocaleString()} 个候选批次；进度按当前关系状态实时汇总。`
+            : '当前没有候选批次。预览结果不会自动写入关系。';
+    } catch (error) {
+        if (status) status.textContent = `读取候选批次失败：${error.message || error}`;
+        renderKnowledgeGraphCandidateBatches({ items: [] });
+    } finally {
+        knowledgeGraphState.candidateBatchesLoading = false;
+    }
+}
+
+function renderKnowledgeGraphCandidateBatchDetail(result) {
+    const panel = document.getElementById('knowledgeGraphBatchDetail');
+    if (!panel) return;
+    const batch = result?.batch || {};
+    const edges = Array.isArray(result?.edges) ? result.edges : [];
+    const groups = edges.reduce((all, edge) => {
+        const key = edge.cluster_key || '未归入候选簇';
+        (all[key] ||= []).push(edge);
+        return all;
+    }, {});
+    const clusters = Object.entries(groups).map(([key, rows]) => {
+        const body = rows.map(edge => {
+            const relation = knowledgeGraphMeta(KNOWLEDGE_GRAPH_RELATION_META, edge.relation_type);
+            const review = knowledgeGraphMeta(KNOWLEDGE_GRAPH_REVIEW_META, edge.review_status);
+            return `<tr><td><strong>${knowledgeGraphEscape(edge.from_wiki_id)}</strong></td><td><span class="knowledge-graph-badge is-${relation.tone}">${knowledgeGraphEscape(relation.label)}</span></td><td><strong>${knowledgeGraphEscape(edge.to_wiki_id)}</strong></td><td><span class="knowledge-graph-badge is-${review.tone}">${knowledgeGraphEscape(review.label)}</span></td><td><div class="knowledge-graph-batch-wiki-actions"><button type="button" class="icon-btn" data-knowledge-graph-batch-wiki="${knowledgeGraphEscape(edge.from_wiki_id)}" title="在关系复核中查看起点知识" aria-label="查看起点 ${knowledgeGraphEscape(edge.from_wiki_id)}"><i class="fas fa-arrow-right-from-bracket" aria-hidden="true"></i></button><button type="button" class="icon-btn" data-knowledge-graph-batch-wiki="${knowledgeGraphEscape(edge.to_wiki_id)}" title="在关系复核中查看目标知识" aria-label="查看目标 ${knowledgeGraphEscape(edge.to_wiki_id)}"><i class="fas fa-arrow-right-to-bracket" aria-hidden="true"></i></button></div></td></tr>`;
+        }).join('');
+        return `<section class="knowledge-graph-batch-cluster"><h5>${knowledgeGraphEscape(key)} / ${Number(rows.length).toLocaleString()} 条</h5><div class="table-container knowledge-graph-table-wrap"><table class="kb-table knowledge-graph-table"><thead><tr><th>起点 Wiki ID</th><th>关系</th><th>目标 Wiki ID</th><th>当前状态</th><th>进入复核</th></tr></thead><tbody>${body}</tbody></table></div></section>`;
+    }).join('');
+    panel.hidden = false;
+    panel.innerHTML = `<div class="knowledge-graph-batch-detail-head"><div><strong>批次 ${knowledgeGraphEscape(String(batch.batch_id || '').slice(0, 8))} / ${knowledgeGraphEscape(batch.category || '未记录品类')}</strong><span>${knowledgeGraphEscape((batch.topics || []).join('、') || '未记录主题')}；共 ${Number(edges.length).toLocaleString()} 条候选关系。</span></div><button type="button" class="icon-btn" onclick="closeKnowledgeGraphCandidateBatchDetail()" title="关闭批次详情" aria-label="关闭批次详情"><i class="fas fa-xmark" aria-hidden="true"></i></button></div>${clusters || '<div class="knowledge-graph-empty">该批次没有可展示的关系记录。</div>'}`;
+    bindKnowledgeGraphCatalogActions();
+}
+
+async function loadKnowledgeGraphCandidateBatchDetail(batchId) {
+    const id = String(batchId || '').trim();
+    if (!id) return;
+    const panel = document.getElementById('knowledgeGraphBatchDetail');
+    if (panel) {
+        panel.hidden = false;
+        panel.innerHTML = '<div class="knowledge-graph-empty">正在读取候选簇...</div>';
+    }
+    try {
+        const result = await api(`/kb/graph/catalog/candidate-batches/${encodeURIComponent(id)}`);
+        if (!result?.success) throw new Error(result?.message || '读取候选批次详情失败。');
+        knowledgeGraphState.selectedCandidateBatchId = id;
+        renderKnowledgeGraphCandidateBatchDetail(result);
+    } catch (error) {
+        if (panel) panel.innerHTML = `<div class="knowledge-graph-empty">读取候选批次详情失败：${knowledgeGraphEscape(error.message || error)}</div>`;
+    }
+}
+
+function closeKnowledgeGraphCandidateBatchDetail() {
+    const panel = document.getElementById('knowledgeGraphBatchDetail');
+    if (panel) panel.hidden = true;
+    knowledgeGraphState.selectedCandidateBatchId = '';
+}
+
+function closeKnowledgeGraphTopics() {
+    const panel = document.getElementById('knowledgeGraphTopicPanel');
+    const preview = document.getElementById('knowledgeGraphCatalogCandidatePreview');
+    if (panel) panel.hidden = true;
+    if (preview) preview.hidden = true;
+    knowledgeGraphState.catalogCategory = '';
+    knowledgeGraphState.catalogTopic = '';
+    knowledgeGraphState.catalogTopics = [];
+    knowledgeGraphState.catalogCandidatePreview = null;
+}
+
+function renderKnowledgeGraphCatalogTopics(result) {
+    const panel = document.getElementById('knowledgeGraphTopicPanel');
+    const title = document.getElementById('knowledgeGraphTopicTitle');
+    const meta = document.getElementById('knowledgeGraphTopicMeta');
+    const body = document.getElementById('knowledgeGraphTopicsBody');
+    const knowledge = document.getElementById('knowledgeGraphTopicKnowledge');
+    if (!panel || !body || !knowledge) return;
+    panel.hidden = false;
+    if (title) title.textContent = `${result.category} / 主题矩阵`;
+    if (meta) meta.textContent = '“待归类”表示图谱侧车尚未有可用主题字段，不参与自动推断。';
+    const items = Array.isArray(result.items) ? result.items : [];
+    knowledgeGraphState.catalogTopics = items;
+    const eligibleTopics = items.filter(item => item.topic !== '待归类');
+    const previewButton = document.getElementById('knowledgeGraphCatalogPreviewButton');
+    if (previewButton) previewButton.disabled = !eligibleTopics.length || eligibleTopics.length > 5;
+    body.innerHTML = items.length ? items.map(item => `<tr>
+        <td><strong>${knowledgeGraphEscape(item.topic)}</strong></td>
+        <td>${Number(item.knowledge_count || 0).toLocaleString()}</td>
+        <td>${Number(item.product_relation_count || 0).toLocaleString()}</td>
+        <td>${Number(item.candidate_edge_count || 0).toLocaleString()}</td>
+        <td>${Number(item.effective_edge_count || 0).toLocaleString()}</td>
+        <td>${Number(item.governance_issue_count || 0).toLocaleString()}</td>
+        <td><button type="button" class="icon-btn" data-knowledge-graph-topic="${knowledgeGraphEscape(item.topic)}" title="查看主题知识" aria-label="查看 ${knowledgeGraphEscape(item.topic)} 主题知识"><i class="fas fa-list" aria-hidden="true"></i></button></td>
+        <td>${item.topic === '待归类' ? '<small>不参与</small>' : `<input type="checkbox" data-knowledge-graph-preview-topic="${knowledgeGraphEscape(item.topic)}" ${eligibleTopics.length <= 5 ? 'checked' : ''} aria-label="选择 ${knowledgeGraphEscape(item.topic)} 参与候选预览">`}</td>
+    </tr>`).join('') : '<tr><td colspan="8" class="empty-message">该品类暂无主题记录。</td></tr>';
+    if (previewButton && eligibleTopics.length > 5) previewButton.title = '请先缩小到不超过 5 个主题。';
+    if (!result.selected_topic) {
+        knowledge.innerHTML = '<div class="knowledge-graph-empty">选择一个主题查看知识列表。</div>';
+    } else {
+        const rows = Array.isArray(result.knowledge_items) ? result.knowledge_items : [];
+        knowledge.innerHTML = `<div class="knowledge-graph-topic-list-head"><strong>${knowledgeGraphEscape(result.selected_topic)} / ${Number(result.knowledge_total || 0).toLocaleString()} 条知识</strong><span>点击条目进入原有关系复核证据页。</span></div>${rows.length ? `<div class="knowledge-graph-topic-list">${rows.map(item => `<button type="button" data-knowledge-graph-wiki="${knowledgeGraphEscape(item.wiki_id)}"><strong>${knowledgeGraphEscape(item.wiki_id)}</strong><span>${knowledgeGraphEscape(knowledgeGraphShort(item.question, 140) || '未记录问题文本')}</span><em>${knowledgeGraphEscape(item.scope_status)}</em></button>`).join('')}</div>` : '<div class="knowledge-graph-empty">该主题暂无可展示知识。</div>'}`;
+    }
+    bindKnowledgeGraphCatalogActions();
+}
+
+async function loadKnowledgeGraphCatalogTopics(category, topic = '') {
+    const selectedCategory = String(category || '').trim();
+    if (!selectedCategory) return;
+    knowledgeGraphState.catalogCategory = selectedCategory;
+    knowledgeGraphState.catalogTopic = String(topic || '').trim();
+    const panel = document.getElementById('knowledgeGraphTopicPanel');
+    if (panel) panel.hidden = false;
+    try {
+        const params = new URLSearchParams();
+        if (knowledgeGraphState.catalogTopic) params.set('topic', knowledgeGraphState.catalogTopic);
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        const result = await api(`/kb/graph/catalog/${encodeURIComponent(selectedCategory)}/topics${suffix}`);
+        renderKnowledgeGraphCatalogTopics(result);
+    } catch (error) {
+        const knowledge = document.getElementById('knowledgeGraphTopicKnowledge');
+        if (knowledge) knowledge.innerHTML = `<div class="knowledge-graph-empty">读取主题矩阵失败：${knowledgeGraphEscape(error.message || error)}</div>`;
+    }
+}
+
+function renderKnowledgeGraphCatalogCandidatePreview(result) {
+    const panel = document.getElementById('knowledgeGraphCatalogCandidatePreview');
+    if (!panel) return;
+    panel.hidden = false;
+    const items = Array.isArray(result?.candidate_items) ? result.candidate_items : [];
+    const skipped = Object.entries(result?.skipped || {})
+        .filter(([, count]) => Number(count) > 0)
+        .map(([reason, count]) => `${knowledgeGraphEscape(reason)} ${Number(count).toLocaleString()}`)
+        .join(' / ') || '无';
+    const topicSummary = (result?.topic_items || []).map(item => `${knowledgeGraphEscape(item.topic)}：${Number(item.eligible_knowledge_count || 0)} 条知识、${Number(item.scanned_pair_count || 0)} 对、${Number(item.candidate_count || 0)} 条候选`).join('；');
+    const rows = items.slice(0, 100).map(item => {
+        const relation = knowledgeGraphMeta(KNOWLEDGE_GRAPH_RELATION_META, item.relation_type);
+        const hashes = Object.values(item.source_hashes || {}).filter(Boolean).map(hash => knowledgeGraphShort(hash, 12)).join(' / ') || '-';
+        return `<tr>
+            <td>${knowledgeGraphEscape(item.topic)}</td>
+            <td><strong>${knowledgeGraphEscape(item.from_wiki_id)}</strong><br><small>${knowledgeGraphEscape(knowledgeGraphShort(item.from_question, 80))}</small></td>
+            <td><span class="knowledge-graph-badge is-${relation.tone}">${knowledgeGraphEscape(relation.label)}</span></td>
+            <td><strong>${knowledgeGraphEscape(item.to_wiki_id)}</strong><br><small>${knowledgeGraphEscape(knowledgeGraphShort(item.to_question, 80))}</small></td>
+            <td class="knowledge-graph-preview-evidence">${knowledgeGraphEscape(item.reason)}<br><small>来源哈希：${knowledgeGraphEscape(hashes)}${item.existing_active_relation ? '；已有当前关系' : ''}</small></td>
+        </tr>`;
+    }).join('');
+    const more = items.length > 100 ? `<p class="knowledge-graph-status">已展示前 100 条，共 ${Number(items.length).toLocaleString()} 条拟议候选。</p>` : '';
+    const writableCount = items.filter(item => !item.existing_active_relation).length;
+    const batchControls = writableCount ? `<div class="knowledge-graph-batch-command"><span>可写入 ${Number(writableCount).toLocaleString()} 条新候选；只会写入图谱侧车的 <code>candidate</code> 状态。</span><label>确认词 <input id="knowledgeGraphBatchConfirmation" class="input-modern" type="text" placeholder="写入候选"></label><button type="button" class="action-btn primary-btn" onclick="createKnowledgeGraphCatalogCandidateBatch()"><i class="fas fa-layer-group" aria-hidden="true"></i><span>写入候选</span></button></div>` : '<div class="knowledge-graph-batch-command"><span>本次预览没有可写入的新候选，已有关系不会重复创建。</span></div>';
+    panel.innerHTML = `<div class="knowledge-graph-topic-list-head"><strong>只读候选预览 / ${Number(result?.candidate_count || 0).toLocaleString()} 条拟议关系</strong><span>未创建候选边、批次或审计事件。</span></div><p class="knowledge-graph-preview-meta">${topicSummary || '没有可预览主题'}。跳过：${skipped}。</p>${items.length ? `<div class="table-container knowledge-graph-table-wrap"><table class="kb-table knowledge-graph-table"><thead><tr><th>主题</th><th>起点知识</th><th>拟议关系</th><th>目标知识</th><th>规则依据</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="knowledge-graph-empty">当前分桶没有满足范围和结构化结论条件的候选。</div>'}${more}${batchControls}<div id="knowledgeGraphBatchResult"></div>`;
+}
+
+async function previewKnowledgeGraphCatalogCandidates() {
+    if (knowledgeGraphState.catalogPreviewLoading) return;
+    const category = String(knowledgeGraphState.catalogCategory || '').trim();
+    const topics = Array.from(document.querySelectorAll('[data-knowledge-graph-preview-topic]:checked'))
+        .map(input => String(input.dataset.knowledgeGraphPreviewTopic || '').trim())
+        .filter(Boolean);
+    const panel = document.getElementById('knowledgeGraphCatalogCandidatePreview');
+    if (!category || !topics.length || topics.length > 5) {
+        if (panel) {
+            panel.hidden = false;
+            panel.innerHTML = '<div class="knowledge-graph-empty">请选择 1 至 5 个已归类主题后再预览。</div>';
+        }
+        return;
+    }
+    const button = document.getElementById('knowledgeGraphCatalogPreviewButton');
+    knowledgeGraphState.catalogPreviewLoading = true;
+    if (button) button.disabled = true;
+    if (panel) {
+        panel.hidden = false;
+        panel.innerHTML = '<div class="knowledge-graph-empty">正在生成只读候选预览...</div>';
+    }
+    try {
+        const result = await api('/kb/graph/catalog/candidates/preview', 'POST', {
+            category,
+            topics,
+            max_pairs_per_topic: 20,
+        });
+        if (!result?.success || !result?.dry_run) throw new Error(result?.message || '候选预览失败。');
+        knowledgeGraphState.catalogCandidatePreview = result;
+        renderKnowledgeGraphCatalogCandidatePreview(result);
+    } catch (error) {
+        if (panel) panel.innerHTML = `<div class="knowledge-graph-empty">候选预览失败：${knowledgeGraphEscape(error.message || error)}</div>`;
+    } finally {
+        knowledgeGraphState.catalogPreviewLoading = false;
+        if (button) button.disabled = false;
+    }
+}
+
+async function createKnowledgeGraphCatalogCandidateBatch() {
+    const preview = knowledgeGraphState.catalogCandidatePreview;
+    const resultPanel = document.getElementById('knowledgeGraphBatchResult');
+    const confirmation = String(document.getElementById('knowledgeGraphBatchConfirmation')?.value || '').trim();
+    if (!preview?.candidate_items?.some(item => !item.existing_active_relation)) return;
+    if (confirmation !== '写入候选') {
+        if (resultPanel) resultPanel.innerHTML = '<div class="knowledge-graph-empty">确认词必须为“写入候选”。</div>';
+        return;
+    }
+    try {
+        const result = await api('/kb/graph/catalog/candidate-batches', 'POST', {
+            category: preview.category,
+            topics: preview.topics,
+            max_pairs_per_topic: preview.max_pairs_per_topic,
+            confirmation_phrase: confirmation,
+        });
+        if (!result?.success) throw new Error(result?.message || '候选批次写入失败。');
+        if (resultPanel) resultPanel.innerHTML = `<div class="knowledge-graph-batch-result"><strong>已创建候选批次 ${knowledgeGraphEscape(result.batch_id)}</strong><span>${Number(result.created_count || 0).toLocaleString()} 条边进入待复核；未自动确认。</span><label>回退确认词 <input id="knowledgeGraphBatchRollbackConfirmation" class="input-modern" type="text" placeholder="回退候选批次"></label><label>回退原因 <input id="knowledgeGraphBatchRollbackNote" class="input-modern" type="text"></label><button type="button" class="action-btn btn-secondary-outline" onclick="rollbackKnowledgeGraphCatalogCandidateBatch('${knowledgeGraphEscape(result.batch_id)}')"><i class="fas fa-rotate-left" aria-hidden="true"></i><span>回退未确认候选</span></button></div>`;
+        await loadKnowledgeGraphCandidateBatches({ force: true });
+        await loadKnowledgeGraphCandidateBatchDetail(result.batch_id);
+    } catch (error) {
+        if (resultPanel) resultPanel.innerHTML = `<div class="knowledge-graph-empty">候选批次写入失败：${knowledgeGraphEscape(error.message || error)}</div>`;
+    }
+}
+
+async function rollbackKnowledgeGraphCatalogCandidateBatch(batchId) {
+    const confirmation = String(document.getElementById('knowledgeGraphBatchRollbackConfirmation')?.value || '').trim();
+    const note = String(document.getElementById('knowledgeGraphBatchRollbackNote')?.value || '').trim();
+    const resultPanel = document.getElementById('knowledgeGraphBatchResult');
+    if (confirmation !== '回退候选批次' || !note) {
+        if (resultPanel) resultPanel.insertAdjacentHTML('beforeend', '<div class="knowledge-graph-empty">请填写“回退候选批次”和回退原因。</div>');
+        return;
+    }
+    try {
+        const result = await api(`/kb/graph/catalog/candidate-batches/${encodeURIComponent(batchId)}/rollback`, 'POST', {
+            confirmation_phrase: confirmation,
+            note,
+        });
+        if (!result?.success) throw new Error(result?.message || '候选批次回退失败。');
+        if (resultPanel) resultPanel.innerHTML = `<div class="knowledge-graph-batch-result"><strong>批次已回退</strong><span>${Number(result.expired_count || 0).toLocaleString()} 条未确认候选已标记为过期；${Number(result.preserved_non_candidate_count || 0).toLocaleString()} 条非候选关系保持原状态。</span></div>`;
+        await loadKnowledgeGraphCandidateBatches({ force: true });
+        await loadKnowledgeGraphCandidateBatchDetail(batchId);
+    } catch (error) {
+        if (resultPanel) resultPanel.insertAdjacentHTML('beforeend', `<div class="knowledge-graph-empty">候选批次回退失败：${knowledgeGraphEscape(error.message || error)}</div>`);
+    }
+}
+
+function openKnowledgeGraphReview(wikiId) {
+    const input = document.getElementById('knowledgeGraphWikiId');
+    if (input) input.value = String(wikiId || '');
+    switchKnowledgeGraphSubView('review');
+}
+
+function toggleKnowledgeGraphCandidatePanel() {
+    const body = document.getElementById('knowledgeGraphCandidateBody');
+    const button = document.getElementById('knowledgeGraphCandidateToggle');
+    if (!body || !button) return;
+    const expanded = button.getAttribute('aria-expanded') !== 'true';
+    button.setAttribute('aria-expanded', String(expanded));
+    button.title = expanded ? '收起生成候选' : '展开生成候选';
+    const label = button.querySelector('span');
+    if (label) label.textContent = button.title;
+    body.hidden = !expanded;
+}
+
+function knowledgeGraphMeta(meta, value) {
+    return meta[value] || { label: value || '-', tone: 'muted' };
+}
+
+function knowledgeGraphEscape(value) {
+    return escapeHtml(String(value ?? ''));
+}
+
+function knowledgeGraphShort(value, limit = 150) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function knowledgeGraphParseJson(id, label) {
+    const raw = String(document.getElementById(id)?.value || '').trim();
+    if (!raw) throw new Error(`${label}不能为空。`);
+    try {
+        const value = JSON.parse(raw);
+        if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('not-object');
+        return value;
+    } catch (_) {
+        throw new Error(`${label}必须是合法 JSON 对象。`);
+    }
+}
+
+function renderKnowledgeGraphSummary(summary) {
+    const node = document.getElementById('knowledgeGraphSummary');
+    if (!node) return;
+    const counts = summary?.edge_counts || {};
+    knowledgeGraphState.catalogSnapshot = summary?.product_catalog_snapshot || {};
+    const metrics = [
+        ['图谱节点', summary?.node_count || 0, 'neutral'],
+        ['待复核候选', counts.candidate || 0, 'pending'],
+        ['当前有效关系', summary?.effective_edge_count ?? counts.confirmed ?? 0, 'success'],
+        ['审计事件', summary?.event_count || 0, 'neutral'],
+    ];
+    node.innerHTML = metrics.map(([label, value, tone]) => `<div class="is-${tone}"><dt>${knowledgeGraphEscape(label)}</dt><dd>${Number(value || 0).toLocaleString()}</dd></div>`).join('');
+}
+
+function renderKnowledgeGraphDetail(detail) {
+    const panel = document.getElementById('knowledgeGraphDetail');
+    if (!panel) return;
+    if (!detail?.source) {
+        panel.innerHTML = '<div class="knowledge-graph-empty">输入一条 Wiki ID 查看该知识的产品影响和关系记录。</div>';
+        return;
+    }
+    const products = Array.isArray(detail.products) ? detail.products : [];
+    const node = detail.node || {};
+    const edges = Array.isArray(detail.edges) ? detail.edges : [];
+    const effectiveEdges = Array.isArray(detail.effective_edges) ? detail.effective_edges : [];
+    const scope = node.scope && Object.keys(node.scope).length ? JSON.stringify(node.scope) : '尚未登记';
+    const claims = node.claims && Object.keys(node.claims).length ? JSON.stringify(node.claims) : '尚未登记';
+    panel.innerHTML = `
+        <div class="knowledge-graph-detail-head">
+            <div><span class="knowledge-graph-eyebrow">当前知识</span><h4>${knowledgeGraphEscape(detail.source.question_wiki_id)}</h4><p>${knowledgeGraphEscape(knowledgeGraphShort(detail.source.question, 280) || '未记录问题文本')}</p></div>
+            <div class="knowledge-graph-hash"><span>来源版本</span><code>${knowledgeGraphEscape(detail.source.source_version || '未记录')}</code><span>内容哈希</span><code>${knowledgeGraphEscape((detail.source.content_hash || '').slice(0, 16) || '未记录')}</code></div>
+        </div>
+        <div class="knowledge-graph-detail-grid">
+            <article><h5>产品影响</h5><div class="knowledge-graph-chip-list">${products.length ? products.map(item => `<span>${knowledgeGraphEscape(item.product_name)}</span>`).join('') : '<em>产品矩阵中暂无已配置机型</em>'}</div></article>
+            <article><h5>关系概览</h5><p>当前知识关联 ${edges.length} 条历史及候选记录，其中当前有效 ${effectiveEdges.length} 条。</p></article>
+            <article><h5>适用范围</h5><code>${knowledgeGraphEscape(scope)}</code></article>
+            <article><h5>关键结论</h5><code>${knowledgeGraphEscape(claims)}</code></article>
+        </div>`;
+}
+
+function knowledgeGraphEvidenceText(edge) {
+    const evidence = edge?.evidence || {};
+    if (edge?.review_status === 'expired' && String(edge?.review_note || '').startsWith('重判结果：')) {
+        return knowledgeGraphShort(edge.review_note, 120);
+    }
+    return knowledgeGraphShort(evidence.rule_reason || evidence.provided_evidence?.note || evidence.to_answer_excerpt || '', 120) || '已保存结构化证据';
+}
+
+function knowledgeGraphScopeSummary(scopeBasis, side) {
+    const resolution = scopeBasis?.[`${side}_product_resolution`] || {};
+    const models = Array.isArray(resolution.models) ? resolution.models : [];
+    if (models.length) {
+        const visibleModels = models.slice(0, 8).join('、');
+        return models.length > 8 ? `${visibleModels} 等 ${models.length} 个型号` : visibleModels;
+    }
+    const scope = scopeBasis?.[`${side}_scope`] || {};
+    return Object.keys(scope).length ? knowledgeGraphShort(JSON.stringify(scope), 180) : '未记录适用范围';
+}
+
+function renderKnowledgeGraphReviewEvidence(edge) {
+    const evidence = edge?.evidence || {};
+    const scopeBasis = edge?.scope_basis || {};
+    const sides = [
+        {
+            key: 'from',
+            label: '起点知识',
+            wikiId: edge?.from_business_key,
+            question: evidence.from_question || edge?.from_name,
+            answer: evidence.from_answer_excerpt,
+            conclusion: scopeBasis.from_conclusion,
+        },
+        {
+            key: 'to',
+            label: '目标知识',
+            wikiId: edge?.to_business_key,
+            question: evidence.to_question || edge?.to_name,
+            answer: evidence.to_answer_excerpt,
+            conclusion: scopeBasis.to_conclusion,
+        },
+    ];
+    return `<div class="knowledge-graph-review-reason"><span>系统判定依据</span><strong>${knowledgeGraphEscape(evidence.rule_reason || '未记录规则依据')}</strong></div>
+        <div class="knowledge-graph-review-compare">${sides.map(side => `<article>
+            <div class="knowledge-graph-review-side-head"><span>${knowledgeGraphEscape(side.label)}</span><code>${knowledgeGraphEscape(side.wikiId || '-')}</code></div>
+            <h5>${knowledgeGraphEscape(side.question || '未记录问题')}</h5>
+            <p class="knowledge-graph-review-scope"><strong>适用型号</strong><span>${knowledgeGraphEscape(knowledgeGraphScopeSummary(scopeBasis, side.key))}</span></p>
+            <p class="knowledge-graph-review-conclusion"><strong>关键结论</strong><span>${knowledgeGraphEscape(side.conclusion || '未记录关键结论')}</span></p>
+            <pre>${knowledgeGraphEscape(side.answer || '未记录答案摘录')}</pre>
+        </article>`).join('')}</div>`;
+}
+
+function knowledgeGraphIsGovernanceIssue(edge) {
+    return ['CONFLICTS_WITH', 'DUPLICATES'].includes(String(edge?.relation_type || ''));
+}
+
+function renderKnowledgeGraphGovernanceGuide(edge) {
+    const guide = document.getElementById('knowledgeGraphGovernanceGuide');
+    if (!guide) return;
+    if (!knowledgeGraphIsGovernanceIssue(edge) || !['candidate', 'confirmed'].includes(String(edge?.review_status || ''))) {
+        guide.hidden = true;
+        guide.innerHTML = '';
+        return;
+    }
+    const isConflict = edge.relation_type === 'CONFLICTS_WITH';
+    guide.hidden = false;
+    guide.innerHTML = `<div>
+            <strong>${isConflict ? '这是待治理的冲突问题' : '这是待治理的冗余问题'}</strong>
+            <p>${isConflict
+                ? '先核对正文、适用型号、版本和条件，修订有问题的知识。保存后旧候选会失效，系统会按最新内容重新判定。'
+                : '先确定保留哪条主知识，再合并重复内容、删除冗余或拆分适用范围。保存后系统会重新判断两条知识是否仍然重复。'}</p>
+        </div>
+        <div class="knowledge-graph-governance-actions">
+            <button type="button" class="action-btn btn-secondary-outline" data-wiki-id="${knowledgeGraphEscape(edge.from_business_key || '')}"><i class="fas fa-pen" aria-hidden="true"></i><span>修订起点知识</span></button>
+            <button type="button" class="action-btn btn-secondary-outline" data-wiki-id="${knowledgeGraphEscape(edge.to_business_key || '')}"><i class="fas fa-pen" aria-hidden="true"></i><span>修订目标知识</span></button>
+        </div>`;
+    guide.querySelectorAll('[data-wiki-id]').forEach(button => {
+        button.addEventListener('click', () => openKnowledgeGraphKnowledgeEditor(button.dataset.wikiId));
+    });
+}
+
+async function openKnowledgeGraphKnowledgeEditor(wikiId) {
+    const id = String(wikiId || '').trim();
+    if (!id) return;
+    const status = document.getElementById('knowledgeGraphStatus');
+    try {
+        if (status) status.textContent = `正在读取 ${id} 的最新知识内容...`;
+        const result = await api(`/kb/item?table=knowledge_base_v1&id=${encodeURIComponent(id)}`);
+        if (!result?.success || !result?.data?.question_wiki_id) throw new Error(result?.message || '未找到知识内容。');
+        knowledgeGraphState.editingWikiId = id;
+        await openKBEditModal(id, { item: result.data });
+    } catch (error) {
+        knowledgeGraphState.editingWikiId = '';
+        if (status) status.textContent = error?.message || '打开知识修订失败。';
+        if (typeof showToast === 'function') showToast(error?.message || '打开知识修订失败。', 'error');
+    }
+}
+
+function populateKnowledgeGraphRevision(edge) {
+    const basis = edge?.scope_basis || {};
+    const relationType = document.getElementById('knowledgeGraphRevisionRelationType');
+    const fromScope = document.getElementById('knowledgeGraphRevisionFromScope');
+    const toScope = document.getElementById('knowledgeGraphRevisionToScope');
+    const fromConclusion = document.getElementById('knowledgeGraphRevisionFromConclusion');
+    const toConclusion = document.getElementById('knowledgeGraphRevisionToConclusion');
+    const swap = document.getElementById('knowledgeGraphRevisionSwap');
+    knowledgeGraphState.revisionFromClaims = basis.from_claims || { conclusion: basis.from_conclusion || '' };
+    knowledgeGraphState.revisionToClaims = basis.to_claims || { conclusion: basis.to_conclusion || '' };
+    if (relationType) relationType.value = edge?.relation_type || 'RELATED_TO';
+    if (fromScope) fromScope.value = JSON.stringify(basis.from_scope || {}, null, 2);
+    if (toScope) toScope.value = JSON.stringify(basis.to_scope || {}, null, 2);
+    if (fromConclusion) fromConclusion.value = basis.from_conclusion || knowledgeGraphState.revisionFromClaims.conclusion || '';
+    if (toConclusion) toConclusion.value = basis.to_conclusion || knowledgeGraphState.revisionToClaims.conclusion || '';
+    if (swap) swap.checked = false;
+}
+
+function toggleKnowledgeGraphRevisionPanel(show) {
+    const panel = document.getElementById('knowledgeGraphRevisionPanel');
+    if (!panel) return;
+    panel.hidden = !show;
+    if (show) document.getElementById('knowledgeGraphRevisionRelationType')?.focus();
+}
+
+function renderKnowledgeGraphEdges(items) {
+    const body = document.getElementById('knowledgeGraphEdgesBody');
+    if (!body) return;
+    knowledgeGraphState.edges = Array.isArray(items) ? items : [];
+    if (!knowledgeGraphState.edges.length) {
+        body.innerHTML = '<tr><td colspan="7" class="empty-message">当前筛选条件下没有关系记录。</td></tr>';
+        document.getElementById('knowledgeGraphReviewPanel')?.classList.add('d-none');
+        return;
+    }
+    body.innerHTML = knowledgeGraphState.edges.map((edge) => {
+        const relation = knowledgeGraphMeta(KNOWLEDGE_GRAPH_RELATION_META, edge.relation_type);
+        const review = edge.review_status === 'expired' && String(edge.review_note || '').startsWith('重判结果：')
+            ? { label: '已解除', tone: 'muted' }
+            : (edge.is_current_revision === false
+                ? { label: '已被修订', tone: 'muted' }
+                : knowledgeGraphMeta(KNOWLEDGE_GRAPH_REVIEW_META, edge.review_status));
+        const active = edge.edge_id === knowledgeGraphState.selectedEdgeId ? ' is-selected' : '';
+        const revisionLabel = Number(edge.revision_no || 1) > 1 ? ` · v${Number(edge.revision_no)}` : '';
+        return `<tr class="${active}">
+            <td><strong>${knowledgeGraphEscape(edge.from_business_key)}</strong><small>${knowledgeGraphEscape(knowledgeGraphShort(edge.from_name, 70))}</small></td>
+            <td><span class="knowledge-graph-badge is-${relation.tone}">${knowledgeGraphEscape(relation.label)}${knowledgeGraphEscape(revisionLabel)}</span></td>
+            <td><strong>${knowledgeGraphEscape(edge.to_business_key)}</strong><small>${knowledgeGraphEscape(knowledgeGraphShort(edge.to_name, 70))}</small></td>
+            <td><span class="knowledge-graph-badge is-${review.tone}">${knowledgeGraphEscape(review.label)}</span></td>
+            <td>${Math.round(Number(edge.confidence || 0) * 100)}%</td>
+            <td class="knowledge-graph-evidence-cell" title="${knowledgeGraphEscape(knowledgeGraphEvidenceText(edge))}">${knowledgeGraphEscape(knowledgeGraphEvidenceText(edge))}</td>
+            <td><button type="button" class="icon-btn" onclick="selectKnowledgeGraphEdge('${knowledgeGraphEscape(edge.edge_id)}')" title="查看证据并复核" aria-label="查看证据并复核"><i class="fas fa-clipboard-check" aria-hidden="true"></i></button></td>
+        </tr>`;
+    }).join('');
+}
+
+function selectKnowledgeGraphEdge(edgeId) {
+    const edge = knowledgeGraphState.edges.find(item => item.edge_id === edgeId);
+    if (!edge) return;
+    knowledgeGraphState.selectedEdgeId = edgeId;
+    renderKnowledgeGraphEdges(knowledgeGraphState.edges);
+    const panel = document.getElementById('knowledgeGraphReviewPanel');
+    const title = document.getElementById('knowledgeGraphReviewTitle');
+    const meta = document.getElementById('knowledgeGraphReviewMeta');
+    const evidencePanel = document.getElementById('knowledgeGraphReviewEvidence');
+    const note = document.getElementById('knowledgeGraphReviewNote');
+    if (!panel || !title || !meta || !evidencePanel || !note) return;
+    const relation = knowledgeGraphMeta(KNOWLEDGE_GRAPH_RELATION_META, edge.relation_type);
+    title.textContent = `${edge.from_business_key} ${relation.label} ${edge.to_business_key}${Number(edge.revision_no || 1) > 1 ? ` · v${Number(edge.revision_no)}` : ''}`;
+    const evidence = edge.evidence || {};
+    const revisionSource = edge.revision_kind === 'human_adjustment' ? '人工修订' : (edge.revision_kind === 'source_revalidation' ? '内容变更重审' : edge.generated_by || 'unknown');
+    meta.textContent = `${knowledgeGraphEvidenceText(edge)} | ${revisionSource} | ${edge.source_version || '无版本'}`;
+    evidencePanel.innerHTML = renderKnowledgeGraphReviewEvidence(edge);
+    renderKnowledgeGraphGovernanceGuide(edge);
+    populateKnowledgeGraphRevision(edge);
+    toggleKnowledgeGraphRevisionPanel(false);
+    note.value = edge.review_note || '';
+    const canRevise = edge.review_status === 'candidate' || (edge.review_status === 'confirmed' && edge.is_current_revision !== false);
+    panel.classList.remove('d-none');
+    note.readOnly = !canRevise;
+    const reviewActions = document.getElementById('knowledgeGraphReviewActions');
+    if (reviewActions) reviewActions.hidden = !canRevise;
+    document.querySelectorAll('#knowledgeGraphReviewActions .knowledge-graph-candidate-only').forEach(button => {
+        button.hidden = edge.review_status !== 'candidate';
+    });
+    const confirmLabel = document.querySelector('#knowledgeGraphReviewConfirmButton span');
+    if (confirmLabel) confirmLabel.textContent = knowledgeGraphIsGovernanceIssue(edge) ? '确认问题' : '确认关系';
+    if (!canRevise && typeof showToast === 'function') showToast('该关系是历史版本，只能查看证据。', 'info');
+}
+
+async function loadKnowledgeGraphEdges() {
+    const status = document.getElementById('knowledgeGraphStatus');
+    const reviewStatus = String(document.getElementById('knowledgeGraphReviewStatus')?.value || 'candidate');
+    const params = new URLSearchParams({ page: '1', page_size: '50' });
+    if (reviewStatus === 'effective') params.set('effective_only', 'true');
+    else params.set('review_status', reviewStatus);
+    if (knowledgeGraphState.selectedWikiId) params.set('wiki_id', knowledgeGraphState.selectedWikiId);
+    try {
+        const result = await api(`/kb/graph/edges?${params.toString()}`);
+        if (!result?.success) throw new Error(result?.message || '读取关系列表失败。');
+        renderKnowledgeGraphEdges(result.items || []);
+        if (status) {
+            const snapshot = knowledgeGraphState.catalogSnapshot || {};
+            const catalogText = snapshot.model_count ? `型号库基线 ${Number(snapshot.model_count).toLocaleString()} 个型号 / ${Number(snapshot.category_count || 0).toLocaleString()} 个类型；` : '';
+            status.textContent = `${catalogText}已读取 ${Number(result.total || 0).toLocaleString()} 条关系记录。`;
+        }
+    } catch (error) {
+        if (status) status.textContent = error?.message || '读取关系列表失败。';
+        renderKnowledgeGraphEdges([]);
+    }
+}
+
+async function loadKnowledgeGraph(options = {}) {
+    if (knowledgeGraphState.loading && !options.force) return;
+    const status = document.getElementById('knowledgeGraphStatus');
+    const wikiId = String(document.getElementById('knowledgeGraphWikiId')?.value || '').trim();
+    knowledgeGraphState.loading = true;
+    if (status) status.textContent = '正在读取图谱关系和来源影响...';
+    try {
+        const summaryRequest = api('/kb/graph/summary');
+        const detailRequest = wikiId ? api(`/kb/graph/knowledge/${encodeURIComponent(wikiId)}`) : Promise.resolve(null);
+        const [summary, detail] = await Promise.all([summaryRequest, detailRequest]);
+        if (!summary?.success) throw new Error(summary?.message || '读取图谱概览失败。');
+        if (detail && !detail.success) throw new Error(detail.message || '未找到该知识。');
+        renderKnowledgeGraphSummary(summary);
+        knowledgeGraphState.selectedWikiId = wikiId;
+        knowledgeGraphState.selectedEdgeId = '';
+        renderKnowledgeGraphDetail(detail);
+        if (wikiId && document.getElementById('knowledgeGraphFromWiki') && !document.getElementById('knowledgeGraphFromWiki').value) {
+            document.getElementById('knowledgeGraphFromWiki').value = wikiId;
+        }
+        await loadKnowledgeGraphEdges();
+    } catch (error) {
+        if (status) status.textContent = error?.message || '读取图谱数据失败。';
+    } finally {
+        knowledgeGraphState.loading = false;
+    }
+}
+
+async function generateKnowledgeGraphCandidate() {
+    const status = document.getElementById('knowledgeGraphStatus');
+    try {
+        const fromWikiId = String(document.getElementById('knowledgeGraphFromWiki')?.value || '').trim();
+        const toWikiId = String(document.getElementById('knowledgeGraphToWiki')?.value || '').trim();
+        if (!fromWikiId || !toWikiId) throw new Error('请填写起点知识和目标知识的 Wiki ID。');
+        if (status) status.textContent = '正在按范围和关键结论生成候选...';
+        const result = await api('/kb/graph/candidates', 'POST', {
+            from_wiki_id: fromWikiId,
+            to_wiki_id: toWikiId,
+            from_scope: knowledgeGraphParseJson('knowledgeGraphFromScope', '具体适用范围'),
+            to_scope: knowledgeGraphParseJson('knowledgeGraphToScope', '通用适用范围'),
+            from_claims: knowledgeGraphParseJson('knowledgeGraphFromClaims', '具体关键结论'),
+            to_claims: knowledgeGraphParseJson('knowledgeGraphToClaims', '通用关键结论'),
+            generated_by: 'rule',
+            evidence: { note: String(document.getElementById('knowledgeGraphEvidence')?.value || '').trim() },
+        });
+        if (!result?.success) throw new Error(result?.message || '生成候选失败。');
+        const edges = Array.isArray(result.edges) ? result.edges : (result.edge ? [result.edge] : []);
+        const relationLabels = [...new Set(edges.map(edge => knowledgeGraphMeta(KNOWLEDGE_GRAPH_RELATION_META, edge.relation_type).label))];
+        if (status) status.textContent = result.created_count > 0 ? `已生成 ${relationLabels.join('、')} 候选 ${Number(result.created_count)} 条，等待人工复核。` : '同版本候选已存在，未重复创建。';
+        if (typeof showToast === 'function') showToast(status?.textContent || '候选已生成', result.created ? 'success' : 'info');
+        document.getElementById('knowledgeGraphReviewStatus').value = 'candidate';
+        knowledgeGraphState.selectedWikiId = fromWikiId;
+        document.getElementById('knowledgeGraphWikiId').value = fromWikiId;
+        await loadKnowledgeGraph({ force: true });
+        const selectedEdge = edges.find(edge => edge.created) || edges[0];
+        if (selectedEdge?.edge_id) selectKnowledgeGraphEdge(selectedEdge.edge_id);
+    } catch (error) {
+        if (status) status.textContent = error?.message || '生成候选失败。';
+        if (typeof showToast === 'function') showToast(error?.message || '生成候选失败。', 'error');
+    }
+}
+
+async function saveKnowledgeGraphReview(decision) {
+    const edgeId = knowledgeGraphState.selectedEdgeId;
+    const status = document.getElementById('knowledgeGraphStatus');
+    if (!edgeId) {
+        if (typeof showToast === 'function') showToast('请先选择一条候选关系。', 'warning');
+        return;
+    }
+    try {
+        if (status) status.textContent = '正在保存人工复核结论...';
+        const result = await api(`/kb/graph/edges/${encodeURIComponent(edgeId)}/review`, 'POST', {
+            decision,
+            review_note: String(document.getElementById('knowledgeGraphReviewNote')?.value || '').trim(),
+        });
+        if (!result?.success) throw new Error(result?.message || '保存复核结论失败。');
+        const selected = knowledgeGraphState.edges.find(item => item.edge_id === edgeId);
+        const confirmedMessage = knowledgeGraphIsGovernanceIssue(selected) ? '治理问题已确认，请继续修订知识内容。' : '关系已确认。';
+        if (typeof showToast === 'function') showToast(decision === 'confirmed' ? confirmedMessage : '候选已驳回。', 'success');
+        await loadKnowledgeGraph({ force: true });
+    } catch (error) {
+        if (status) status.textContent = error?.message || '保存复核结论失败。';
+        if (typeof showToast === 'function') showToast(error?.message || '保存复核结论失败。', 'error');
+    }
+}
+
+async function submitKnowledgeGraphRevision() {
+    const edgeId = knowledgeGraphState.selectedEdgeId;
+    const edge = knowledgeGraphState.edges.find(item => item.edge_id === edgeId);
+    const status = document.getElementById('knowledgeGraphStatus');
+    if (!edge) {
+        if (typeof showToast === 'function') showToast('请先选择一条关系。', 'warning');
+        return;
+    }
+    const reviewNote = String(document.getElementById('knowledgeGraphReviewNote')?.value || '').trim();
+    if (!reviewNote) {
+        if (typeof showToast === 'function') showToast('调整关系时必须填写复核备注。', 'warning');
+        document.getElementById('knowledgeGraphReviewNote')?.focus();
+        return;
+    }
+    try {
+        if (status) status.textContent = '正在保存人工修订版本...';
+        const fromConclusion = String(document.getElementById('knowledgeGraphRevisionFromConclusion')?.value || '').trim();
+        const toConclusion = String(document.getElementById('knowledgeGraphRevisionToConclusion')?.value || '').trim();
+        const result = await api(`/kb/graph/edges/${encodeURIComponent(edgeId)}/revise`, 'POST', {
+            relation_type: String(document.getElementById('knowledgeGraphRevisionRelationType')?.value || ''),
+            swap_direction: !!document.getElementById('knowledgeGraphRevisionSwap')?.checked,
+            from_scope: knowledgeGraphParseJson('knowledgeGraphRevisionFromScope', '起点适用范围'),
+            to_scope: knowledgeGraphParseJson('knowledgeGraphRevisionToScope', '目标适用范围'),
+            from_claims: { ...knowledgeGraphState.revisionFromClaims, conclusion: fromConclusion },
+            to_claims: { ...knowledgeGraphState.revisionToClaims, conclusion: toConclusion },
+            review_note: reviewNote,
+        });
+        if (!result?.success) throw new Error(result?.message || '保存人工修订失败。');
+        if (typeof showToast === 'function') showToast('人工修订版本已确认，原关系已保留为历史记录。', 'success');
+        const revisedEdge = result.edge || {};
+        const wikiId = revisedEdge.from_business_key || edge.from_business_key;
+        document.getElementById('knowledgeGraphReviewStatus').value = 'effective';
+        document.getElementById('knowledgeGraphWikiId').value = wikiId;
+        knowledgeGraphState.selectedWikiId = wikiId;
+        await loadKnowledgeGraph({ force: true });
+        if (revisedEdge.edge_id) selectKnowledgeGraphEdge(revisedEdge.edge_id);
+    } catch (error) {
+        if (status) status.textContent = error?.message || '保存人工修订失败。';
+        if (typeof showToast === 'function') showToast(error?.message || '保存人工修订失败。', 'error');
+    }
+}
+
+async function expireStaleKnowledgeGraphCandidates() {
+    const status = document.getElementById('knowledgeGraphStatus');
+    try {
+        if (status) status.textContent = '正在核对候选的来源内容哈希...';
+        const result = await api('/kb/graph/candidates/expire-stale', 'POST', {
+            wiki_id: String(document.getElementById('knowledgeGraphWikiId')?.value || '').trim(),
+        });
+        if (!result?.success) throw new Error(result?.message || '检查过期候选失败。');
+        if (status) status.textContent = `已使 ${Number(result.expired_count || 0)} 条旧关系失效，按最新内容生成 ${Number(result.revalidation_candidate_count || 0)} 条候选；${Number(result.revalidated_without_relation_count || 0)} 组当前不再建立关系。`;
+        await loadKnowledgeGraph({ force: true });
+    } catch (error) {
+        if (status) status.textContent = error?.message || '检查过期候选失败。';
+    }
+}
+
+async function previewKnowledgeGraphBackfill() {
+    const status = document.getElementById('knowledgeGraphStatus');
+    try {
+        if (status) status.textContent = '正在只读计算图谱主干回填差异...';
+        const result = await api('/kb/graph/backfill/preview', 'POST', {});
+        if (!result?.success) throw new Error(result?.message || '生成回填预览失败。');
+        if (status) status.textContent = `只读预览：${Number(result.source_knowledge_count || 0).toLocaleString()} 条知识、${Number(result.source_matrix_edge_count || 0).toLocaleString()} 条适用关系；待新建 ${Number(result.missing_nodes || 0).toLocaleString()} 个知识节点和 ${Number(result.missing_applies_to_edges || 0).toLocaleString()} 条主干边。`;
+    } catch (error) {
+        if (status) status.textContent = error?.message || '生成回填预览失败。';
+    }
+}
+
+const PARAMETER_CHECK_RESULT_META = {
+    conflict: { label: '存在冲突', tone: 'danger' },
+    needs_parameter_data: { label: '待补参数', tone: 'warning' },
+    consistent: { label: '结果一致', tone: 'success' },
+    scope_mismatch: { label: '范围不符', tone: 'warning' },
+    ambiguous_model: { label: '型号不明确', tone: 'warning' },
+    ambiguous_feature: { label: '功能不明确', tone: 'warning' },
+    not_parameter_claim: { label: '非参数声明', tone: 'muted' },
+    check_unavailable: { label: '无法校对', tone: 'muted' },
+};
+
+const PARAMETER_CHECK_RESOLUTION_META = {
+    unreviewed: { label: '待人工确认', tone: 'pending' },
+    confirmed_issue: { label: '确认问题', tone: 'danger' },
+    false_positive: { label: '误报', tone: 'muted' },
+    resolved: { label: '已处理', tone: 'success' },
+};
+
+const PARAMETER_CHECK_CLAIM_META = {
+    proposed: { label: 'AI 待复核', tone: 'pending' },
+    confirmed: { label: '已确认', tone: 'success' },
+    rejected: { label: '已驳回', tone: 'muted' },
+};
+
+const PARAMETER_CHECK_AI_VERDICT_META = {
+    likely_consistent: { label: '疑似一致', tone: 'success' },
+    likely_inconsistent: { label: '疑似不一致', tone: 'danger' },
+    needs_human_review: { label: '待人工判断', tone: 'warning' },
+};
+
+const PARAMETER_CHECK_CANDIDATE_REVIEW_META = {
+    unreviewed: { label: '待人工复核', tone: 'pending' },
+    accepted: { label: '已采纳初判', tone: 'success' },
+    corrected: { label: '已人工修正', tone: 'warning' },
+    false_positive: { label: '已标记误报', tone: 'muted' },
+};
+
+const PARAMETER_CHECK_AI_SCAN_META = {
+    candidate: { label: '已形成候选', tone: 'pending' },
+    no_candidate: { label: '未提取候选', tone: 'muted' },
+    validator_rejected: { label: '校验驳回', tone: 'warning' },
+};
+
+const parameterCheckState = {
+    loaded: false,
+    loading: false,
+    loadingPromise: null,
+    overviewEpoch: 0,
+    runId: '',
+    page: 1,
+    aiView: 'queue',
+    selectedFindingId: '',
+    overview: null,
+    pollTimer: null,
+};
+
+function parameterCheckMeta(meta, value, fallbackLabel) {
+    return meta[value] || { label: fallbackLabel || value || '-', tone: 'muted' };
+}
+
+function formatParameterCheckTime(value) {
+    if (!value) return '未记录';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    });
+}
+
+function getParameterCheckFilterValue(id) {
+    return String(document.getElementById(id)?.value || '').trim();
+}
+
+function isParameterCheckCandidateView(overview) {
+    return overview?.view_mode === 'ai_candidates';
+}
+
+function isParameterCheckQueueView(overview) {
+    return overview?.view_mode === 'ai_candidate_queue';
+}
+
+function isParameterCheckAuditView(overview) {
+    return overview?.view_mode === 'ai_scan_audit';
+}
+
+function isParameterCheckAiRun(overview) {
+    return isParameterCheckQueueView(overview) || isParameterCheckCandidateView(overview) || isParameterCheckAuditView(overview);
+}
+
+function renderParameterCheckRunOptions(overview) {
+    const select = document.getElementById('parameterCheckRunSelect');
+    if (!select) return;
+    const selectedRunId = overview?.selected_run?.run_id || parameterCheckState.runId || '';
+    const options = Array.isArray(overview?.runs) ? overview.runs : [];
+    select.innerHTML = `<option value="">全量复核池</option>${options.map(run => {
+            const stage = run.stage === 'numeric_comparison'
+                ? '逐型号比较'
+                : (run.stage === 'ai_feature_extraction'
+                    ? `${run.feature_name || '参数功能'}全量扫描`
+                    : (run.stage === 'ai_candidate_extraction' ? '历史 AI 候选提取' : '规则候选提取'));
+            const count = Number(['ai_candidate_extraction', 'ai_feature_extraction'].includes(run.stage)
+                ? (run.result_counts?.candidate_count || 0)
+                : (run.result_counts?.finding_count || 0));
+            const completedAt = formatParameterCheckTime(run.completed_at || run.created_at);
+            return `<option value="${escapeHtml(run.run_id)}">${escapeHtml(`${stage} · ${run.status} · ${count} 条 · ${completedAt}`)}</option>`;
+        }).join('')}`;
+    select.value = selectedRunId || '';
+    const aiViewField = document.getElementById('parameterCheckAiViewField');
+    const aiViewSelect = document.getElementById('parameterCheckAiView');
+    if (aiViewField) aiViewField.hidden = !isParameterCheckAiRun(overview);
+    if (aiViewSelect) aiViewSelect.value = parameterCheckState.aiView;
+}
+
+function renderParameterCheckFilterOptions(overview) {
+    const isQueueView = isParameterCheckQueueView(overview);
+    const isCandidateView = isParameterCheckCandidateView(overview);
+    const isAuditView = isParameterCheckAuditView(overview);
+    const options = overview?.filter_options || {};
+    const renderOptions = (id, items, allLabel) => {
+        const select = document.getElementById(id);
+        if (!select) return;
+        const previous = select.value;
+        select.innerHTML = `<option value="">${allLabel}</option>${(items || []).map(item => (
+            `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`
+        )).join('')}`;
+        select.value = (items || []).some(item => item.id === previous) ? previous : '';
+    };
+    renderOptions('parameterCheckModelId', options.models, '全部型号');
+    renderOptions('parameterCheckFeatureId', options.features, '全部功能');
+    renderOptions('parameterCheckScanFeatureId', overview?.scan_feature_options, '选择参数功能');
+    const resultSelect = document.getElementById('parameterCheckResultStatus');
+    const resultField = resultSelect?.closest('label');
+    const modelField = document.getElementById('parameterCheckModelId')?.closest('label');
+    const featureField = document.getElementById('parameterCheckFeatureId')?.closest('label');
+    const filterGrid = document.getElementById('parameterCheckFilterGrid');
+    if (resultSelect) {
+        resultSelect.disabled = isCandidateView || isQueueView;
+        if (isCandidateView || isQueueView) resultSelect.value = '';
+    }
+    if (resultField) resultField.hidden = isCandidateView || isQueueView || isAuditView;
+    if (modelField) modelField.hidden = isAuditView;
+    if (featureField) featureField.hidden = isAuditView;
+    if (filterGrid) {
+        filterGrid.classList.toggle('is-candidate-run', isCandidateView || isQueueView);
+        filterGrid.classList.toggle('is-audit-run', isAuditView);
+    }
+}
+
+function renderParameterCheckSummary(overview) {
+    const summary = overview?.summary || {};
+    const counts = summary.result_status_counts || {};
+    const resolutionCounts = summary.resolution_status_counts || {};
+    const strip = document.getElementById('parameterCheckSummary');
+    if (!strip) return;
+    strip.classList.toggle('is-five-columns', isParameterCheckQueueView(overview));
+    const metrics = isParameterCheckAuditView(overview)
+        ? [
+            ['本次已扫描', summary.scanned_knowledge_count || 0, 'neutral'],
+            ['形成候选', summary.candidate_count || 0, 'pending'],
+            ['无候选', summary.scan_status_counts?.no_candidate || 0, 'neutral'],
+            ['校验驳回', summary.scan_status_counts?.validator_rejected || 0, 'warning'],
+        ]
+        : isParameterCheckQueueView(overview)
+        ? [
+            ['全量候选', summary.candidate_count || 0, 'neutral'],
+            ['AI 初判与快照一致', summary.ai_snapshot_agree_count || 0, 'success'],
+            ['待人工复核', summary.review_status_counts?.unreviewed || 0, 'warning'],
+            ['已人工处理', (summary.review_status_counts?.accepted || 0) + (summary.review_status_counts?.corrected || 0) + (summary.review_status_counts?.false_positive || 0), 'neutral'],
+            ['运行中扫描', summary.running_scan_count || 0, 'pending'],
+        ]
+        : isParameterCheckCandidateView(overview)
+        ? [
+            ['AI 返回候选', summary.candidate_count || 0, 'neutral'],
+            ['本次新增', summary.proposed_claim_count || 0, 'pending'],
+            ['待人工复核', summary.review_status_counts?.unreviewed || 0, 'warning'],
+            ['已人工处理', (summary.review_status_counts?.accepted || 0) + (summary.review_status_counts?.corrected || 0) + (summary.review_status_counts?.false_positive || 0), 'neutral'],
+        ]
+        : [
+            ['比较结果', summary.finding_count || 0, 'neutral'],
+            ['存在冲突', counts.conflict || 0, 'danger'],
+            ['待补参数', counts.needs_parameter_data || 0, 'warning'],
+            ['待人工处理', resolutionCounts.unreviewed || 0, 'pending'],
+        ];
+    strip.innerHTML = metrics.map(([label, value, tone]) => (
+        `<div class="parameter-check-summary-item is-${tone}"><dt>${label}</dt><dd>${value}</dd></div>`
+    )).join('');
+}
+
+function parameterCheckReferenceEvidenceText(values, fallback) {
+    const references = (Array.isArray(values) ? values : [])
+        .map(value => {
+            const model = String(value?.model_name || value?.model_id || '').trim();
+            const parameterValue = String(value?.canonical_value || '').trim();
+            if (!parameterValue) return '';
+            return model ? `${model}：${parameterValue}` : parameterValue;
+        })
+        .filter(Boolean);
+    return references.join('；') || fallback || '无可用参数证据';
+}
+
+function parameterCheckReferenceModelNames(values) {
+    const models = (Array.isArray(values) ? values : [])
+        .map(value => String(value?.model_name || value?.model_id || '').trim())
+        .filter(Boolean);
+    const uniqueModels = [...new Set(models)];
+    if (uniqueModels.length) return uniqueModels.join('、');
+    return '无匹配参数型号';
+}
+
+function renderParameterCheckReferenceEvidence(values, fallback) {
+    const evidence = parameterCheckReferenceEvidenceText(values, fallback);
+    return `<span class="parameter-check-reference-evidence" title="${escapeHtml(evidence)}">${escapeHtml(evidence)}</span>`;
+}
+
+function renderParameterCheckHighlightedText(text, highlight) {
+    const source = String(text || '');
+    const focus = String(highlight || '').trim();
+    if (!source || !focus || !source.includes(focus)) return escapeHtml(source);
+    return source.split(focus).map(escapeHtml).join(
+        `<mark class="parameter-check-kb-highlight"><strong>${escapeHtml(focus)}</strong></mark>`
+    );
+}
+
+function renderParameterCheckKnowledgeContent(item) {
+    const content = item?.knowledge_content;
+    const evidence = String(item?.evidence_text || '').trim();
+    if (!content) {
+        return `<p class="parameter-check-knowledge-fallback">${renderParameterCheckHighlightedText(evidence || '未保留原文证据。', evidence)}</p>`;
+    }
+
+    const question = String(content.question || '').trim();
+    const answer = String(content.answer || '').trim();
+    const evidenceInContent = [question, answer].some(text => text.includes(evidence));
+    const renderField = (label, text) => text ? `
+        <section class="parameter-check-kb-field">
+          <span>${label}</span>
+          <p>${renderParameterCheckHighlightedText(text, evidence)}</p>
+        </section>
+    ` : '';
+    const revisionNote = content.revision_matches_claim === false
+        ? '<p class="parameter-check-kb-revision-note">当前 KB 内容已在扫描后更新；下方保留扫描时命中的原文，供人工确认。</p>'
+        : '';
+    const scanEvidence = !evidenceInContent && evidence
+        ? `<div class="parameter-check-kb-scan-evidence"><span>扫描命中原文</span><p>${renderParameterCheckHighlightedText(evidence, evidence)}</p></div>`
+        : '';
+    return `<div class="parameter-check-kb-content">${renderField('问题', question)}${renderField('回答', answer)}${revisionNote}${scanEvidence}</div>`;
+}
+
+function renderParameterCheckTable(overview) {
+    const tbody = document.getElementById('parameterCheckTableBody');
+    const tableHead = document.getElementById('parameterCheckTableHead');
+    const pageInfo = document.getElementById('parameterCheckPageInfo');
+    const prevButton = document.getElementById('prevParameterCheckPageBtn');
+    const nextButton = document.getElementById('nextParameterCheckPageBtn');
+    if (!tbody) return;
+
+    const isQueueView = isParameterCheckQueueView(overview);
+    const isCandidateView = isParameterCheckCandidateView(overview) || isQueueView;
+    const isAuditView = isParameterCheckAuditView(overview);
+    const table = tbody.closest('table');
+    if (table) {
+        table.classList.toggle('is-ai-candidate-table', isCandidateView);
+        table.classList.toggle('is-ai-audit-table', isAuditView);
+    }
+    const findings = isAuditView
+        ? (Array.isArray(overview?.audit_items) ? overview.audit_items : [])
+        : isCandidateView
+            ? (Array.isArray(overview?.candidates) ? overview.candidates : [])
+            : (Array.isArray(overview?.findings) ? overview.findings : []);
+    const pagination = overview?.pagination || { page: 1, page_size: 50, total: 0 };
+    const idKey = isAuditView ? 'audit_key' : (isCandidateView ? 'claim_id' : 'finding_id');
+    const selected = findings.some(item => item[idKey] === parameterCheckState.selectedFindingId)
+        ? parameterCheckState.selectedFindingId
+        : findings[0]?.[idKey] || '';
+    parameterCheckState.selectedFindingId = selected;
+
+    if (tableHead) {
+        tableHead.innerHTML = isAuditView
+            ? `<tr><th>扫描结果</th><th>知识 Wiki ID</th><th>AI 返回</th><th>通过校验</th><th>审计说明</th><th>响应摘要</th><th>扫描时间</th><th>操作</th></tr>`
+            : isCandidateView
+            ? `<tr><th>人工状态</th><th>型号</th><th>参数功能</th><th>参考证据</th><th>知识 Wiki ID</th><th>KB 待核查声明</th><th>AI 初判</th><th>快照比对</th><th>操作</th></tr>`
+            : `<tr><th>人工状态</th><th>型号</th><th>参数功能</th><th>参考证据</th><th>知识 Wiki ID</th><th>KB 待核查声明</th><th>AI 初判</th><th>快照比对</th><th>操作</th></tr>`;
+    }
+
+    if (!overview?.selected_run && !isQueueView) {
+        tbody.innerHTML = `<tr><td colspan="${isAuditView ? 8 : 9}" class="empty-message">暂无可展示的参数校对运行。请先保留现有审计记录或执行一轮只读校对。</td></tr>`;
+    } else if (!findings.length) {
+        tbody.innerHTML = `<tr><td colspan="${isAuditView ? 8 : 9}" class="empty-message">${isAuditView ? '本批还没有可展示的扫描审计记录。' : (isQueueView ? '全量复核池中暂无符合筛选条件的 AI 候选。' : (isCandidateView ? '本批没有可展示的 AI 候选。' : '当前筛选条件下没有校对结果。'))}</td></tr>`;
+    } else if (isAuditView) {
+        tbody.innerHTML = findings.map(item => {
+            const status = parameterCheckMeta(PARAMETER_CHECK_AI_SCAN_META, item.scan_status, item.scan_status);
+            const isSelected = item.audit_key === selected;
+            return `
+                <tr class="parameter-check-row${isSelected ? ' is-selected' : ''}">
+                  <td><span class="parameter-check-status is-${status.tone}">${escapeHtml(status.label)}</span></td>
+                  <td><button type="button" class="parameter-check-wiki-link" data-wiki-id="${escapeHtml(item.question_wiki_id)}" onclick="openParameterCheckKnowledge(this.dataset.wikiId)">${escapeHtml(item.question_wiki_id)}</button></td>
+                  <td>${escapeHtml(item.raw_candidate_count ?? '未记录')}${item.raw_candidate_count == null ? '' : ' 条'}</td>
+                  <td>${escapeHtml(item.valid_candidate_count ?? '未记录')}${item.valid_candidate_count == null ? '' : ' 条'}</td>
+                  <td>${escapeHtml(item.validation_reason || '-')}</td>
+                  <td><code class="parameter-check-hash">${escapeHtml(String(item.response_hash || '').slice(0, 12) || '-')}</code></td>
+                  <td>${escapeHtml(formatParameterCheckTime(item.created_at))}</td>
+                  <td><button type="button" class="action-btn btn-secondary-outline parameter-check-detail-btn" data-finding-id="${escapeHtml(item.audit_key)}" onclick="selectParameterCheckFinding(this.dataset.findingId)">查看审计</button></td>
+                </tr>
+            `;
+        }).join('');
+    } else if (isCandidateView) {
+        tbody.innerHTML = findings.map(candidate => {
+            const aiVerdict = parameterCheckMeta(PARAMETER_CHECK_AI_VERDICT_META, candidate.ai_verdict, candidate.ai_verdict || '未记录');
+            const comparison = parameterCheckMeta(PARAMETER_CHECK_RESULT_META, candidate.comparison_verdict, candidate.comparison_verdict || '未记录');
+            const review = parameterCheckMeta(PARAMETER_CHECK_CANDIDATE_REVIEW_META, candidate.review_status, candidate.review_status);
+            const referenceModels = parameterCheckReferenceModelNames(candidate.comparison_values);
+            const isSelected = candidate.claim_id === selected;
+            return `
+                <tr class="parameter-check-row${isSelected ? ' is-selected' : ''}">
+                  <td><span class="parameter-check-status is-${review.tone}">${escapeHtml(review.label)}</span></td>
+                  <td>${escapeHtml(referenceModels)}</td>
+                  <td>${escapeHtml(candidate.feature_name || candidate.feature_id)}</td>
+                  <td>${renderParameterCheckReferenceEvidence(candidate.comparison_values)}</td>
+                  <td><button type="button" class="parameter-check-wiki-link" data-wiki-id="${escapeHtml(candidate.question_wiki_id)}" onclick="openParameterCheckKnowledge(this.dataset.wikiId)">${escapeHtml(candidate.question_wiki_id)}</button></td>
+                  <td>${escapeHtml(candidate.asserted_value || '-')}</td>
+                  <td><span class="parameter-check-status is-${aiVerdict.tone}">${escapeHtml(aiVerdict.label)}</span></td>
+                  <td><span class="parameter-check-status is-${comparison.tone}">${escapeHtml(comparison.label)}</span></td>
+                  <td><button type="button" class="action-btn btn-secondary-outline parameter-check-detail-btn" data-finding-id="${escapeHtml(candidate.claim_id)}" onclick="selectParameterCheckFinding(this.dataset.findingId)">复核详情</button></td>
+                </tr>
+            `;
+        }).join('');
+    } else {
+        tbody.innerHTML = findings.map(finding => {
+            const result = parameterCheckMeta(PARAMETER_CHECK_RESULT_META, finding.result_status, finding.result_status);
+            const resolution = parameterCheckMeta(PARAMETER_CHECK_RESOLUTION_META, finding.resolution_status, finding.resolution_status);
+            const isSelected = finding.finding_id === selected;
+            return `
+                <tr class="parameter-check-row${isSelected ? ' is-selected' : ''}">
+                  <td><span class="parameter-check-status is-${resolution.tone}">${escapeHtml(resolution.label)}</span></td>
+                  <td>${escapeHtml(finding.model_name || finding.model_id)}</td>
+                  <td>${escapeHtml(finding.feature_name || finding.feature_id)}</td>
+                  <td>${renderParameterCheckReferenceEvidence([], finding.canonical_value || '无可用参数证据')}</td>
+                  <td><button type="button" class="parameter-check-wiki-link" data-wiki-id="${escapeHtml(finding.question_wiki_id)}" onclick="openParameterCheckKnowledge(this.dataset.wikiId)">${escapeHtml(finding.question_wiki_id)}</button></td>
+                  <td>${escapeHtml(finding.asserted_value || '-')}</td>
+                  <td><span class="parameter-check-status is-muted">未生成</span></td>
+                  <td><span class="parameter-check-status is-${result.tone}">${escapeHtml(result.label)}</span></td>
+                  <td><button type="button" class="action-btn btn-secondary-outline parameter-check-detail-btn" data-finding-id="${escapeHtml(finding.finding_id)}" onclick="selectParameterCheckFinding(this.dataset.findingId)">查看证据</button></td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    if (pageInfo) pageInfo.textContent = `共 ${pagination.total || 0} 条，第 ${pagination.page || 1} 页`;
+    if (prevButton) prevButton.disabled = (pagination.page || 1) <= 1;
+    if (nextButton) nextButton.disabled = (pagination.page || 1) * (pagination.page_size || 50) >= (pagination.total || 0);
+    renderParameterCheckDetail(overview);
+}
+
+function renderParameterCheckDetail(overview) {
+    const detail = document.getElementById('parameterCheckDetail');
+    if (!detail) return;
+    if (isParameterCheckAuditView(overview)) {
+        const item = (overview?.audit_items || []).find(entry => entry.audit_key === parameterCheckState.selectedFindingId);
+        if (!item) {
+            detail.innerHTML = '<div class="parameter-check-detail-empty">选择一条扫描记录查看 AI 输出与校验结果。</div>';
+            return;
+        }
+        const status = parameterCheckMeta(PARAMETER_CHECK_AI_SCAN_META, item.scan_status, item.scan_status);
+        detail.innerHTML = `
+            <div class="parameter-check-detail-head">
+              <div>
+                <div class="parameter-check-detail-title">${escapeHtml(item.question_wiki_id)} · AI 扫描审计</div>
+                <div class="parameter-check-detail-meta"><span class="parameter-check-status is-${status.tone}">${escapeHtml(status.label)}</span></div>
+              </div>
+              <div class="parameter-check-detail-actions">
+                <button type="button" class="action-btn btn-secondary-outline" data-wiki-id="${escapeHtml(item.question_wiki_id)}" onclick="openParameterCheckKnowledge(this.dataset.wikiId)">打开知识编辑</button>
+              </div>
+            </div>
+            <div class="parameter-check-evidence-grid">
+              <article><h4>AI 输出</h4><p class="parameter-check-parameter-value">${escapeHtml(item.raw_candidate_count ?? '未记录')}${item.raw_candidate_count == null ? '' : ' 条候选'}</p><dl><div><dt>通过校验</dt><dd>${escapeHtml(item.valid_candidate_count ?? '未记录')}${item.valid_candidate_count == null ? '' : ' 条'}</dd></div><div><dt>扫描时间</dt><dd>${escapeHtml(formatParameterCheckTime(item.created_at))}</dd></div></dl></article>
+              <article><h4>校验结论</h4><p>${escapeHtml(item.validation_reason || '未记录。')}</p><dl><div><dt>知识版本</dt><dd><code class="parameter-check-hash">${escapeHtml(String(item.kb_revision || '').slice(0, 16) || '-')}</code></dd></div></dl></article>
+              <article><h4>响应摘要</h4><p>仅保留响应哈希，用于审计同一知识版本的 AI 扫描结果。</p><dl><div><dt>SHA-256</dt><dd><code class="parameter-check-hash">${escapeHtml(item.response_hash || '-')}</code></dd></div></dl></article>
+            </div>
+        `;
+        return;
+    }
+    if (isParameterCheckCandidateView(overview) || isParameterCheckQueueView(overview)) {
+        const candidate = (overview?.candidates || []).find(item => item.claim_id === parameterCheckState.selectedFindingId);
+        if (!candidate) {
+            detail.innerHTML = '<div class="parameter-check-detail-empty">选择一条 AI 候选查看原文证据和适用范围。</div>';
+            return;
+        }
+        const aiVerdict = parameterCheckMeta(PARAMETER_CHECK_AI_VERDICT_META, candidate.ai_verdict, candidate.ai_verdict || '未记录');
+        const comparison = parameterCheckMeta(PARAMETER_CHECK_RESULT_META, candidate.comparison_verdict, candidate.comparison_verdict || '未记录');
+        const review = parameterCheckMeta(PARAMETER_CHECK_CANDIDATE_REVIEW_META, candidate.review_status, candidate.review_status);
+        const modelNames = Array.isArray(candidate.model_names) ? candidate.model_names : [];
+        const referenceModelNames = parameterCheckReferenceModelNames(candidate.comparison_values);
+        const referenceModelName = referenceModelNames === '无匹配参数型号' ? '' : referenceModelNames.split('、')[0];
+        const aiModel = candidate.source_scope_json?.ai_model || overview?.selected_run?.ai_model || '未记录';
+        const comparisonValues = (candidate.comparison_values || []).map(value => (
+            `<li>${escapeHtml(value.model_name || value.model_id || '-')}：${escapeHtml(value.canonical_value || '待补充')}，${escapeHtml(parameterCheckMeta(PARAMETER_CHECK_RESULT_META, value.result_status, value.result_status).label)}</li>`
+        )).join('') || '<li>未得到可复算的参数值。</li>';
+        const sourceScan = candidate.source_scope_json?.stage === 'ai_feature_extraction' && candidate.source_feature_name
+            ? `${candidate.source_feature_name}全量扫描`
+            : '历史 AI 候选提取';
+        const initialFinalVerdict = candidate.final_verdict || candidate.comparison_verdict || '';
+        const canAccept = (candidate.ai_verdict === 'likely_consistent' && candidate.comparison_verdict === 'consistent')
+            || (candidate.ai_verdict === 'likely_inconsistent' && candidate.comparison_verdict === 'conflict');
+        const reviewSummary = candidate.review_status !== 'unreviewed'
+            ? `<div class="parameter-check-review-history"><span class="parameter-check-status is-${review.tone}">${escapeHtml(review.label)}</span><span>最终结论：${escapeHtml(parameterCheckMeta(PARAMETER_CHECK_RESULT_META, candidate.final_verdict, candidate.final_verdict).label)}</span><span>复核人：${escapeHtml(candidate.reviewed_by || '未记录')}</span><span>理由：${escapeHtml(candidate.review_reason || '未填写')}</span></div>`
+            : '';
+        detail.innerHTML = `
+            <div class="parameter-check-detail-head">
+              <div>
+                <div class="parameter-check-detail-title">${escapeHtml(candidate.question_wiki_id)} · ${escapeHtml(candidate.feature_name || candidate.feature_id)} · AI 候选</div>
+                <div class="parameter-check-detail-meta"><span class="parameter-check-status is-${review.tone}">${escapeHtml(review.label)}</span><span class="parameter-check-status is-${aiVerdict.tone}">AI：${escapeHtml(aiVerdict.label)}</span><span class="parameter-check-status is-${comparison.tone}">快照：${escapeHtml(comparison.label)}</span><span class="parameter-check-status is-muted">来源：${escapeHtml(sourceScan)} · ${escapeHtml(candidate.source_run_status || '已完成')}</span></div>
+              </div>
+              <div class="parameter-check-detail-actions">
+                <button type="button" class="action-btn btn-secondary-outline" data-wiki-id="${escapeHtml(candidate.question_wiki_id)}" onclick="openParameterCheckKnowledge(this.dataset.wikiId)">打开知识编辑</button>
+                <button type="button" class="action-btn btn-secondary-outline" data-model-name="${escapeHtml(referenceModelName)}" onclick="openParameterCheckMatrix(this.dataset.modelName)" ${referenceModelName ? '' : 'disabled'}>查看机型矩阵</button>
+              </div>
+            </div>
+            <div class="parameter-check-pending-note">KB 待核查声明与参数功能清单的参考证据并列展示；AI 初判和快照比对均可由人工复核修正，且不会自动修改任一来源。</div>
+            <div class="parameter-check-evidence-grid">
+              <article>
+                <h4>KB 待核查声明</h4>
+                ${renderParameterCheckKnowledgeContent(candidate)}
+                <dl><div><dt>声明值</dt><dd>${escapeHtml(candidate.asserted_value || '-')}</dd></div><div><dt>KB 关联型号</dt><dd>${escapeHtml(modelNames.join('、') || '-')}</dd></div></dl>
+              </article>
+              <article>
+                <h4>AI 初步判断</h4>
+                <p class="parameter-check-parameter-value">${escapeHtml(candidate.asserted_value || '-')}</p>
+                <dl><div><dt>初判</dt><dd>${escapeHtml(aiVerdict.label)}</dd></div><div><dt>原因</dt><dd>${escapeHtml(candidate.ai_reason || 'AI 未给出可用的初判理由。')}</dd></div><div><dt>原因代码</dt><dd>${escapeHtml(candidate.ai_reason_code || '-')}</dd></div></dl>
+              </article>
+              <article>
+                <h4>参考证据与快照比对</h4>
+                <p>${escapeHtml(candidate.comparison_reason || '未记录可复算的参数比对理由。')}</p>
+                <ul class="parameter-check-comparison-values">${comparisonValues}</ul>
+                <dl><div><dt>参数型号</dt><dd>${escapeHtml(referenceModelNames)}</dd></div><div><dt>模型</dt><dd>${escapeHtml(aiModel)}</dd></div><div><dt>提取时间</dt><dd>${escapeHtml(formatParameterCheckTime(candidate.created_at))}</dd></div><div><dt>扫描运行</dt><dd>${escapeHtml(candidate.source_run_id || '历史记录未保留')}</dd></div></dl>
+              </article>
+            </div>
+            <section class="parameter-check-review-panel" aria-label="人工复核">
+              <div class="parameter-check-review-panel-head"><div><h4>人工复核</h4><p>可采纳 AI 初判，或改写最终结论。修正和误报必须说明原因。</p></div></div>
+              ${reviewSummary}
+              <div class="parameter-check-review-controls">
+                <label for="parameterCheckReviewVerdict-${escapeHtml(candidate.claim_id)}"><span>最终结论</span><select id="parameterCheckReviewVerdict-${escapeHtml(candidate.claim_id)}" class="input-modern"><option value="consistent" ${initialFinalVerdict === 'consistent' ? 'selected' : ''}>结果一致</option><option value="conflict" ${initialFinalVerdict === 'conflict' ? 'selected' : ''}>存在冲突</option><option value="needs_parameter_data" ${initialFinalVerdict === 'needs_parameter_data' ? 'selected' : ''}>待补参数</option><option value="scope_mismatch" ${initialFinalVerdict === 'scope_mismatch' ? 'selected' : ''}>范围不符</option><option value="ambiguous_model" ${initialFinalVerdict === 'ambiguous_model' ? 'selected' : ''}>型号不明确</option><option value="ambiguous_feature" ${initialFinalVerdict === 'ambiguous_feature' ? 'selected' : ''}>功能不明确</option><option value="check_unavailable" ${initialFinalVerdict === 'check_unavailable' ? 'selected' : ''}>无法校对</option></select></label>
+                <label class="parameter-check-review-reason" for="parameterCheckReviewReason-${escapeHtml(candidate.claim_id)}"><span>复核理由</span><textarea id="parameterCheckReviewReason-${escapeHtml(candidate.claim_id)}" class="input-modern" rows="2" placeholder="修正初判或标记误报时必填">${escapeHtml(candidate.review_reason || '')}</textarea></label>
+                <div class="parameter-check-review-actions"><button type="button" class="primary-btn" data-claim-id="${escapeHtml(candidate.claim_id)}" onclick="submitParameterCheckCandidateReview(this.dataset.claimId, 'accepted')" ${canAccept ? '' : 'disabled'}>采纳 AI 初判</button><button type="button" class="action-btn btn-secondary-outline" data-claim-id="${escapeHtml(candidate.claim_id)}" onclick="submitParameterCheckCandidateReview(this.dataset.claimId, 'corrected')">提交人工修正</button><button type="button" class="action-btn btn-secondary-outline" data-claim-id="${escapeHtml(candidate.claim_id)}" onclick="submitParameterCheckCandidateReview(this.dataset.claimId, 'false_positive')">标记误报</button></div>
+              </div>
+            </section>
+        `;
+        return;
+    }
+    const finding = (overview?.findings || []).find(item => item.finding_id === parameterCheckState.selectedFindingId);
+    if (!finding) {
+        detail.innerHTML = '<div class="parameter-check-detail-empty">选择一条结果查看知识原文、参数值和判断依据。</div>';
+        return;
+    }
+    const result = parameterCheckMeta(PARAMETER_CHECK_RESULT_META, finding.result_status, finding.result_status);
+    const resolution = parameterCheckMeta(PARAMETER_CHECK_RESOLUTION_META, finding.resolution_status, finding.resolution_status);
+    const pendingNote = finding.resolution_status === 'unreviewed'
+        ? '<div class="parameter-check-pending-note">当前结论尚待人工确认，工作台不会自动修改知识正文或参数清单。</div>'
+        : '';
+    detail.innerHTML = `
+        <div class="parameter-check-detail-head">
+          <div>
+            <div class="parameter-check-detail-title">${escapeHtml(finding.question_wiki_id)} · ${escapeHtml(finding.model_name || finding.model_id)} · ${escapeHtml(finding.feature_name || finding.feature_id)}</div>
+            <div class="parameter-check-detail-meta"><span class="parameter-check-status is-${result.tone}">${escapeHtml(result.label)}</span><span class="parameter-check-status is-${resolution.tone}">${escapeHtml(resolution.label)}</span></div>
+          </div>
+          <div class="parameter-check-detail-actions">
+            <button type="button" class="action-btn btn-secondary-outline" data-wiki-id="${escapeHtml(finding.question_wiki_id)}" onclick="openParameterCheckKnowledge(this.dataset.wikiId)">打开知识编辑</button>
+            <button type="button" class="action-btn btn-secondary-outline" data-model-name="${escapeHtml(finding.model_name || finding.model_id)}" onclick="openParameterCheckMatrix(this.dataset.modelName)">查看机型矩阵</button>
+          </div>
+        </div>
+        ${pendingNote}
+        <div class="parameter-check-evidence-grid">
+          <article>
+            <h4>KB 待核查声明</h4>
+            ${renderParameterCheckKnowledgeContent(finding)}
+            <dl><div><dt>声明值</dt><dd>${escapeHtml(finding.asserted_value || '-')}</dd></div><div><dt>型号</dt><dd>${escapeHtml(finding.model_name || finding.model_id)}</dd></div></dl>
+          </article>
+          <article>
+            <h4>参考证据</h4>
+            <p class="parameter-check-parameter-value">${escapeHtml(finding.canonical_value || '待补充')}</p>
+            <dl><div><dt>功能项</dt><dd>${escapeHtml(finding.feature_name || finding.feature_id)}</dd></div><div><dt>参数版本</dt><dd>${escapeHtml(finding.feature_value_version || '-')}</dd></div></dl>
+          </article>
+          <article>
+            <h4>快照比对</h4>
+            <p>${escapeHtml(finding.reason || '未提供判断依据。')}</p>
+            <dl><div><dt>最近更新</dt><dd>${escapeHtml(formatParameterCheckTime(finding.updated_at))}</dd></div><div><dt>处理备注</dt><dd>${escapeHtml(finding.resolution_note || '尚未填写')}</dd></div></dl>
+          </article>
+        </div>
+    `;
+}
+
+function updateParameterCheckPolling(overview) {
+    if (parameterCheckState.pollTimer) {
+        window.clearTimeout(parameterCheckState.pollTimer);
+        parameterCheckState.pollTimer = null;
+    }
+    const runningScans = overview?.summary?.running_scans || [];
+    if (!isParameterCheckQueueView(overview) || !runningScans.length) return;
+    parameterCheckState.pollTimer = window.setTimeout(() => {
+        parameterCheckState.loaded = false;
+        loadParameterCheckOverview({ force: true });
+    }, 3000);
+}
+
+function renderParameterCheckOverview(overview) {
+    renderParameterCheckRunOptions(overview);
+    renderParameterCheckFilterOptions(overview);
+    renderParameterCheckSummary(overview);
+    renderParameterCheckTable(overview);
+    const status = document.getElementById('parameterCheckRuntimeStatus');
+    if (!status) return;
+    const snapshot = overview?.snapshot;
+    if (isParameterCheckQueueView(overview)) {
+        const runningScans = overview?.summary?.running_scans || [];
+        if (runningScans.length) {
+            const progress = runningScans.map(scan => {
+                const counts = scan.result_counts || {};
+                return `${scan.feature_name || '参数功能'}全量扫描：已处理 ${counts.processed_knowledge_count || 0} / ${counts.total_eligible_knowledge_count || 0} 条，已形成 ${counts.candidate_count || 0} 条候选`;
+            }).join('；');
+            status.textContent = `${progress}，扫描仍在继续，复核池会自动更新。`;
+        } else {
+            status.textContent = `全量复核池已汇总 ${overview?.summary?.candidate_count || 0} 条 AI 候选，其中 ${overview?.summary?.review_status_counts?.unreviewed || 0} 条待人工复核。`;
+        }
+    } else if (!overview?.selected_run) {
+        status.textContent = '当前没有可展示的校对运行。';
+    } else if (isParameterCheckAuditView(overview)) {
+        const summary = overview?.summary || {};
+        status.textContent = `本批已扫描 ${summary.scanned_knowledge_count || 0} 条知识；扫描审计保留 AI 输出数量与校验结果。`;
+    } else if (isParameterCheckCandidateView(overview)) {
+        const summary = overview?.summary || {};
+        status.textContent = `AI 候选已给出初步判断，当前有 ${summary.review_status_counts?.unreviewed || 0} 条待人工复核；模型为 ${overview.selected_run.ai_model || '未记录模型'}。`;
+    } else if (snapshot) {
+        status.textContent = `使用快照 ${snapshot.snapshot_id}，同步于 ${formatParameterCheckTime(snapshot.synced_at)}。`;
+    } else {
+        status.textContent = '已读取校对运行，但未找到对应参数快照元数据。';
+    }
+    updateParameterCheckPolling(overview);
+}
+
+function invalidateParameterCheckOverview() {
+    parameterCheckState.loaded = false;
+    parameterCheckState.overviewEpoch += 1;
+}
+
+function applyParameterCheckCandidateReview(overview, claimId, review) {
+    if (!isParameterCheckCandidateView(overview) && !isParameterCheckQueueView(overview)) return false;
+    const candidate = (overview?.candidates || []).find(item => item.claim_id === claimId);
+    const reviewStatus = String(review?.review_status || '').trim();
+    if (!candidate || !reviewStatus) return false;
+
+    const previousStatus = String(candidate.review_status || 'unreviewed');
+    Object.assign(candidate, {
+        review_status: reviewStatus,
+        final_verdict: review.final_verdict || '',
+        review_reason: review.review_reason || '',
+        reviewed_by: review.reviewed_by || '',
+        reviewed_at: review.reviewed_at || '',
+        updated_at: review.updated_at || candidate.updated_at,
+    });
+
+    if (previousStatus !== reviewStatus) {
+        if (!overview.summary) overview.summary = {};
+        const reviewCounts = overview.summary.review_status_counts || (overview.summary.review_status_counts = {});
+        reviewCounts[previousStatus] = Math.max(0, Number(reviewCounts[previousStatus] || 0) - 1);
+        reviewCounts[reviewStatus] = Number(reviewCounts[reviewStatus] || 0) + 1;
+    }
+    renderParameterCheckOverview(overview);
+    return true;
+}
+
+async function loadParameterCheckOverview(options = {}) {
+    if (parameterCheckState.loading) {
+        if (!options.force) return parameterCheckState.loadingPromise;
+        await parameterCheckState.loadingPromise;
+        return loadParameterCheckOverview(options);
+    }
+    const shouldReuse = parameterCheckState.loaded && !options.force && !options.runId && !options.page;
+    if (shouldReuse) {
+        renderParameterCheckOverview(parameterCheckState.overview);
+        return;
+    }
+    const status = document.getElementById('parameterCheckRuntimeStatus');
+    const tbody = document.getElementById('parameterCheckTableBody');
+    parameterCheckState.loading = true;
+    const requestEpoch = parameterCheckState.overviewEpoch;
+    if (status) status.textContent = '正在读取参数校对数据...';
+    if (tbody) tbody.setAttribute('aria-busy', 'true');
+    const request = (async () => {
+        try {
+            const selectedRunId = options.runId !== undefined
+                ? options.runId
+                : (parameterCheckState.runId || getParameterCheckFilterValue('parameterCheckRunSelect'));
+            const params = new URLSearchParams({
+                category_name: '扫地机',
+                page: String(options.page || parameterCheckState.page || 1),
+                page_size: '50',
+                ai_view: options.aiView || parameterCheckState.aiView || 'queue',
+            });
+            if (selectedRunId) params.set('run_id', selectedRunId);
+            const resultStatus = getParameterCheckFilterValue('parameterCheckResultStatus');
+            const modelId = getParameterCheckFilterValue('parameterCheckModelId');
+            const featureId = getParameterCheckFilterValue('parameterCheckFeatureId');
+            const wikiId = getParameterCheckFilterValue('parameterCheckWikiId');
+            if (resultStatus) params.set('result_status', resultStatus);
+            if (modelId) params.set('model_id', modelId);
+            if (featureId) params.set('feature_id', featureId);
+            if (wikiId) params.set('wiki_id', wikiId);
+
+            const overview = await api(`/kb/parameter-check/overview?${params.toString()}`);
+            if (!overview?.success) throw new Error(overview?.message || '读取参数校对数据失败。');
+            if (requestEpoch !== parameterCheckState.overviewEpoch) return;
+            parameterCheckState.loaded = true;
+            parameterCheckState.overview = overview;
+            parameterCheckState.runId = overview.selected_run?.run_id || '';
+            parameterCheckState.aiView = isParameterCheckAuditView(overview)
+                ? 'audit'
+                : (isParameterCheckQueueView(overview) ? 'queue' : 'candidates');
+            parameterCheckState.page = overview.pagination?.page || 1;
+            renderParameterCheckOverview(overview);
+        } catch (error) {
+            if (requestEpoch !== parameterCheckState.overviewEpoch) return;
+            const message = error?.message || '读取参数校对数据失败。';
+            if (status) status.textContent = message;
+            if (tbody) tbody.innerHTML = `<tr><td colspan="${isParameterCheckAuditView(parameterCheckState.overview) ? 8 : 9}" class="error-message">${escapeHtml(message)}</td></tr>`;
+        } finally {
+            parameterCheckState.loading = false;
+            if (tbody) tbody.removeAttribute('aria-busy');
+        }
+    })();
+    parameterCheckState.loadingPromise = request;
+    try {
+        return await request;
+    } finally {
+        if (parameterCheckState.loadingPromise === request) parameterCheckState.loadingPromise = null;
+    }
+}
+
+async function runParameterCheckAiFeatureScan() {
+    if (parameterCheckState.loading) return;
+    const button = document.getElementById('parameterCheckAiFeatureScanBtn');
+    const status = document.getElementById('parameterCheckRuntimeStatus');
+    const featureId = getParameterCheckFilterValue('parameterCheckScanFeatureId');
+    const featureName = document.getElementById('parameterCheckScanFeatureId')?.selectedOptions?.[0]?.textContent?.trim() || '所选功能';
+    if (!featureId) {
+        if (status) status.textContent = '请先选择要全量扫描的参数功能。';
+        return;
+    }
+    if (button) button.disabled = true;
+    if (status) status.textContent = `${featureName}全量扫描已提交，后台会自动分段执行。`;
+    try {
+        const result = await api('/kb/parameter-check/runs', 'POST', {
+            category_name: '扫地机',
+            mode: 'ai_feature_extract',
+            feature_id: featureId,
+        });
+        if (!result?.success) throw new Error(result?.message || '参数功能全量扫描启动失败。');
+        parameterCheckState.loaded = false;
+        parameterCheckState.runId = '';
+        parameterCheckState.aiView = 'queue';
+        parameterCheckState.page = 1;
+        parameterCheckState.selectedFindingId = '';
+        await loadParameterCheckOverview({ runId: '', aiView: 'queue', page: 1, force: true });
+    } catch (error) {
+        if (status) status.textContent = error?.message || '参数功能全量扫描启动失败。';
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+function changeParameterCheckRun(runId) {
+    parameterCheckState.runId = String(runId || '');
+    parameterCheckState.page = 1;
+    parameterCheckState.aiView = parameterCheckState.runId ? 'candidates' : 'queue';
+    parameterCheckState.selectedFindingId = '';
+    ['parameterCheckResultStatus', 'parameterCheckModelId', 'parameterCheckFeatureId', 'parameterCheckWikiId'].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) input.value = '';
+    });
+    loadParameterCheckOverview({ runId: parameterCheckState.runId, page: 1, force: true });
+}
+
+function changeParameterCheckAiView(aiView) {
+    parameterCheckState.aiView = ['queue', 'audit', 'candidates'].includes(aiView) ? aiView : 'queue';
+    if (parameterCheckState.aiView === 'queue') {
+        parameterCheckState.runId = '';
+        const runSelect = document.getElementById('parameterCheckRunSelect');
+        if (runSelect) runSelect.value = '';
+    }
+    parameterCheckState.page = 1;
+    parameterCheckState.selectedFindingId = '';
+    loadParameterCheckOverview({ aiView: parameterCheckState.aiView, page: 1, force: true });
+}
+
+function resetParameterCheckFilters() {
+    ['parameterCheckResultStatus', 'parameterCheckModelId', 'parameterCheckFeatureId', 'parameterCheckWikiId'].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) input.value = '';
+    });
+    parameterCheckState.page = 1;
+    parameterCheckState.selectedFindingId = '';
+    loadParameterCheckOverview({ page: 1, force: true });
+}
+
+function changeParameterCheckPage(delta) {
+    const pagination = parameterCheckState.overview?.pagination;
+    const nextPage = Number(pagination?.page || 1) + Number(delta || 0);
+    if (nextPage < 1) return;
+    parameterCheckState.page = nextPage;
+    parameterCheckState.selectedFindingId = '';
+    loadParameterCheckOverview({ page: nextPage, force: true });
+}
+
+function selectParameterCheckFinding(findingId) {
+    parameterCheckState.selectedFindingId = String(findingId || '');
+    renderParameterCheckTable(parameterCheckState.overview);
+    const detail = document.getElementById('parameterCheckDetail');
+    if (!detail) return;
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    detail.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+}
+
+async function submitParameterCheckCandidateReview(claimId, decision) {
+    const normalizedClaimId = String(claimId || '').trim();
+    if (!normalizedClaimId) return;
+    const verdictField = document.getElementById(`parameterCheckReviewVerdict-${normalizedClaimId}`);
+    const reasonField = document.getElementById(`parameterCheckReviewReason-${normalizedClaimId}`);
+    const status = document.getElementById('parameterCheckRuntimeStatus');
+    const buttons = Array.from(document.querySelectorAll('[data-claim-id]')).filter(button => button.dataset.claimId === normalizedClaimId);
+    buttons.forEach(button => { button.disabled = true; });
+    if (status) status.textContent = '正在保存人工复核结论...';
+    try {
+        const result = await api(`/kb/parameter-check/candidates/${encodeURIComponent(normalizedClaimId)}/review`, 'POST', {
+            decision,
+            final_verdict: verdictField?.value || '',
+            review_reason: reasonField?.value || '',
+        });
+        if (!result?.success) throw new Error(result?.message || '保存人工复核结论失败。');
+        invalidateParameterCheckOverview();
+        applyParameterCheckCandidateReview(parameterCheckState.overview, normalizedClaimId, result.review);
+        parameterCheckState.selectedFindingId = normalizedClaimId;
+        await loadParameterCheckOverview({ runId: parameterCheckState.runId, page: parameterCheckState.page, force: true });
+    } catch (error) {
+        if (status) status.textContent = error?.message || '保存人工复核结论失败。';
+    } finally {
+        buttons.forEach(button => { button.disabled = false; });
+    }
+}
+
+function openParameterCheckKnowledge(wikiId) {
+    const targetId = String(wikiId || '').trim();
+    if (!targetId) return;
+    const search = document.getElementById('idSearch');
+    if (search) search.value = targetId;
+    switchTab('kbView');
+    if (typeof loadKBTable === 'function') loadKBTable(1);
+}
+
+function openParameterCheckMatrix(modelName) {
+    const targetModel = String(modelName || '').trim();
+    if (!targetModel) return;
+    if (typeof matrixSearchProductSelected !== 'undefined') {
+        matrixSearchProductSelected.clear();
+        matrixSearchProductSelected.add(targetModel);
+        if (typeof renderMatrixSearchProductSelectedChips === 'function') renderMatrixSearchProductSelectedChips();
+    }
+    const input = document.getElementById('matrixSearchProductInput');
+    if (input) input.value = targetModel;
+    switchTab('matrixView');
+    if (typeof loadMatrixData === 'function') loadMatrixData(1);
 }
 
 function openDataSettingsImport() {
@@ -12068,6 +13895,152 @@ function changeKBPageSize() {
 }
 
 // KB Import/Export/Sync
+let kbMailAttachmentCandidates = [];
+let kbMailSelectedAttachmentIndex = -1;
+let kbMailPulledMessage = null;
+
+function formatKBMailAttachmentSize(bytes) {
+    const value = Number(bytes || 0);
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderKBMailPullResult(mail) {
+    const result = document.getElementById('kbMailPullResult');
+    if (!result) return;
+
+    const attachments = Array.isArray(mail?.attachments) ? mail.attachments : [];
+    const ignored = Array.isArray(mail?.ignored_attachments) ? mail.ignored_attachments : [];
+    const attachmentRows = attachments.map((attachment, index) => {
+        const selected = index === kbMailSelectedAttachmentIndex;
+        return `
+            <div class="kb-mail-attachment-row${selected ? ' is-selected' : ''}">
+                <i class="fas fa-file-excel kb-mail-file-icon" aria-hidden="true"></i>
+                <div class="kb-mail-attachment-info">
+                    <strong>${escapeHtml(attachment.filename || 'attachment')}</strong>
+                    <span>${escapeHtml(formatKBMailAttachmentSize(attachment.size))}</span>
+                </div>
+                <button type="button" class="action-btn btn-secondary-outline kb-mail-use-btn" onclick="useKBMailAttachment(${index})"${selected ? ' disabled' : ''}>
+                    <i class="fas ${selected ? 'fa-check' : 'fa-file-import'}" aria-hidden="true"></i>
+                    <span>${selected ? '已选择' : '选作导入文件'}</span>
+                </button>
+            </div>
+        `;
+    }).join('');
+    const ignoredText = ignored.length > 0
+        ? `<div class="kb-mail-ignored">已忽略 ${ignored.length} 个附件：${ignored.map(item => `${escapeHtml(item.filename || 'attachment')}（${escapeHtml(item.reason || '不支持')}）`).join('；')}</div>`
+        : '';
+
+    result.innerHTML = `
+        <div class="kb-mail-message-meta">
+            <i class="fas fa-envelope" aria-hidden="true"></i>
+            <div>
+                <strong>${escapeHtml(mail?.subject || '未命名邮件')}</strong>
+                <span>${escapeHtml(mail?.sender || '未知发件人')} · 发送时间：${escapeHtml(mail?.sent_at_display || mail?.sent_at_raw || '无法识别')}</span>
+            </div>
+        </div>
+        <div class="kb-mail-attachment-list">
+            ${attachmentRows || '<div class="kb-mail-empty">这封邮件没有可导入的 Excel 或 CSV 附件。</div>'}
+        </div>
+        ${ignoredText}
+    `;
+    result.classList.remove('d-none');
+}
+
+async function pullLatestKBMail() {
+    const button = document.getElementById('pullLatestMailBtn');
+    const status = document.getElementById('kbMailPullStatus');
+    const result = document.getElementById('kbMailPullResult');
+    if (!button || !status) return;
+
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.innerHTML = '<i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i><span>正在拉取</span>';
+    status.dataset.state = 'loading';
+    status.textContent = '正在连接飞书邮箱...';
+    if (result) result.classList.add('d-none');
+    kbMailAttachmentCandidates = [];
+    kbMailSelectedAttachmentIndex = -1;
+    kbMailPulledMessage = null;
+
+    try {
+        const response = await fetch(API_BASE + '/kb/import/mail/latest', {
+            method: 'POST',
+            credentials: 'same-origin'
+        });
+        if (response.status === 401) {
+            showLogin(true);
+            throw new Error('登录状态已失效，请重新登录。');
+        }
+        const data = await response.json();
+        if (!response.ok || !data?.success) {
+            throw new Error(data?.message || '未找到符合条件的邮件。');
+        }
+
+        const mail = data.mail || {};
+        kbMailPulledMessage = mail;
+        kbMailAttachmentCandidates = Array.isArray(mail.attachments) ? mail.attachments : [];
+        renderKBMailPullResult(mail);
+        const skippedMatchingMails = Number(mail.skipped_matching_mails || 0);
+        const skippedText = skippedMatchingMails > 0 ? `，已跳过 ${skippedMatchingMails} 封没有可导入附件的更新邮件` : '';
+        const cacheText = mail.cache_hit ? '，已使用 10 分钟内存缓存' : '';
+        status.dataset.state = kbMailAttachmentCandidates.length > 0 ? 'success' : 'warning';
+        status.textContent = kbMailAttachmentCandidates.length > 0
+            ? `已拉取最新可导入邮件，共 ${kbMailAttachmentCandidates.length} 个附件${skippedText}${cacheText}。`
+            : '已找到最新匹配邮件，但没有可导入附件。';
+    } catch (error) {
+        status.dataset.state = 'error';
+        status.textContent = error?.message || '拉取飞书邮件失败。';
+    } finally {
+        button.disabled = false;
+        button.removeAttribute('aria-busy');
+        button.innerHTML = '<i class="fas fa-envelope-open-text" aria-hidden="true"></i><span>拉取最新邮件</span>';
+    }
+}
+
+function useKBMailAttachment(index) {
+    const attachment = kbMailAttachmentCandidates[index];
+    const fileInput = document.getElementById('importFileKB');
+    const status = document.getElementById('kbMailPullStatus');
+    if (!attachment || !fileInput) return;
+
+    try {
+        const binary = atob(String(attachment.content_base64 || ''));
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        const file = new File([bytes], attachment.filename || 'attachment', {
+            type: attachment.content_type || 'application/octet-stream'
+        });
+        const transfer = new DataTransfer();
+        transfer.items.add(file);
+        fileInput.files = transfer.files;
+        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+        kbMailSelectedAttachmentIndex = index;
+        renderKBMailPullResult(kbMailPulledMessage || { attachments: kbMailAttachmentCandidates });
+        const checkResult = document.getElementById('checkResult');
+        if (checkResult) {
+            checkResult.classList.add('d-none');
+            checkResult.innerHTML = '';
+        }
+        if (status) {
+            status.dataset.state = 'success';
+            status.textContent = `已选择 ${attachment.filename}，可以继续查重预览或开始导入。`;
+        }
+    } catch (error) {
+        if (status) {
+            status.dataset.state = 'error';
+            status.textContent = `附件读取失败：${error?.message || error}`;
+        }
+    }
+}
+
+window.pullLatestKBMail = pullLatestKBMail;
+window.useKBMailAttachment = useKBMailAttachment;
+
 async function importKB() {
   const fileInput = document.getElementById('importFileKB');
   const btn = document.getElementById('importBtn');
@@ -12197,6 +14170,7 @@ async function importKB() {
     const data = await res.json();
     if (data.success) {
       status.textContent = `✅ 成功导入 ${data.count} 条数据`;
+      renderKbImportSyncAction(data.sync_event, data.sync_event_error);
       let msg = `导入成功！共插入 ${data.count} 条记录。`;
       if (data.pre_sync_v1_to_t1) {
         msg += `\n\n（全量覆盖前置备份）${data.pre_sync_v1_to_t1}`;
@@ -12219,6 +14193,36 @@ async function importKB() {
   } finally {
     btn.disabled = false;
   }
+}
+
+function renderKbImportSyncAction(syncEvent, syncError) {
+  const host = document.getElementById('kbImportSyncAction');
+  if (!host) return;
+  host.replaceChildren();
+  if (!syncEvent) {
+    host.textContent = syncError || '本次导入没有生成可同步的固定快照。';
+    host.className = 'text-danger';
+    return;
+  }
+  const summary = document.createElement('span');
+  summary.textContent = `固定快照 ${syncEvent.record_count} 条；新增 ${syncEvent.added_ids.length}、变更 ${syncEvent.updated_ids.length}、删除 ${syncEvent.deleted_ids.length}。`;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'action-btn btn-secondary-outline';
+  button.textContent = '一键同步下游 - 知识库质检中心';
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const response = await fetch(`${API_BASE}/kb/import-sync-events/${encodeURIComponent(syncEvent.sync_id)}/dispatch`, { method: 'POST', credentials: 'same-origin' });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.message || '下游同步失败');
+      summary.textContent = `已发送至知识库质检中心，等待选择检测模式。同步编号：${syncEvent.sync_id}`;
+    } catch (error) {
+      summary.textContent = `导入已成功，下游同步失败：${error.message}。可再次点击重试。`;
+      button.disabled = false;
+    }
+  };
+  host.append(summary, button);
 }
 
 async function syncKB() {
@@ -12467,6 +14471,187 @@ async function deleteSelectedKBItems() {
 
 // Make deleteSelectedKBItems global
 window.deleteSelectedKBItems = deleteSelectedKBItems;
+
+let activityArchiveBatches = [];
+
+function activityArchiveDefaultName() {
+    const now = new Date();
+    const pad = value => String(value).padStart(2, '0');
+    return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_活动`;
+}
+
+function closeActivityArchiveModal() {
+    const modal = document.getElementById('activityArchiveModal');
+    if (modal) modal.style.display = 'none';
+}
+window.closeActivityArchiveModal = closeActivityArchiveModal;
+
+function openActivityArchiveModal() {
+    const table = document.querySelector('input[name="kbTable"]:checked')?.value || 'knowledge_base_v1';
+    if (table !== 'knowledge_base_v1') {
+        alert('活动内容只能从此刻库暂存。');
+        return;
+    }
+    if (selectedKBRows.size === 0) {
+        alert('请先勾选需要暂时下架的活动内容。');
+        return;
+    }
+    const modal = document.getElementById('activityArchiveModal');
+    const input = document.getElementById('activityArchiveName');
+    const impact = document.getElementById('activityArchiveImpact');
+    if (impact) impact.textContent = `将暂存 ${selectedKBRows.size} 条活动内容，并从此刻库移除。`;
+    if (input && !String(input.value || '').trim()) input.value = activityArchiveDefaultName();
+    if (modal) modal.style.display = 'block';
+    if (input) setTimeout(() => input.focus(), 0);
+}
+window.openActivityArchiveModal = openActivityArchiveModal;
+
+function activityArchiveStatusText(status) {
+    const labels = {
+        archiving: '暂存中',
+        archived: '已暂存',
+        archive_failed: '暂存异常',
+        restoring: '恢复中',
+        restored: '已恢复',
+        restore_failed: '恢复异常',
+    };
+    return labels[String(status || '')] || '未知';
+}
+
+function activityArchiveStatusClass(status) {
+    if (status === 'archived') return 'badge badge-warning';
+    if (status === 'restored') return 'badge badge-success';
+    if (String(status || '').endsWith('_failed')) return 'badge badge-danger';
+    return 'badge badge-info';
+}
+
+function renderActivityArchives() {
+    const tbody = document.getElementById('activityArchiveTableBody');
+    const count = document.getElementById('activityArchiveCount');
+    const pendingCount = activityArchiveBatches
+        .filter(item => item && item.status === 'archived')
+        .reduce((total, item) => total + Number(item.record_count || 0), 0);
+    if (count) count.textContent = String(pendingCount);
+    if (!tbody) return;
+    if (!activityArchiveBatches.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-message">暂无已暂存活动</td></tr>';
+        return;
+    }
+    tbody.innerHTML = activityArchiveBatches.map(item => {
+        const batchId = _escapeAttr(String(item.id || ''));
+        const canRestore = item.status === 'archived';
+        const errorTitle = item.last_error ? ` title="${_escapeAttr(item.last_error)}"` : '';
+        const createdAt = item.created_at ? new Date(item.created_at).toLocaleString() : '-';
+        const action = canRestore
+            ? `<button type="button" class="action-btn btn-sm" data-activity-archive-id="${batchId}" onclick="restoreActivityArchive(this.dataset.activityArchiveId)">恢复编辑</button>`
+            : '<span class="text-muted">-</span>';
+        return `<tr>
+            <td>${escapeHtml(item.batch_name || '-')}</td>
+            <td>${Number(item.record_count || 0)}</td>
+            <td><span class="${activityArchiveStatusClass(item.status)}"${errorTitle}>${escapeHtml(activityArchiveStatusText(item.status))}</span></td>
+            <td>${escapeHtml(createdAt)}</td>
+            <td>${action}</td>
+        </tr>`;
+    }).join('');
+}
+
+async function loadActivityArchives() {
+    const tbody = document.getElementById('activityArchiveTableBody');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="5" class="empty-message">加载中...</td></tr>';
+    try {
+        const response = await api('/kb/activity-archives');
+        if (!response || !response.success) throw new Error(response?.message || '读取活动暂存失败');
+        activityArchiveBatches = response.data || [];
+        renderActivityArchives();
+    } catch (error) {
+        activityArchiveBatches = [];
+        if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="error-message">加载失败: ${escapeHtml(error.message || String(error))}</td></tr>`;
+    }
+}
+window.loadActivityArchives = loadActivityArchives;
+
+function toggleActivityArchivePanel(force) {
+    const panel = document.getElementById('activityArchivePanel');
+    if (!panel) return;
+    const show = typeof force === 'boolean' ? force : panel.classList.contains('d-none');
+    panel.classList.toggle('d-none', !show);
+    if (show) loadActivityArchives();
+}
+window.toggleActivityArchivePanel = toggleActivityArchivePanel;
+
+async function confirmActivityArchive() {
+    const nameInput = document.getElementById('activityArchiveName');
+    const button = document.getElementById('activityArchiveConfirmBtn');
+    const batchName = String(nameInput?.value || '').trim();
+    const ids = Array.from(selectedKBRows).map(value => String(value || '').trim()).filter(Boolean);
+    if (!batchName) {
+        showToast('请填写活动批次名称', 'warning');
+        if (nameInput) nameInput.focus();
+        return;
+    }
+    if (!ids.length) {
+        closeActivityArchiveModal();
+        showToast('未找到待暂存内容，请重新选择。', 'warning');
+        return;
+    }
+    const confirmed = await showDangerConfirmModal(
+        '暂存活动内容确认',
+        `将保存 ${ids.length} 条完整内容和标签快照，再从此刻库物理移除。恢复后会回到“修改中”状态。确认继续？`,
+        '确认暂存并下架'
+    );
+    if (!confirmed) return;
+    if (button) button.disabled = true;
+    try {
+        const response = await api('/kb/activity-archives', 'POST', {
+            batch_name: batchName,
+            ids,
+            expected_count: ids.length,
+            confirm_archive: true,
+        });
+        if (!response || !response.success) throw new Error(response?.message || '活动暂存失败');
+        closeActivityArchiveModal();
+        selectedKBRows.clear();
+        clearKBCache();
+        await loadKBTable(1);
+        await loadActivityArchives();
+        toggleActivityArchivePanel(true);
+        const warnings = Array.isArray(response.warnings) && response.warnings.length ? `；${response.warnings.join('；')}` : '';
+        showToast(`已暂存 ${Number(response.record_count || ids.length)} 条活动内容${warnings}`, warnings ? 'warning' : 'success');
+    } catch (error) {
+        showToast('活动暂存失败: ' + (error.message || String(error)), 'error');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+window.confirmActivityArchive = confirmActivityArchive;
+
+async function restoreActivityArchive(batchId) {
+    const batch = activityArchiveBatches.find(item => String(item?.id || '') === String(batchId || ''));
+    if (!batch) {
+        showToast('未找到活动暂存批次，请刷新后重试。', 'warning');
+        return;
+    }
+    const confirmed = await showDangerConfirmModal(
+        '恢复活动内容确认',
+        `将把“${batch.batch_name}”的 ${Number(batch.record_count || 0)} 条内容写回此刻库，并标记为“修改中”以便继续编辑。确认继续？`,
+        '确认恢复编辑'
+    );
+    if (!confirmed) return;
+    try {
+        const response = await api(`/kb/activity-archives/${encodeURIComponent(batchId)}/restore`, 'POST', {
+            confirm_restore: true,
+        });
+        if (!response || !response.success) throw new Error(response?.message || '活动恢复失败');
+        clearKBCache();
+        await loadKBTable(1);
+        await loadActivityArchives();
+        const warnings = Array.isArray(response.warnings) && response.warnings.length ? `；${response.warnings.join('；')}` : '';
+        showToast(`已恢复 ${Number(response.record_count || 0)} 条活动内容，可继续编辑${warnings}`, warnings ? 'warning' : 'success');
+    } catch (error) {
+        showToast('活动恢复失败: ' + (error.message || String(error)), 'error');
+    }
+}
+window.restoreActivityArchive = restoreActivityArchive;
 
 let __manualHtmlCache = '';
 let __manualLoadPromise = null;
@@ -14044,6 +16229,7 @@ function closeKBEditModal(options = {}) {
             saved: kbEditEmbedSaved,
             changeSource: kbEditEmbedRequest?.changeSource || '',
         });
+        if (!__kbEditSaving) knowledgeGraphState.editingWikiId = '';
     };
 
     if (!force && __kbEditHasUnsavedChanges()) {
@@ -15298,6 +17484,17 @@ async function saveKBItem() {
 
         // Sync KB tags after saving row content (even when no_change=true)
         const savedWikiId = String(res.question_wiki_id || data.question_wiki_id || '').trim();
+        // Do not delay the host's recheck eligibility on best-effort tag synchronization.
+        kbEditEmbedSaved = true;
+        postKbEditEmbedMessage('saved', {
+            kbId: savedWikiId,
+            changeSource: kbEditEmbedRequest?.changeSource || '',
+            noChange: !!res.no_change,
+            changedFieldCount: Array.isArray(savedDiffs) ? savedDiffs.length : 0,
+            updateTime: String(res.update_time || res.current_update_time || '').trim(),
+            modLogOk: typeof res.mod_log_ok === 'boolean' ? res.mod_log_ok : undefined,
+            warning: String(res.warning || '').trim(),
+        });
         if (savedWikiId) {
             try {
                 const tr = await api('/kb/item/tags', 'PUT', {
@@ -15330,17 +17527,8 @@ async function saveKBItem() {
         __kbEditTouched = false;
         __kbEditInitialDigest = __kbEditCollectDigest();
         __kbEditClearDraft(__kbEditDraftContextId);
-        kbEditEmbedSaved = true;
-        postKbEditEmbedMessage('saved', {
-            kbId: savedWikiId,
-            changeSource: kbEditEmbedRequest?.changeSource || '',
-            noChange: !!res.no_change,
-            changedFieldCount: Array.isArray(savedDiffs) ? savedDiffs.length : 0,
-            updateTime: String(res.update_time || res.current_update_time || '').trim(),
-            modLogOk: typeof res.mod_log_ok === 'boolean' ? res.mod_log_ok : undefined,
-            warning: String(res.warning || '').trim(),
-        });
         const qualityContext = __kbEditQualityContext;
+        const graphEditedWikiId = String(knowledgeGraphState.editingWikiId || '').trim();
         closeKBEditModal({ force: true });
         // 保存后必须清空分页缓存，否则会继续命中旧数据导致“预览未更新”。
         clearKBCache();
@@ -15349,6 +17537,19 @@ async function saveKBItem() {
             await qcLoadRawIssues(qcRawPage);
         } else {
             await loadKBTable(kbCurrentPage);
+        }
+        if (graphEditedWikiId) {
+            knowledgeGraphState.editingWikiId = '';
+            knowledgeGraphState.selectedWikiId = graphEditedWikiId;
+            knowledgeGraphState.selectedEdgeId = '';
+            const graphWikiInput = document.getElementById('knowledgeGraphWikiId');
+            if (graphWikiInput) graphWikiInput.value = graphEditedWikiId;
+            await loadKnowledgeGraph({ force: true });
+            const refresh = res.graph_relation_refresh || {};
+            const graphStatus = document.getElementById('knowledgeGraphStatus');
+            if (graphStatus && !res.no_change) {
+                graphStatus.textContent = `知识已保存：${Number(refresh.expired_count || 0)} 条旧关系失效，生成 ${Number(refresh.revalidation_candidate_count || 0)} 条新候选；${Number(refresh.revalidated_without_relation_count || 0)} 组当前不再建立关系。`;
+            }
         }
         if (typeof loadModifications === 'function') loadModifications(1);
     } catch (e) {
@@ -19857,6 +22058,8 @@ function setupRowTagInput(input, container, existingTags) {
 let modelMappings = {};
 let currentMappingCategory = null; // For Model Selector
 let allUniqueModels = [];
+let modelMappingView = 'audit';
+let modelMappingAuditFilter = 'all';
 
 async function openModelMappingModal() {
     try {
@@ -19881,6 +22084,8 @@ async function openModelMappingModal() {
 
         const searchEl = document.getElementById('modelMappingSearch');
         if (searchEl) searchEl.value = '';
+        modelMappingView = 'audit';
+        modelMappingAuditFilter = 'all';
         renderModelMappingTable();
         document.getElementById('modelMappingModal').style.display = 'block';
     } catch (e) {
@@ -19890,6 +22095,178 @@ async function openModelMappingModal() {
 
 function closeModelMappingModal() {
     document.getElementById('modelMappingModal').style.display = 'none';
+}
+
+function setModelMappingView(view) {
+    modelMappingView = view === 'categories' ? 'categories' : 'audit';
+    renderModelMappingTable();
+}
+
+function setModelMappingAuditFilter(filter) {
+    modelMappingAuditFilter = ['all', 'unmapped', 'multi'].includes(filter) ? filter : 'all';
+    renderModelMappingAudit();
+}
+
+function renderModelMappingViewState() {
+    const auditView = document.getElementById('modelMappingAuditView');
+    const categoriesView = document.getElementById('modelMappingCategoriesView');
+    const auditButton = document.getElementById('modelMappingAuditViewBtn');
+    const categoriesButton = document.getElementById('modelMappingCategoriesViewBtn');
+    const auditActive = modelMappingView === 'audit';
+
+    if (auditView) auditView.hidden = !auditActive;
+    if (categoriesView) categoriesView.hidden = auditActive;
+    if (auditButton) {
+        auditButton.classList.toggle('active', auditActive);
+        auditButton.setAttribute('aria-selected', String(auditActive));
+    }
+    if (categoriesButton) {
+        categoriesButton.classList.toggle('active', !auditActive);
+        categoriesButton.setAttribute('aria-selected', String(!auditActive));
+    }
+}
+
+function buildModelMappingAuditRows() {
+    const catalogIndex = buildCatalogModelIndex();
+    const rowsByKey = new Map();
+
+    allUniqueModels.forEach(rawModel => {
+        const model = canonicalizeModelName(rawModel, catalogIndex);
+        const key = compactModelKey(model);
+        if (!key || rowsByKey.has(key)) return;
+        rowsByKey.set(key, { model, categories: [], inCatalog: true });
+    });
+
+    Object.entries(modelMappings || {}).forEach(([category, models]) => {
+        if (!Array.isArray(models)) return;
+        models.forEach(rawModel => {
+            const model = canonicalizeModelName(rawModel, catalogIndex);
+            const key = compactModelKey(model);
+            if (!key) return;
+            if (!rowsByKey.has(key)) {
+                rowsByKey.set(key, { model, categories: [], inCatalog: false });
+            }
+            const row = rowsByKey.get(key);
+            if (!row.categories.includes(category)) row.categories.push(category);
+        });
+    });
+
+    return Array.from(rowsByKey.values()).map(row => ({
+        ...row,
+        categories: row.categories.sort((a, b) => String(a).localeCompare(String(b), 'zh')),
+    })).sort((a, b) => String(a.model).localeCompare(String(b.model), 'zh'));
+}
+
+function focusModelMappingCategory(category) {
+    const search = document.getElementById('modelMappingSearch');
+    if (search) search.value = category;
+    modelMappingView = 'categories';
+    renderModelMappingTable();
+}
+
+function renderModelMappingAudit() {
+    const summary = document.getElementById('modelMappingAuditSummary');
+    const body = document.getElementById('modelMappingAuditBody');
+    if (!summary || !body) return;
+
+    const rows = buildModelMappingAuditRows();
+    const query = (document.getElementById('modelMappingSearch')?.value || '').trim().toLowerCase();
+    const total = rows.length;
+    const unmapped = rows.filter(row => row.inCatalog && row.categories.length === 0).length;
+    const multiMapped = rows.filter(row => row.categories.length > 1).length;
+    const outsideCatalog = rows.filter(row => !row.inCatalog).length;
+
+    summary.innerHTML = `
+        <span><b>${total}</b> 全部型号</span>
+        <span><b>${unmapped}</b> 未映射</span>
+        <span><b>${multiMapped}</b> 多分类</span>
+        <span><b>${outsideCatalog}</b> 目录外型号</span>
+    `;
+
+    ['all', 'unmapped', 'multi'].forEach(filter => {
+        const button = document.getElementById(`modelMappingAuditFilter${filter[0].toUpperCase()}${filter.slice(1)}`);
+        if (!button) return;
+        const active = modelMappingAuditFilter === filter;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+    });
+
+    const visibleRows = rows.filter(row => {
+        if (modelMappingAuditFilter === 'unmapped' && row.categories.length !== 0) return false;
+        if (modelMappingAuditFilter === 'multi' && row.categories.length < 2) return false;
+        if (!query) return true;
+        return String(row.model).toLowerCase().includes(query)
+            || row.categories.some(category => String(category).toLowerCase().includes(query));
+    });
+
+    body.innerHTML = '';
+    if (visibleRows.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 4;
+        cell.className = 'mm-audit-empty';
+        cell.textContent = '未找到符合条件的型号';
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+    }
+
+    visibleRows.forEach(rowData => {
+        const row = document.createElement('tr');
+        if (rowData.categories.length > 1) row.classList.add('is-multi');
+        if (!rowData.inCatalog) row.classList.add('is-outside-catalog');
+
+        const modelCell = document.createElement('td');
+        modelCell.className = 'mm-audit-model';
+        modelCell.textContent = rowData.model;
+
+        const categoriesCell = document.createElement('td');
+        categoriesCell.className = 'mm-audit-categories';
+        if (rowData.categories.length === 0) {
+            const empty = document.createElement('span');
+            empty.className = 'mm-audit-unmapped';
+            empty.textContent = '未分配';
+            categoriesCell.appendChild(empty);
+        } else {
+            rowData.categories.forEach(category => {
+                const categoryButton = document.createElement('button');
+                categoryButton.type = 'button';
+                categoryButton.className = 'mm-audit-category';
+                categoryButton.textContent = category;
+                categoryButton.title = `在分类编辑中查看“${category}”`;
+                categoryButton.onclick = () => focusModelMappingCategory(category);
+                categoriesCell.appendChild(categoryButton);
+            });
+        }
+
+        const countCell = document.createElement('td');
+        countCell.className = 'mm-audit-count';
+        countCell.textContent = String(rowData.categories.length);
+
+        const statusCell = document.createElement('td');
+        const status = document.createElement('span');
+        status.className = 'mm-audit-status';
+        if (!rowData.inCatalog) {
+            status.classList.add('is-warning');
+            status.textContent = '待核对';
+        } else if (rowData.categories.length === 0) {
+            status.classList.add('is-muted');
+            status.textContent = '未映射';
+        } else if (rowData.categories.length > 1) {
+            status.classList.add('is-info');
+            status.textContent = '多分类';
+        } else {
+            status.classList.add('is-success');
+            status.textContent = '已映射';
+        }
+        statusCell.appendChild(status);
+
+        row.appendChild(modelCell);
+        row.appendChild(categoriesCell);
+        row.appendChild(countCell);
+        row.appendChild(statusCell);
+        body.appendChild(row);
+    });
 }
 
 function renderModelMappingTable() {
@@ -19906,6 +22283,8 @@ function renderModelMappingTable() {
     if (!modelMappings || typeof modelMappings !== 'object' || Array.isArray(modelMappings)) {
         modelMappings = {};
     }
+    renderModelMappingViewState();
+    renderModelMappingAudit();
     const categories = Object.keys(modelMappings).sort();
     if (categories.length === 0) {
         if (grid) {
@@ -19927,9 +22306,11 @@ function renderModelMappingTable() {
         return list.some(m => String(m).toLowerCase().includes(query));
     };
     
+    let renderedCategoryCount = 0;
     categories.forEach(category => {
         const models = Array.isArray(modelMappings[category]) ? modelMappings[category] : [];
         if (!matchesQuery(category, models)) return;
+        renderedCategoryCount++;
         
         if (grid) {
             const card = document.createElement('div');
@@ -20012,16 +22393,18 @@ function renderModelMappingTable() {
             models.forEach(model => {
                 const chip = document.createElement('span');
                 chip.className = 'mm-model-chip';
-                chip.innerHTML = `
-                    ${model}
-                    <i class="fas fa-times mm-model-delete" onclick="removeModelFromMapping('${category}', '${model}')" title="移除型号"></i>
-                `;
+                chip.append(document.createTextNode(model));
+                const remove = document.createElement('i');
+                remove.className = 'fas fa-times mm-model-delete';
+                remove.title = '移除型号';
+                remove.onclick = () => removeModelFromMapping(category, model);
+                chip.appendChild(remove);
                 modelsDiv.appendChild(chip);
             });
             
             const addBtn = document.createElement('button');
             addBtn.className = 'mm-add-model-btn';
-            addBtn.innerHTML = '<i class="fas fa-plus"></i>';
+            addBtn.innerHTML = '<i class="fas fa-plus"></i> 添加机型';
             addBtn.onclick = () => openModelSelector(category);
             addBtn.title = '添加/管理机型';
             modelsDiv.appendChild(addBtn);
@@ -20042,6 +22425,10 @@ function renderModelMappingTable() {
             tbody.appendChild(tr);
         }
     });
+
+    if (renderedCategoryCount === 0 && tbody) {
+        tbody.innerHTML = '<tr><td colspan="3" class="mm-audit-empty">未找到符合条件的分类</td></tr>';
+    }
 }
 
 function addMappingCategory() {
@@ -20051,6 +22438,9 @@ function addMappingCategory() {
         newName = `新分类 ${counter++}`;
     }
     modelMappings[newName] = [];
+    const search = document.getElementById('modelMappingSearch');
+    if (search) search.value = '';
+    modelMappingView = 'categories';
     renderModelMappingTable();
 }
 
@@ -20585,61 +22975,6 @@ function importModelMappings() {
     showToast(`导入完成: 成功 ${successCount} 条，跳过 ${skipCount} 条 (格式错误)`, 'success');
 }
 
-function enableHorizontalDragScroll(container) {
-    if (!container || (container.dataset && container.dataset.dragScrollBound)) return;
-    if (container.dataset) container.dataset.dragScrollBound = '1';
-
-    let isDown = false;
-    let startX = 0;
-    let startLeft = 0;
-    let moved = 0;
-    let suppressClick = false;
-
-    const onDown = (e) => {
-        if (e.button !== 0) return;
-        const t = e.target;
-        if (t && t.closest && t.closest('textarea, input, select, button, a, label, summary, details, .col-resizer')) return;
-        isDown = true;
-        moved = 0;
-        suppressClick = false;
-        startX = e.clientX;
-        startLeft = container.scrollLeft;
-        container.style.cursor = 'grabbing';
-        container.style.userSelect = 'none';
-    };
-
-    const onMove = (e) => {
-        if (!isDown) return;
-        const dx = e.clientX - startX;
-        moved = Math.max(moved, Math.abs(dx));
-        if (moved > 3) suppressClick = true;
-        container.scrollLeft = startLeft - dx;
-        e.preventDefault();
-    };
-
-    const end = () => {
-        if (!isDown) return;
-        isDown = false;
-        container.style.cursor = '';
-        container.style.userSelect = '';
-        if (suppressClick) setTimeout(() => { suppressClick = false; }, 0);
-    };
-
-    container.addEventListener('mousedown', onDown);
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', end);
-    container.addEventListener('mouseleave', end);
-    container.addEventListener('click', (e) => {
-        if (!suppressClick) return;
-        e.preventDefault();
-        e.stopPropagation();
-    }, true);
-}
-
-function enableAllTableDragScroll() {
-    document.querySelectorAll('.table-container').forEach(el => enableHorizontalDragScroll(el));
-}
-
 function enableTableColumnResize(table) {
     if (!table || (table.dataset && table.dataset.colResizeBound)) return;
     if (table.dataset) table.dataset.colResizeBound = '1';
@@ -20742,6 +23077,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         // Initial load (main app page)
         switchTab('kbView');
         await loadKBProductCategoryChips();
+        await loadActivityArchives();
       } else {
         showLogin(true);
       }
@@ -20774,7 +23110,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.addEventListener('resize', scheduleWorkbenchSidebarHeightUpdate);
   window.addEventListener('resize', applyWorkbenchLayoutHotfix);
 
-  enableAllTableDragScroll();
   enableAllTableColumnResize();
   scheduleWorkbenchSidebarHeightUpdate();
   applyWorkbenchLayoutHotfix();
