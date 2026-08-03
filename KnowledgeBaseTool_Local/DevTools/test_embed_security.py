@@ -25,6 +25,22 @@ class TestEmbedSecurity(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['host_origin'], 'http://127.0.0.1:5175')
 
+    def test_default_local_callers_are_allowed_to_embed(self):
+        origins = [
+            'http://127.0.0.1:8083',
+            'http://localhost:8083',
+            'http://127.0.0.1:8087',
+            'http://localhost:8087',
+            'http://127.0.0.1:8787',
+            'http://localhost:8787',
+        ]
+        with patch.dict(os.environ, {'KMATRIX_EMBED_ALLOWED_ORIGINS': ''}):
+            for origin in origins:
+                with self.subTest(origin=origin):
+                    response = self.client.get('/api/embed/validate', query_string={'host_origin': origin})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.get_json()['allowed'])
+
     def test_untrusted_and_missing_origins_are_rejected(self):
         with patch.dict(os.environ, {
             'KMATRIX_EMBED_ALLOWED_ORIGINS': 'http://127.0.0.1:5175',
@@ -86,6 +102,20 @@ class TestEmbedSecurity(unittest.TestCase):
             self.assertIsNone(response.headers.get('X-Frame-Options'))
         finally:
             response.close()
+
+    def test_default_cors_origins_include_local_kb_callers(self):
+        with patch.dict(os.environ, {'KMATRIX_CORS_ALLOWED_ORIGINS': ''}):
+            origins = server._get_cors_allowed_origins()
+        for origin in (
+            'http://127.0.0.1:8083',
+            'http://localhost:8083',
+            'http://127.0.0.1:8087',
+            'http://localhost:8087',
+            'http://127.0.0.1:8787',
+            'http://localhost:8787',
+        ):
+            with self.subTest(origin=origin):
+                self.assertIn(origin, origins)
 
     def test_change_source_is_written_to_modification_metadata(self):
         source = server._resolve_kb_change_source({'change_source': '知识库内容检测工具'})

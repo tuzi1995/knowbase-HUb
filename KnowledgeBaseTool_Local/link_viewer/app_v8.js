@@ -854,22 +854,40 @@ function updateKBPreviewSelectedButton() {
     const btn = document.getElementById('kbPreviewSelectedBtn');
     const n = selectedKBRows.size;
     if (btn) {
+        btn.disabled = n === 0;
         if (kbShowSelectedOnly) {
             btn.classList.add('is-active');
             btn.textContent = n > 0 ? `👁️ 显示全部 (${n})` : '👁️ 显示全部';
-            btn.title = '取消仅预览勾选';
+            btn.title = '显示全部数据';
         } else {
             btn.classList.remove('is-active');
-            btn.textContent = n > 0 ? `👁️ 仅预览勾选 (${n})` : '👁️ 仅预览勾选';
+            btn.textContent = n > 0 ? `👁️ 仅看选中 (${n})` : '👁️ 仅看选中';
             btn.title = '仅显示已勾选的数据';
         }
     }
 
     const compareBtn = document.getElementById('kbCompareSelectedBtn');
     if (compareBtn) {
-        compareBtn.textContent = n > 0 ? `🔍 对比选中 (${n})` : '🔍 对比选中';
+        compareBtn.textContent = n > 0 ? `🔍 对比 (${n})` : '🔍 对比';
         compareBtn.disabled = n < 2;
         compareBtn.title = n < 2 ? '请至少勾选 2 条数据进行对比' : `对比已勾选的 ${n} 条数据`;
+    }
+
+    const isCurrentLibrary = getSelectedKBTable() === 'knowledge_base_v1';
+    const deleteBtn = document.getElementById('kbDeleteSelectedBtn');
+    if (deleteBtn) {
+        deleteBtn.disabled = n === 0 || !isCurrentLibrary;
+        deleteBtn.title = !isCurrentLibrary
+            ? '前刻库仅用于对比，不能删除'
+            : (n === 0 ? '请至少勾选 1 条数据' : `删除已勾选的 ${n} 条数据`);
+    }
+
+    const batchEditBtn = document.getElementById('kbBatchEditBtn');
+    if (batchEditBtn) {
+        batchEditBtn.disabled = n === 0 || !isCurrentLibrary;
+        batchEditBtn.title = !isCurrentLibrary
+            ? '前刻库仅用于对比，不能批量编辑'
+            : (n === 0 ? '请至少勾选 1 条数据' : `批量编辑已勾选的 ${n} 条数据`);
     }
 }
 
@@ -1170,7 +1188,7 @@ let currentMatrixData = [];
 let matrixColumns = [];
 let matrixTotal = 0;
 let matrixCurrentPage = 1;
-let matrixPageSize = 20;
+let matrixPageSize = 50;
 let selectedMatrixRows = new Set();
 let matrixFilteredTotal = null;
 let matrixFilteredTotalRequestSeq = 0;
@@ -1349,6 +1367,11 @@ const TAB_META = {
         group: '日志与归档',
         description: '管理归档批次，查询历史记录并执行归档操作。',
     },
+    activityArchiveView: {
+        title: '活动暂存',
+        group: '日志与归档',
+        description: '暂存活动内容并管理已暂存批次的恢复操作。',
+    },
     smartMappingView: {
         title: '智能映射',
         group: '工具与映射',
@@ -1502,7 +1525,7 @@ function scheduleWorkbenchSidebarHeightUpdate() {
 function normalizeWorkbenchViews() {
     const viewsWrap = document.querySelector('.workbench-views');
     if (!viewsWrap) return;
-    const viewIds = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const viewIds = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'activityArchiveView', 'smartMappingView'];
     viewIds.forEach(id => {
         const el = document.getElementById(id);
         if (el && el.parentElement !== viewsWrap) viewsWrap.appendChild(el);
@@ -1511,7 +1534,7 @@ function normalizeWorkbenchViews() {
 
 function switchTab(tabId) {
     normalizeWorkbenchViews();
-    const tabs = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'smartMappingView'];
+    const tabs = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'activityArchiveView', 'smartMappingView'];
     const viewsWrap = document.querySelector('.workbench-views');
     const isQualityControlCenter = tabId === 'controlCenterView';
     [
@@ -1599,6 +1622,9 @@ function switchTab(tabId) {
         if (typeof updateDataSettingsState === 'function') updateDataSettingsState();
     } else if (tabId === 'archiveView') {
         if (typeof loadArchives === 'function') loadArchives();
+    } else if (tabId === 'activityArchiveView') {
+        if (typeof updateActivityArchiveSelectionStatus === 'function') updateActivityArchiveSelectionStatus();
+        if (typeof loadActivityArchives === 'function') loadActivityArchives();
     } else if (tabId === 'smartMappingView') {
         if (typeof smInitSmartMapping === 'function') smInitSmartMapping();
     }
@@ -1651,6 +1677,7 @@ const knowledgeGraphState = {
     attentionLoading: false,
     attentionCategory: '',
     attentionReason: 'all',
+    attentionWikiId: '',
     attentionPage: 1,
     attentionPageSize: 100,
     attentionQueue: null,
@@ -1782,6 +1809,7 @@ async function loadKnowledgeGraphCatalog(options = {}) {
 
 function renderKnowledgeGraphAttentionQueue(result) {
     const body = document.getElementById('knowledgeGraphAttentionBody');
+    const wikiId = document.getElementById('knowledgeGraphAttentionWikiId');
     const category = document.getElementById('knowledgeGraphAttentionCategory');
     const reason = document.getElementById('knowledgeGraphAttentionReason');
     const pageMeta = document.getElementById('knowledgeGraphAttentionPageMeta');
@@ -1790,6 +1818,7 @@ function renderKnowledgeGraphAttentionQueue(result) {
     if (!body) return;
     const items = Array.isArray(result?.items) ? result.items : [];
     knowledgeGraphState.attentionQueue = result;
+    if (wikiId) wikiId.value = knowledgeGraphState.attentionWikiId;
     if (category) {
         const selected = knowledgeGraphState.attentionCategory;
         category.innerHTML = `<option value="">全部品类</option>${(result?.available_categories || []).map(value => `<option value="${knowledgeGraphEscape(value)}">${knowledgeGraphEscape(value)}</option>`).join('')}`;
@@ -1827,6 +1856,7 @@ async function loadKnowledgeGraphAttentionQueue(options = {}) {
             page_size: String(knowledgeGraphState.attentionPageSize),
         });
         if (knowledgeGraphState.attentionCategory) params.set('category', knowledgeGraphState.attentionCategory);
+        if (knowledgeGraphState.attentionWikiId) params.set('wiki_id', knowledgeGraphState.attentionWikiId);
         const result = await api(`/kb/graph/catalog/attention?${params.toString()}`);
         if (!result?.success) throw new Error(result?.message || '读取待补清单失败。');
         renderKnowledgeGraphAttentionQueue(result);
@@ -1840,6 +1870,7 @@ async function loadKnowledgeGraphAttentionQueue(options = {}) {
 }
 
 function updateKnowledgeGraphAttentionFilters() {
+    knowledgeGraphState.attentionWikiId = String(document.getElementById('knowledgeGraphAttentionWikiId')?.value || '').trim();
     knowledgeGraphState.attentionCategory = String(document.getElementById('knowledgeGraphAttentionCategory')?.value || '').trim();
     knowledgeGraphState.attentionReason = String(document.getElementById('knowledgeGraphAttentionReason')?.value || 'all');
     knowledgeGraphState.attentionPage = 1;
@@ -9953,7 +9984,7 @@ function _openModDetailsByItem(item) {
     const allFields = [
         'question', 'answer', 'products', 'question_type', 'answer_type', 'error_list',
         'image_urls', 'video_urls', 'file_urls', 'link_type', 'link_url',
-        'similar_questions', 'keyword_list', 'if_bm25'
+        'similar_questions', 'keyword_list', 'if_bm25', 'product_category_name', 'kb_tags'
     ];
     const normalizeVal = (k, v) => {
         if (v === undefined || v === null) return null;
@@ -9984,6 +10015,8 @@ function _openModDetailsByItem(item) {
             question: '问题',
             answer: '答案',
             products: '机型',
+            product_category_name: '型号分类',
+            kb_tags: '标签',
             question_type: '问题类型',
             answer_type: '答案类型',
             error_list: '错误列表',
@@ -11271,6 +11304,15 @@ function toggleKBSelectAll() {
         loadKBTable(1);
     }
 }
+
+function handleKBTableChange() {
+    selectedKBRows.clear();
+    kbShowSelectedOnly = false;
+    clearKBCache();
+    updateKBPreviewSelectedButton();
+    loadKBTable(1);
+}
+window.handleKBTableChange = handleKBTableChange;
 
 const KD_DRAFT_STORAGE_PREFIX = 'kb_duplicate_check_draft_v1';
 const KD_TASK_STORAGE_PREFIX = 'kb_duplicate_check_task_v1';
@@ -14432,6 +14474,10 @@ async function completeRevision(event) {
 window.completeRevision = completeRevision;
 
 async function deleteSelectedKBItems() {
+    if (getSelectedKBTable() !== 'knowledge_base_v1') {
+        showToast('前刻库仅用于对比，不能删除', 'warning');
+        return;
+    }
     if (selectedKBRows.size === 0) {
         alert('请先选择要删除的条目');
         return;
@@ -14472,6 +14518,198 @@ async function deleteSelectedKBItems() {
 // Make deleteSelectedKBItems global
 window.deleteSelectedKBItems = deleteSelectedKBItems;
 
+const KB_BATCH_LIST_FIELD_OPTIONS = [
+    { field: 'product_name', label: '产品型号', placeholder: '每行一个型号' },
+    { field: 'product_category_name', label: '型号分类', placeholder: '每行一个分类' },
+    { field: 'similar_questions', label: '相似问题', placeholder: '每行一个相似问题' },
+    { field: 'keyword_list', label: '关键词', placeholder: '每行一个关键词' },
+    { field: 'image_urls', label: '图片链接', placeholder: '每行一个图片链接' },
+    { field: 'video_urls', label: '视频链接', placeholder: '每行一个视频链接' },
+    { field: 'file_urls', label: '文件链接', placeholder: '每行一个文件链接' },
+    { field: 'link_url', label: '外部链接', placeholder: '每行一个外部链接' },
+    { field: 'kb_tags', label: '标签', placeholder: '每行一个标签' }
+];
+
+const KB_BATCH_SET_FIELD_OPTIONS = [
+    { field: 'question_type', label: '问题类型', placeholder: '输入统一的问题类型' },
+    { field: 'answer_type', label: '答案类型', placeholder: '输入统一的答案类型' },
+    { field: 'link_type', label: '外链类型', placeholder: '输入统一的外链类型' },
+    { field: 'if_bm25', label: 'BM25 索引', boolean: true }
+];
+
+function renderKBBatchEditFields() {
+    const root = document.getElementById('kbBatchEditFields');
+    if (!root) return;
+    const listRows = KB_BATCH_LIST_FIELD_OPTIONS.map(({ field, label, placeholder }) => `
+        <div class="kb-batch-edit-row" data-field="${field}" data-kind="list">
+            <label class="kb-batch-edit-field-label">
+                <input type="checkbox" data-role="enabled" onchange="updateKBBatchEditFormState()">
+                <span>${label}</span>
+            </label>
+            <select data-role="mode" disabled>
+                <option value="add">新增</option>
+                <option value="remove">删除</option>
+                <option value="replace">替换为</option>
+            </select>
+            <textarea data-role="values" rows="2" disabled placeholder="${placeholder}"></textarea>
+        </div>
+    `).join('');
+    const setRows = KB_BATCH_SET_FIELD_OPTIONS.map(({ field, label, placeholder, boolean }) => `
+        <div class="kb-batch-edit-row" data-field="${field}" data-kind="set">
+            <label class="kb-batch-edit-field-label">
+                <input type="checkbox" data-role="enabled" onchange="updateKBBatchEditFormState()">
+                <span>${label}</span>
+            </label>
+            <span class="kb-batch-edit-set-mode">统一改为</span>
+            ${boolean
+                ? '<select data-role="value" disabled><option value="true">是</option><option value="false">否</option></select>'
+                : `<input type="text" data-role="value" disabled placeholder="${placeholder}">`}
+        </div>
+    `).join('');
+    root.innerHTML = listRows + setRows;
+}
+
+function updateKBBatchEditFormState() {
+    document.querySelectorAll('#kbBatchEditFields .kb-batch-edit-row').forEach(row => {
+        const checked = Boolean(row.querySelector('[data-role="enabled"]')?.checked);
+        row.classList.toggle('is-selected', checked);
+        row.querySelectorAll('[data-role="mode"], [data-role="values"], [data-role="value"]').forEach(input => {
+            input.disabled = !checked;
+        });
+    });
+}
+window.updateKBBatchEditFormState = updateKBBatchEditFormState;
+
+function openKBBatchEditModal() {
+    if (getSelectedKBTable() !== 'knowledge_base_v1') {
+        showToast('前刻库仅用于对比，不能批量编辑', 'warning');
+        return;
+    }
+    if (selectedKBRows.size === 0) {
+        showToast('请至少勾选 1 条数据', 'warning');
+        return;
+    }
+    renderKBBatchEditFields();
+    const summary = document.getElementById('kbBatchEditSelectionSummary');
+    if (summary) summary.textContent = `将对已勾选的 ${selectedKBRows.size} 条此刻库数据应用下列规则。未勾选的字段不会修改。`;
+    const hint = document.getElementById('kbBatchEditHint');
+    if (hint) hint.textContent = '列表字段按每行一个值处理；增加或删除时，已有或不存在的值不会重复处理。';
+    const modal = document.getElementById('kbBatchEditModal');
+    if (modal) {
+        modal.style.display = 'flex';
+        modal.setAttribute('aria-hidden', 'false');
+    }
+}
+window.openKBBatchEditModal = openKBBatchEditModal;
+
+function closeKBBatchEditModal() {
+    const modal = document.getElementById('kbBatchEditModal');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.setAttribute('aria-hidden', 'true');
+    }
+}
+window.closeKBBatchEditModal = closeKBBatchEditModal;
+
+function collectKBBatchEditOperations() {
+    const operations = [];
+    const rows = document.querySelectorAll('#kbBatchEditFields .kb-batch-edit-row');
+    for (const row of rows) {
+        if (!row.querySelector('[data-role="enabled"]')?.checked) continue;
+        const field = String(row.dataset.field || '').trim();
+        if (row.dataset.kind === 'list') {
+            const values = String(row.querySelector('[data-role="values"]')?.value || '')
+                .split(/\r?\n/)
+                .map(value => value.trim())
+                .filter(Boolean);
+            if (!values.length) throw new Error(`请填写“${row.querySelector('.kb-batch-edit-field-label span')?.textContent || field}”的修改内容`);
+            operations.push({
+                field,
+                mode: row.querySelector('[data-role="mode"]')?.value || 'add',
+                values
+            });
+        } else {
+            const rawValue = row.querySelector('[data-role="value"]')?.value;
+            const value = field === 'if_bm25' ? rawValue === 'true' : String(rawValue || '').trim();
+            if (field !== 'if_bm25' && !value) {
+                throw new Error(`请填写“${row.querySelector('.kb-batch-edit-field-label span')?.textContent || field}”的修改内容`);
+            }
+            operations.push({ field, value });
+        }
+    }
+    if (!operations.length) throw new Error('请至少勾选一个需要批量编辑的字段');
+    return operations;
+}
+
+async function submitKBBatchEdit() {
+    if (getSelectedKBTable() !== 'knowledge_base_v1') {
+        showToast('前刻库仅用于对比，不能批量编辑', 'warning');
+        return;
+    }
+    let operations;
+    try {
+        operations = collectKBBatchEditOperations();
+    } catch (error) {
+        showToast(error.message || '批量编辑参数不完整', 'warning');
+        return;
+    }
+    const ids = Array.from(selectedKBRows).map(id => String(id || '').trim()).filter(Boolean);
+    if (!ids.length) {
+        showToast('选中数据已变化，请重新打开批量编辑', 'warning');
+        closeKBBatchEditModal();
+        return;
+    }
+    const fieldNames = operations.map(operation => {
+        const option = [...KB_BATCH_LIST_FIELD_OPTIONS, ...KB_BATCH_SET_FIELD_OPTIONS]
+            .find(item => item.field === operation.field);
+        return option?.label || operation.field;
+    });
+    const confirmed = await showDangerConfirmModal(
+        '批量编辑确认',
+        `将修改 ${ids.length} 条此刻库数据的 ${fieldNames.join('、')}。每条变更都会写入修改记录。确认继续？`,
+        '确认批量编辑'
+    );
+    if (!confirmed) return;
+
+    const submitBtn = document.getElementById('kbBatchEditSubmitBtn');
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '保存中...';
+    }
+    try {
+        const response = await api('/kb/batch-update', 'POST', {
+            table: 'knowledge_base_v1',
+            ids,
+            expected_count: ids.length,
+            operations,
+            change_source: getKbActionChangeSource('知识库管理')
+        });
+        if (!response?.success) {
+            const appliedCount = Array.isArray(response?.applied_ids) ? response.applied_ids.length : 0;
+            const progress = appliedCount ? `，已处理 ${appliedCount} 条` : '';
+            throw new Error(`${response?.message || '批量编辑失败'}${progress}`);
+        }
+        if (operations.some(operation => operation.field === 'kb_tags')) {
+            try { await fetchKBAllTags(); } catch {}
+        }
+        clearKBCache();
+        await loadKBTable(kbCurrentPage || 1);
+        const skippedCount = Array.isArray(response.skipped_ids) ? response.skipped_ids.length : 0;
+        const skippedText = skippedCount ? `；${skippedCount} 条无需修改` : '';
+        showToast(`已批量编辑 ${Number(response.count || 0)} 条数据${skippedText}`, response.warning ? 'warning' : 'success');
+        if (response.warning) showToast(response.warning, 'warning');
+        closeKBBatchEditModal();
+    } catch (error) {
+        showToast(error.message || '批量编辑请求异常', 'error');
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = '确认批量编辑';
+        }
+    }
+}
+window.submitKBBatchEdit = submitKBBatchEdit;
+
 let activityArchiveBatches = [];
 
 function activityArchiveDefaultName() {
@@ -14493,7 +14731,7 @@ function openActivityArchiveModal() {
         return;
     }
     if (selectedKBRows.size === 0) {
-        alert('请先勾选需要暂时下架的活动内容。');
+        alert('请先在知识库管理中勾选需要暂时下架的活动内容。');
         return;
     }
     const modal = document.getElementById('activityArchiveModal');
@@ -14527,11 +14765,7 @@ function activityArchiveStatusClass(status) {
 
 function renderActivityArchives() {
     const tbody = document.getElementById('activityArchiveTableBody');
-    const count = document.getElementById('activityArchiveCount');
-    const pendingCount = activityArchiveBatches
-        .filter(item => item && item.status === 'archived')
-        .reduce((total, item) => total + Number(item.record_count || 0), 0);
-    if (count) count.textContent = String(pendingCount);
+    updateActivityArchiveSelectionStatus();
     if (!tbody) return;
     if (!activityArchiveBatches.length) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty-message">暂无已暂存活动</td></tr>';
@@ -14570,14 +14804,12 @@ async function loadActivityArchives() {
 }
 window.loadActivityArchives = loadActivityArchives;
 
-function toggleActivityArchivePanel(force) {
-    const panel = document.getElementById('activityArchivePanel');
-    if (!panel) return;
-    const show = typeof force === 'boolean' ? force : panel.classList.contains('d-none');
-    panel.classList.toggle('d-none', !show);
-    if (show) loadActivityArchives();
+function updateActivityArchiveSelectionStatus() {
+    const status = document.getElementById('activityArchiveSelectionStatus');
+    if (!status) return;
+    const count = selectedKBRows.size;
+    status.textContent = count ? `已选择 ${count} 条活动内容` : '未选择活动内容';
 }
-window.toggleActivityArchivePanel = toggleActivityArchivePanel;
 
 async function confirmActivityArchive() {
     const nameInput = document.getElementById('activityArchiveName');
@@ -14614,7 +14846,6 @@ async function confirmActivityArchive() {
         clearKBCache();
         await loadKBTable(1);
         await loadActivityArchives();
-        toggleActivityArchivePanel(true);
         const warnings = Array.isArray(response.warnings) && response.warnings.length ? `；${response.warnings.join('；')}` : '';
         showToast(`已暂存 ${Number(response.record_count || ids.length)} 条活动内容${warnings}`, warnings ? 'warning' : 'success');
     } catch (error) {
@@ -23408,6 +23639,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
       if (e.target && e.target.id === 'kbEditCloseConfirmModal') {
           closeKbEditUnsavedCloseModal('cancel');
+          return;
+      }
+      if (e.target && e.target.id === 'kbBatchEditModal') {
+          closeKBBatchEditModal();
           return;
       }
       if (e.target.classList.contains('modal')) {

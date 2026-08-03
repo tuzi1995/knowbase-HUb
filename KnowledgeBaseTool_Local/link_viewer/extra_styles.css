@@ -7556,3 +7556,569 @@ table td {
 .login-status[data-state="success"] {
     color: #067647;
 }
+
+/* Final product theme: neutral canvas, stable surfaces, and semantic controls. */
+:root {
+    --kb-workbench-canvas: #F5F6F8;
+    --kb-workbench-panel: #FFFFFF;
+    --kb-workbench-surface: #FFFFFF;
+    --kb-workbench-muted: #F9FAFB;
+    --kb-workbench-border: #E8EAED;
+    --kb-workbench-ink: #1F2937;
+
+    --accent: #2563EB;
+    --accent-secondary: #2563EB;
+    --accent-foreground: #FFFFFF;
+    --background: #F5F6F8;
+    --foreground: #1F2937;
+    --card: #FFFFFF;
+    --muted: #F9FAFB;
+    --muted-foreground: #6B7280;
+    --border: #E8EAED;
+    --ring: #2563EB;
+    --gradient-primary: #2563EB;
+    --gradient-primary-diagonal: #2563EB;
+    --gradient-text-underline: rgba(37, 99, 235, 0.12);
+
+    --color-header: #2563EB;
+    --color-header-hover: #1D4ED8;
+    --color-header-active: #1E40AF;
+    --primary-color: #2563EB;
+    --primary-hover: #1D4ED8;
+    --primary-active: #1E40AF;
+    --primary-light: #EFF6FF;
+    --primary-soft: #F5F9FF;
+    --bg-color: #F5F6F8;
+    --surface-color: #FFFFFF;
+    --surface-muted: #F9FAFB;
+    --text-main: #1F2937;
+    --text-light: #4B5563;
+    --text-muted: #6B7280;
+    --muted-foreground: #6B7280;
+    --border-color: #E8EAED;
+    --border-subtle: #E8EAED;
+
+    --font-body: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    --shadow-sm: none;
+    --shadow-md: none;
+    --shadow-lg: none;
+    --shadow-xl: none;
+    --shadow-accent: none;
+    --shadow-accent-lg: none;
+    --radius-sm: 8px;
+    --radius-md: 8px;
+    --radius-lg: 8px;
+    --radius-xl: 8px;
+    --radius-2xl: 8px;
+}
+
+html,
+body,
+main {
+    background: var(--kb-workbench-canvas) !important;
+    color: var(--kb-workbench-ink);
+}
+
+body,
+button,
+input,
+select,
+textarea {
+    font-family: var(--font-body);
+}
+
+#mainContent .workbench-header,
+#mainContent .workbench-sidebar-card,
+#mainContent .workbench-content-head,
+#mainContent .kb-section,
+#mainContent .table-container,
+#mainContent .link-manager-container {
+    background: var(--kb-workbench-panel) !important;
+    border: 1px solid var(--kb-workbench-border) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+
+#mainContent .workbench-content-panel {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+
+#mainContent .workbench-views,
+#mainContent .workbench-views > div.is-active-view {
+    background: transparent !important;
+}
+
+#mainContent .workbench-nav-group {
+    background: transparent !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+}
+
+#mainContent .filter-section,
+#mainContent .filter-panel,
+#mainContent .search-group,
+#mainContent .gov-filter-panel,
+#mainContent .gov-summary-panel {
+    background: var(--kb-workbench-muted) !important;
+    border: 1px solid var(--kb-workbench-border) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+
+#mainContent .kb-section table th,
+#mainContent .table-container table th {
+    background: var(--kb-workbench-muted) !important;
+    color: #374151 !important;
+    border-color: var(--kb-workbench-border) !important;
+}
+
+#mainContent .kb-section table td,
+#mainContent .table-container table td {
+    background: var(--kb-workbench-panel) !important;
+    color: #374151 !important;
+    border-color: var(--kb-workbench-border) !important;
+}
+
+#mainContent .kb-section table tbody tr:hover td,
+#mainContent .table-container table tbody tr:hover td {
+    background: #F9FAFB !important;
+}
+
+#mainContent .primary-btn:not(.feishu-btn),
+#mainContent .btn-primary-gradient {
+    min-height: 36px;
+    padding: 8px 13px;
+    border: 1px solid #2563EB !important;
+    border-radius: 6px !important;
+    background: #2563EB !important;
+    color: #FFFFFF !important;
+    box-shadow: none !important;
+    transform: none !important;
+    filter: none !important;
+}
+
+#mainContent .primary-btn:not(.feishu-btn):hover,
+#mainContent .btn-primary-gradient:hover {
+    background: #1D4ED8 !important;
+    border-color: #1D4ED8 !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+#mainContent .action-btn,
+#mainContent .btn-secondary-outline,
+#mainContent .secondary-btn {
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 1px solid #D1D5DB !important;
+    border-radius: 6px !important;
+    background: #FFFFFF !important;
+    color: #374151 !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+#mainContent .action-btn:hover,
+#mainContent .btn-secondary-outline:hover,
+#mainContent .secondary-btn:hover {
+    background: #F9FAFB !important;
+    border-color: #9CA3AF !important;
+    color: #1F2937 !important;
+    box-shadow: none !important;
+}
+
+#mainContent .action-btn.is-active {
+    background: #EFF6FF !important;
+    border-color: #93C5FD !important;
+    color: #1D4ED8 !important;
+}
+
+#mainContent .success-btn {
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 1px solid #A7F3D0 !important;
+    border-radius: 6px !important;
+    background: #ECFDF3 !important;
+    color: #047857 !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+#mainContent .success-btn:hover {
+    background: #D1FAE5 !important;
+    border-color: #6EE7B7 !important;
+    color: #065F46 !important;
+}
+
+#mainContent .danger-btn {
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 1px solid #FECACA !important;
+    border-radius: 6px !important;
+    background: #FEF2F2 !important;
+    color: #B91C1C !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+#mainContent .danger-btn:hover {
+    background: #FEE2E2 !important;
+    border-color: #FCA5A5 !important;
+    color: #991B1B !important;
+}
+
+#mainContent .btn-sm {
+    min-height: 30px;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+
+#mainContent button:disabled,
+#mainContent input:disabled,
+#mainContent select:disabled,
+#mainContent textarea:disabled {
+    background: #F3F4F6 !important;
+    border-color: #E5E7EB !important;
+    color: #9CA3AF !important;
+    box-shadow: none !important;
+    cursor: not-allowed;
+}
+
+#mainContent button:focus-visible,
+#mainContent input:focus-visible,
+#mainContent select:focus-visible,
+#mainContent textarea:focus-visible {
+    outline: 2px solid #2563EB;
+    outline-offset: 2px;
+}
+
+#mainContent .badge,
+#mainContent .status-badge,
+#mainContent .kd-status-badge,
+#mainContent .parameter-check-status {
+    min-height: 22px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    box-shadow: none !important;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+}
+
+#mainContent .badge-info,
+#mainContent .badge-primary {
+    background: #EFF6FF !important;
+    border-color: #BFDBFE !important;
+    color: #1D4ED8 !important;
+}
+
+#mainContent .badge-success {
+    background: #ECFDF3 !important;
+    border-color: #A7F3D0 !important;
+    color: #047857 !important;
+}
+
+#mainContent .badge-warning,
+#mainContent .badge-orange {
+    background: #FFFBEB !important;
+    border-color: #FDE68A !important;
+    color: #92400E !important;
+}
+
+#mainContent .badge-danger,
+#mainContent .badge-error {
+    background: #FEF2F2 !important;
+    border-color: #FECACA !important;
+    color: #B91C1C !important;
+}
+
+#mainContent .badge-secondary,
+#mainContent .badge-default {
+    background: #F3F4F6 !important;
+    border-color: #D1D5DB !important;
+    color: #4B5563 !important;
+}
+
+#mainContent #kbTable .badge-success {
+    background: #FFFBEB !important;
+    border-color: #FDE68A !important;
+    color: #92400E !important;
+}
+
+#mainContent #kbTable .badge-info {
+    background: #ECFDF3 !important;
+    border-color: #A7F3D0 !important;
+    color: #047857 !important;
+}
+
+#mainContent #kbTable .badge-warning {
+    background: #EFF6FF !important;
+    border-color: #BFDBFE !important;
+    color: #1D4ED8 !important;
+}
+
+#mainContent #kbTable .badge-danger {
+    background: #FEF2F2 !important;
+    border-color: #FECACA !important;
+    color: #B91C1C !important;
+}
+
+#mainContent .tag-chip {
+    border: 1px solid #D1D5DB;
+    background: #FFFFFF;
+    color: #4B5563;
+    box-shadow: none !important;
+    transform: none;
+}
+
+#mainContent .tag-chip:hover {
+    background: #F9FAFB;
+    border-color: #9CA3AF;
+    transform: none;
+}
+
+#mainContent .tag-chip.active {
+    background: #EFF6FF;
+    border-color: #93C5FD;
+    color: #1D4ED8;
+    box-shadow: inset 0 0 0 1px #BFDBFE !important;
+}
+
+#mainContent #reviewStatusChips .tag-chip[data-value="unadjusted"] {
+    background: #FFFBEB;
+    border-color: #FDE68A;
+    color: #92400E;
+}
+
+#mainContent #reviewStatusChips .tag-chip[data-value="creating"] {
+    background: #ECFDF3;
+    border-color: #A7F3D0;
+    color: #047857;
+}
+
+#mainContent #reviewStatusChips .tag-chip[data-value="modifying"] {
+    background: #EFF6FF;
+    border-color: #BFDBFE;
+    color: #1D4ED8;
+}
+
+#mainContent #reviewStatusChips .tag-chip[data-value="deleting"] {
+    background: #FEF2F2;
+    border-color: #FECACA;
+    color: #B91C1C;
+}
+
+#mainContent #kbView .gov-summary-panel .primary-btn,
+#mainContent #kbView .gov-summary-panel .action-btn,
+#mainContent #kbView .gov-summary-panel .success-btn,
+#mainContent #kbView .gov-summary-panel .danger-btn {
+    border-radius: 6px !important;
+}
+
+#mainContent .table-container table {
+    border-color: var(--kb-workbench-border) !important;
+}
+
+#mainContent .font-mono,
+#mainContent .parameter-check-hash,
+#mainContent .kb-template-result-id,
+#mainContent .kb-compare-id-input,
+#mainContent .ai-similar-score,
+#mainContent input[name="question_wiki_id"],
+#mainContent .col-id,
+#mainContent .col-wiki-id {
+    font-family: var(--font-mono) !important;
+}
+
+/* Keep native selects predictable: one platform chevron without hover recoloring. */
+#mainContent select.input-modern {
+    appearance: auto;
+    -webkit-appearance: menulist;
+    -moz-appearance: auto;
+    background-image: none !important;
+}
+
+#mainContent select.input-modern:focus {
+    border-color: #2563EB;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.16);
+}
+
+/* Workbench typography: shared role-based scale for every module view. */
+:root {
+    --kb-font-size-title: 15px;
+    --kb-font-size-body: 13px;
+    --kb-font-size-support: 12px;
+    --kb-line-height-body: 1.5;
+}
+
+#mainContent .workbench-views > div.is-active-view {
+    font-size: var(--kb-font-size-body);
+    line-height: var(--kb-line-height-body);
+}
+
+#mainContent .workbench-views > div.is-active-view .matrix-summary-title,
+#mainContent .workbench-views > div.is-active-view .data-settings-title,
+#mainContent .workbench-views > div.is-active-view .activity-archive-table-title,
+#mainContent .workbench-views > div.is-active-view .kb-compare-title,
+#mainContent .workbench-views > div.is-active-view .link-import-card-title,
+#mainContent .workbench-views > div.is-active-view .sm-card-title,
+#mainContent .workbench-views > div.is-active-view .pm-content-title,
+#mainContent .workbench-views > div.is-active-view .qc-final-title,
+#mainContent .workbench-views > div.is-active-view .mod-summary-title,
+#mainContent .workbench-views > div.is-active-view h3 {
+    font-size: var(--kb-font-size-title) !important;
+    line-height: 1.35 !important;
+}
+
+#mainContent #kbView .gov-summary-panel > div:first-child > div:first-child {
+    font-size: var(--kb-font-size-title) !important;
+    line-height: 1.35 !important;
+}
+
+#mainContent .workbench-views > div.is-active-view .primary-btn,
+#mainContent .workbench-views > div.is-active-view .action-btn,
+#mainContent .workbench-views > div.is-active-view .secondary-btn,
+#mainContent .workbench-views > div.is-active-view .success-btn,
+#mainContent .workbench-views > div.is-active-view .danger-btn,
+#mainContent .workbench-views > div.is-active-view .input-modern,
+#mainContent .workbench-views > div.is-active-view .form-control,
+#mainContent .workbench-views > div.is-active-view input[type="text"],
+#mainContent .workbench-views > div.is-active-view input[type="search"],
+#mainContent .workbench-views > div.is-active-view input[type="url"],
+#mainContent .workbench-views > div.is-active-view input[type="number"],
+#mainContent .workbench-views > div.is-active-view select,
+#mainContent .workbench-views > div.is-active-view textarea {
+    font-size: var(--kb-font-size-body) !important;
+    line-height: var(--kb-line-height-body);
+}
+
+#mainContent .workbench-views > div.is-active-view .text-muted,
+#mainContent .workbench-views > div.is-active-view .input-helper,
+#mainContent .workbench-views > div.is-active-view .filter-label,
+#mainContent .workbench-views > div.is-active-view .form-label,
+#mainContent .workbench-views > div.is-active-view .form-group label,
+#mainContent .workbench-views > div.is-active-view .page-size-label,
+#mainContent .workbench-views > div.is-active-view .page-info,
+#mainContent .workbench-views > div.is-active-view .pagination-info,
+#mainContent .workbench-views > div.is-active-view .kb-filter-label {
+    font-size: var(--kb-font-size-support) !important;
+    line-height: 1.4 !important;
+}
+
+#mainContent .workbench-views > div.is-active-view table th {
+    font-size: var(--kb-font-size-support) !important;
+    line-height: 1.4 !important;
+}
+
+#mainContent .workbench-views > div.is-active-view table td {
+    font-size: var(--kb-font-size-body) !important;
+    line-height: var(--kb-line-height-body) !important;
+}
+
+#mainContent .workbench-views > div.is-active-view .badge,
+#mainContent .workbench-views > div.is-active-view .status-badge,
+#mainContent .workbench-views > div.is-active-view .kd-status-badge,
+#mainContent .workbench-views > div.is-active-view .parameter-check-status,
+#mainContent .workbench-views > div.is-active-view .tag-chip,
+#mainContent .workbench-views > div.is-active-view .font-mono,
+#mainContent .workbench-views > div.is-active-view .parameter-check-hash,
+#mainContent .workbench-views > div.is-active-view .kb-template-result-id,
+#mainContent .workbench-views > div.is-active-view .kb-compare-id-input,
+#mainContent .workbench-views > div.is-active-view .ai-similar-score,
+#mainContent .workbench-views > div.is-active-view .col-id,
+#mainContent .workbench-views > div.is-active-view .col-wiki-id,
+#mainContent .workbench-views > div.is-active-view code,
+#mainContent .workbench-views > div.is-active-view pre {
+    font-size: var(--kb-font-size-support) !important;
+}
+
+/* Specialized module controls use the same field and choice scale as the shared workbench. */
+#mainContent .workbench-views > div.is-active-view .kd-field,
+#mainContent .workbench-views > div.is-active-view .knowledge-graph-attention-controls label,
+#mainContent .workbench-views > div.is-active-view .knowledge-graph-search-field,
+#mainContent .workbench-views > div.is-active-view .knowledge-graph-filter,
+#mainContent .workbench-views > div.is-active-view .knowledge-graph-candidate-grid > label,
+#mainContent .workbench-views > div.is-active-view .knowledge-graph-revision-grid > label,
+#mainContent .workbench-views > div.is-active-view .knowledge-graph-review-panel label,
+#mainContent .workbench-views > div.is-active-view .scoring-filter-field,
+#mainContent .workbench-views > div.is-active-view .qc-page-size,
+#mainContent .workbench-views > div.is-active-view .parameter-check-run-select,
+#mainContent .workbench-views > div.is-active-view .parameter-check-filter-field,
+#mainContent .workbench-views > div.is-active-view .mod-filter-field {
+    font-size: var(--kb-font-size-support) !important;
+    line-height: 1.4 !important;
+}
+
+#mainContent .workbench-views > div.is-active-view .radio-label,
+#mainContent .workbench-views > div.is-active-view .kd-library-switch label,
+#mainContent .workbench-views > div.is-active-view .kb-compare-source-switch label,
+#mainContent .workbench-views > div.is-active-view .kb-compare-toggle,
+#mainContent .workbench-views > div.is-active-view .scoring-inline-check,
+#mainContent .workbench-views > div.is-active-view .qc-inline-check,
+#mainContent .workbench-views > div.is-active-view .knowledge-graph-revision-swap,
+#mainContent .workbench-views > div.is-active-view .inline-check-label {
+    font-size: var(--kb-font-size-body) !important;
+    line-height: var(--kb-line-height-body) !important;
+}
+
+/* The modifications table had a more specific legacy rule that bypassed the shared body scale. */
+#mainContent #modificationsView.is-active-view #modTable td {
+    font-size: var(--kb-font-size-body) !important;
+    line-height: var(--kb-line-height-body) !important;
+}
+
+#mainContent #modificationsView.is-active-view #modTable .badge {
+    font-size: var(--kb-font-size-support) !important;
+    line-height: 1.35 !important;
+}
+
+#mainContent #knowledgeGraphView.is-active-view #knowledgeGraphReviewView .knowledge-graph-revision-swap,
+#mainContent #matrixView.is-active-view .matrix-detail-cell textarea,
+#mainContent #modificationsView.is-active-view #modTable textarea {
+    font-size: var(--kb-font-size-body) !important;
+    line-height: var(--kb-line-height-body) !important;
+}
+
+/* Keep both matrix vertical boundaries at 17px while preserving the empty toolbar structure. */
+#mainContent #matrixView.is-active-view > .kb-section > .gov-filter-panel {
+    margin-top: 7px !important;
+}
+
+#mainContent #matrixView.is-active-view > .kb-section > #matrixTableContainer {
+    margin-top: -3px !important;
+}
+
+/* Keep compact table previews on complete text lines in Safari. */
+#mainContent #scoringView.is-active-view #scoringTable .td-cell:not(.is-expanded) textarea {
+    box-sizing: border-box !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    max-height: 36px !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    line-height: 18px !important;
+}
+
+#mainContent #scoringView.is-active-view #scoringTable .scoring-product-preview {
+    box-sizing: border-box;
+    height: 36px;
+    max-height: 36px;
+    line-height: 18px;
+}
+
+#mainContent #matrixView.is-active-view #matrixTable tbody td.matrix-detail-cell .td-cell,
+#mainContent #matrixView.is-active-view #matrixTable tbody td.matrix-detail-cell .td-cell textarea,
+#mainContent #modificationsView.is-active-view #modTable .td-cell textarea {
+    box-sizing: border-box !important;
+    height: 20px !important;
+    min-height: 20px !important;
+    max-height: 20px !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    line-height: 20px !important;
+    white-space: nowrap !important;
+}

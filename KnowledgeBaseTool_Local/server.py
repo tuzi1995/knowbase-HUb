@@ -107,6 +107,12 @@ def _normalize_http_origin(value):
 def _get_embed_allowed_origins():
     configured = os.environ.get('KMATRIX_EMBED_ALLOWED_ORIGINS', '').strip()
     values = configured.split(',') if configured else [
+        'http://127.0.0.1:8083',
+        'http://localhost:8083',
+        'http://127.0.0.1:8087',
+        'http://localhost:8087',
+        'http://127.0.0.1:8787',
+        'http://localhost:8787',
         'http://127.0.0.1:5175',
         'http://localhost:5175',
     ]
@@ -147,6 +153,10 @@ def _get_cors_allowed_origins():
     default_origins = [
         "http://localhost:8083",
         "http://127.0.0.1:8083",
+        "http://localhost:8087",
+        "http://127.0.0.1:8087",
+        "http://localhost:8787",
+        "http://127.0.0.1:8787",
         "http://localhost:8082",
         "http://127.0.0.1:8082",
         "http://localhost:5173",
@@ -5060,7 +5070,7 @@ def _kb_all_fields_allowlist():
 _MOD_DIFF_FIELDS = [
     'question', 'answer', 'products', 'question_type', 'answer_type', 'error_list',
     'image_urls', 'video_urls', 'file_urls', 'link_type', 'link_url',
-    'similar_questions', 'keyword_list', 'if_bm25'
+    'similar_questions', 'keyword_list', 'if_bm25', 'product_category_name', 'kb_tags'
 ]
 
 def _normalize_mod_diff_value(v):
@@ -5209,7 +5219,9 @@ def _snapshot_mod_fields(row):
         'link_url': row.get('link_url'),
         'similar_questions': row.get('similar_questions'),
         'keyword_list': row.get('keyword_list'),
-        'if_bm25': row.get('if_bm25')
+        'if_bm25': row.get('if_bm25'),
+        'product_category_name': row.get('product_category_name'),
+        'kb_tags': row.get('kb_tags')
     }
 
 def _compute_mod_changed_fields(before_obj, after_obj):
@@ -5249,6 +5261,215 @@ def _postgrest_in_str(values):
         return None
     inner = ",".join([json.dumps(v, ensure_ascii=False) for v in cleaned])
     return f"in.({inner})"
+
+
+_KB_BATCH_LIST_FIELDS = {
+    'product_name': {'is_url_list': False, 'case_insensitive': True, 'storage': 'comma'},
+    'product_category_name': {'is_url_list': False, 'case_insensitive': True, 'storage': 'comma'},
+    'similar_questions': {'is_url_list': False, 'case_insensitive': True, 'storage': 'json'},
+    'keyword_list': {'is_url_list': False, 'case_insensitive': True, 'storage': 'json'},
+    'image_urls': {'is_url_list': True, 'case_insensitive': False, 'storage': 'json'},
+    'video_urls': {'is_url_list': True, 'case_insensitive': False, 'storage': 'json'},
+    'file_urls': {'is_url_list': True, 'case_insensitive': False, 'storage': 'json'},
+    'link_url': {'is_url_list': True, 'case_insensitive': False, 'storage': 'newline'},
+    'kb_tags': {'is_url_list': False, 'case_insensitive': True, 'storage': 'tags'},
+}
+_KB_BATCH_SET_FIELDS = {'question_type', 'answer_type', 'if_bm25', 'link_type'}
+_KB_BATCH_LIST_MODES = {'add', 'remove', 'replace'}
+
+
+def _kb_batch_normalize_list(value, field):
+    config = _KB_BATCH_LIST_FIELDS[field]
+    if value is None:
+        raw_items = []
+    elif isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, dict):
+        raw_items = list(value.values())
+    elif isinstance(value, str):
+        text_value = value.strip()
+        if text_value.startswith('[') and text_value.endswith(']'):
+            try:
+                parsed = json.loads(text_value)
+                raw_items = parsed if isinstance(parsed, list) else [text_value]
+            except Exception:
+                raw_items = _split_text_list_value(text_value, is_url_list=config['is_url_list'])
+        else:
+            raw_items = _split_text_list_value(text_value, is_url_list=config['is_url_list'])
+    else:
+        raw_items = [value]
+
+    normalized = []
+    seen = set()
+    for raw_item in raw_items:
+        item = str(raw_item or '').strip()
+        if not item or item.lower() in ('null', 'none'):
+            continue
+        key = item.lower() if config['case_insensitive'] else item
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(item)
+    return normalized
+
+
+def _kb_batch_apply_list(current, values, mode, field):
+    config = _KB_BATCH_LIST_FIELDS[field]
+    current_values = _kb_batch_normalize_list(current, field)
+    requested_values = _kb_batch_normalize_list(values, field)
+    key_for = (lambda value: value.lower()) if config['case_insensitive'] else (lambda value: value)
+
+    if mode == 'replace':
+        return requested_values
+
+    requested_keys = {key_for(value) for value in requested_values}
+    if mode == 'remove':
+        return [value for value in current_values if key_for(value) not in requested_keys]
+
+    existing_keys = {key_for(value) for value in current_values}
+    return current_values + [value for value in requested_values if key_for(value) not in existing_keys]
+
+
+def _kb_batch_store_list(values, field):
+    config = _KB_BATCH_LIST_FIELDS[field]
+    if config['storage'] == 'json':
+        return json.dumps(values, ensure_ascii=False) if values else None
+    if config['storage'] == 'newline':
+        return '\n'.join(values)
+    return ','.join(values)
+
+
+def _kb_batch_parse_operations(raw_operations):
+    if not isinstance(raw_operations, list) or not raw_operations:
+        raise ValueError('请至少选择一个批量编辑字段')
+
+    operations = []
+    seen_fields = set()
+    for raw_operation in raw_operations:
+        if not isinstance(raw_operation, dict):
+            raise ValueError('批量编辑参数格式错误')
+        field = str(raw_operation.get('field') or '').strip()
+        if field in seen_fields:
+            raise ValueError(f'字段重复: {field}')
+        seen_fields.add(field)
+
+        if field in _KB_BATCH_LIST_FIELDS:
+            mode = str(raw_operation.get('mode') or '').strip().lower()
+            if mode not in _KB_BATCH_LIST_MODES:
+                raise ValueError(f'{field} 的编辑方式无效')
+            values = _kb_batch_normalize_list(raw_operation.get('values'), field)
+            if not values:
+                raise ValueError(f'{field} 至少需要填写一个值')
+            operations.append({'field': field, 'mode': mode, 'values': values})
+            continue
+
+        if field in _KB_BATCH_SET_FIELDS:
+            if field == 'if_bm25':
+                value = raw_operation.get('value')
+                if isinstance(value, bool):
+                    normalized_value = value
+                elif str(value).strip().lower() in ('true', '1', 'yes', '是'):
+                    normalized_value = True
+                elif str(value).strip().lower() in ('false', '0', 'no', '否'):
+                    normalized_value = False
+                else:
+                    raise ValueError('BM25 索引只能改为是或否')
+            else:
+                normalized_value = str(raw_operation.get('value') or '').strip()
+                if not normalized_value:
+                    raise ValueError(f'{field} 不能为空')
+            operations.append({'field': field, 'mode': 'set', 'value': normalized_value})
+            continue
+
+        raise ValueError(f'不支持批量编辑字段: {field}')
+
+    product_operation = next((item for item in operations if item['field'] == 'product_name' and item['mode'] in ('add', 'replace')), None)
+    if product_operation:
+        valid_map, valid_set = get_all_valid_models()
+        valid, invalid = validate_product_string(','.join(product_operation['values']), valid_map, valid_set)
+        if invalid:
+            raise ValueError(f'包含未知型号: {", ".join(invalid)}。请先在“管理型号库”中添加该型号。')
+        product_operation['values'] = valid
+
+    return operations
+
+
+def _kb_batch_fetch_tags_by_id(client, ids):
+    tags_by_id = {wiki_id: [] for wiki_id in ids}
+    mapping_rows = client.select_all(
+        'kb_item_tags',
+        filters={
+            'library_type': 'eq.current',
+            'question_wiki_id': _postgrest_in_str(ids)
+        },
+        columns='question_wiki_id,tag_id',
+        page_size=1000
+    ) or []
+    tag_rows = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
+    name_by_id = {
+        str(row.get('id')): str(row.get('name') or '').strip()
+        for row in tag_rows
+        if isinstance(row, dict) and row.get('id') is not None and str(row.get('name') or '').strip()
+    }
+    for row in mapping_rows:
+        if not isinstance(row, dict):
+            continue
+        wiki_id = str(row.get('question_wiki_id') or '').strip()
+        name = name_by_id.get(str(row.get('tag_id')))
+        if wiki_id in tags_by_id and name:
+            tags_by_id[wiki_id].append(name)
+    return {wiki_id: _kb_batch_normalize_list(tags, 'kb_tags') for wiki_id, tags in tags_by_id.items()}
+
+
+def _kb_batch_replace_tags(client, tags_by_id):
+    if not tags_by_id:
+        return
+
+    ids = list(tags_by_id)
+    client.delete('kb_item_tags', {
+        'library_type': 'eq.current',
+        'question_wiki_id': _postgrest_in_str(ids)
+    })
+
+    all_names = _kb_batch_normalize_list(
+        [name for values in tags_by_id.values() for name in values],
+        'kb_tags'
+    )
+    if not all_names:
+        return
+
+    existing_rows = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
+    tag_id_by_name = {
+        str(row.get('name') or '').strip().lower(): row.get('id')
+        for row in existing_rows
+        if isinstance(row, dict) and row.get('id') is not None and str(row.get('name') or '').strip()
+    }
+    missing_names = [name for name in all_names if name.lower() not in tag_id_by_name]
+    if missing_names:
+        upsert_response = client.upsert('kb_tags', [{'name': name} for name in missing_names], on_conflict='name')
+        if upsert_response is not None and getattr(upsert_response, 'status_code', 500) >= 400:
+            raise RuntimeError(getattr(upsert_response, 'text', '新增标签失败'))
+        refreshed_rows = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
+        tag_id_by_name = {
+            str(row.get('name') or '').strip().lower(): row.get('id')
+            for row in refreshed_rows
+            if isinstance(row, dict) and row.get('id') is not None and str(row.get('name') or '').strip()
+        }
+
+    mapping_rows = []
+    for wiki_id, names in tags_by_id.items():
+        for name in names:
+            tag_id = tag_id_by_name.get(name.lower())
+            if tag_id is not None:
+                mapping_rows.append({
+                    'library_type': 'current',
+                    'question_wiki_id': wiki_id,
+                    'tag_id': tag_id
+                })
+    if mapping_rows:
+        response = client.insert('kb_item_tags', mapping_rows)
+        if response is not None and getattr(response, 'status_code', 500) >= 400:
+            raise RuntimeError(getattr(response, 'text', '保存标签关联失败'))
 
 def _is_blank_cell_value(value):
     if value is None:
@@ -5473,6 +5694,8 @@ def _normalize_mod_record(row):
     kw_val = (after_obj.get('keyword_list') if isinstance(after_obj, dict) else None) or row.get('keyword_list')
     sim_val = (after_obj.get('similar_questions') if isinstance(after_obj, dict) else None) or row.get('similar_questions')
     bm25_val = (after_obj.get('if_bm25') if isinstance(after_obj, dict) else None) or row.get('if_bm25')
+    category_val = (after_obj.get('product_category_name') if isinstance(after_obj, dict) else None) or row.get('product_category_name')
+    tags_val = (after_obj.get('kb_tags') if isinstance(after_obj, dict) else None) or row.get('kb_tags')
     image_urls_val = (after_obj.get('image_urls') if isinstance(after_obj, dict) else None) or row.get('image_urls')
     video_urls_val = (after_obj.get('video_urls') if isinstance(after_obj, dict) else None) or row.get('video_urls')
     file_urls_val = (after_obj.get('file_urls') if isinstance(after_obj, dict) else None) or row.get('file_urls')
@@ -5496,6 +5719,8 @@ def _normalize_mod_record(row):
         'similar_questions': sim_val,
         'if_bm25': bm25_val,
         'products': p_val,
+        'product_category_name': category_val,
+        'kb_tags': tags_val,
         'image_urls': image_urls_val,
         'video_urls': video_urls_val,
         'file_urls': file_urls_val,
@@ -5928,6 +6153,193 @@ def update_kb_item():
     except Exception as e:
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/kb/batch-update', methods=['POST'])
+@login_required
+def batch_update_kb_items():
+    payload = request.get_json(silent=True) or {}
+    if str(payload.get('table') or 'knowledge_base_v1').strip() != 'knowledge_base_v1':
+        return jsonify({'success': False, 'message': '前刻库仅用于对比，批量编辑只支持此刻库'}), 400
+
+    raw_ids = payload.get('ids') or []
+    if not isinstance(raw_ids, list):
+        return jsonify({'success': False, 'message': 'ids 必须是数组'}), 400
+    ids = []
+    seen_ids = set()
+    for raw_id in raw_ids:
+        wiki_id = str(raw_id or '').strip()
+        if wiki_id and wiki_id not in seen_ids:
+            seen_ids.add(wiki_id)
+            ids.append(wiki_id)
+    if not ids:
+        return jsonify({'success': False, 'message': '请至少选择一条知识库数据'}), 400
+    if len(ids) > 500:
+        return jsonify({'success': False, 'message': '单次最多批量编辑 500 条数据'}), 400
+
+    expected_count = payload.get('expected_count')
+    if expected_count is not None:
+        try:
+            if int(expected_count) != len(ids):
+                return jsonify({'success': False, 'message': '选中条数已变化，请重新打开批量编辑'}), 409
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'message': 'expected_count 参数无效'}), 400
+
+    try:
+        operations = _kb_batch_parse_operations(payload.get('operations'))
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+
+    client = get_supabase_client()
+    if not client:
+        return jsonify({'success': False, 'message': '本地主库未配置'}), 500
+
+    try:
+        rows = client.select_all(
+            'knowledge_base_v1',
+            filters={'question_wiki_id': _postgrest_in_str(ids)},
+            columns='*',
+            page_size=1000
+        ) or []
+        rows_by_id = {
+            str(row.get('question_wiki_id') or '').strip(): dict(row)
+            for row in rows
+            if isinstance(row, dict) and str(row.get('question_wiki_id') or '').strip()
+        }
+        missing_ids = [wiki_id for wiki_id in ids if wiki_id not in rows_by_id]
+        if missing_ids:
+            return jsonify({
+                'success': False,
+                'message': '部分选中记录已不存在，请刷新后重试',
+                'missing_ids': missing_ids
+            }), 404
+
+        tags_by_id = _kb_batch_fetch_tags_by_id(client, ids)
+        operation_time = _now_iso_with_tz()
+        operation_id = f'kb-batch-{uuid.uuid4()}'
+        pending_updates = []
+        pending_tag_updates = {}
+        modification_records = []
+        skipped_ids = []
+
+        for wiki_id in ids:
+            before_row = dict(rows_by_id[wiki_id])
+            for list_field in _KB_BATCH_LIST_FIELDS:
+                if list_field != 'kb_tags':
+                    normalized_before = _kb_batch_normalize_list(before_row.get(list_field), list_field)
+                    before_row[list_field] = _kb_batch_store_list(normalized_before, list_field)
+            before_row['kb_tags'] = tags_by_id.get(wiki_id, [])
+            after_row = dict(before_row)
+
+            for operation in operations:
+                field = operation['field']
+                if field in _KB_BATCH_LIST_FIELDS:
+                    next_values = _kb_batch_apply_list(
+                        before_row.get(field),
+                        operation['values'],
+                        operation['mode'],
+                        field
+                    )
+                    if field == 'kb_tags':
+                        after_row[field] = next_values
+                    else:
+                        after_row[field] = _kb_batch_store_list(next_values, field)
+                else:
+                    after_row[field] = operation['value']
+
+            before_obj = _snapshot_mod_fields(before_row)
+            after_obj = _snapshot_mod_fields(after_row)
+            changed_fields = _compute_mod_changed_fields(before_obj, after_obj)
+            if not changed_fields:
+                skipped_ids.append(wiki_id)
+                continue
+
+            after_row['review_status'] = 'modifying'
+            after_row['update_time'] = operation_time
+            update_data = {
+                field: after_row.get(field)
+                for field in _kb_all_fields_allowlist()
+                if field in after_row and field not in ('question_wiki_id', 'review_status', 'update_time')
+            }
+            update_data['review_status'] = 'modifying'
+            update_data['update_time'] = operation_time
+            pending_updates.append((wiki_id, update_data))
+            if 'kb_tags' in changed_fields:
+                pending_tag_updates[wiki_id] = after_row['kb_tags']
+
+            modification_record = {
+                field: after_row.get(field)
+                for field in _kb_all_fields_allowlist()
+                if field in after_row and field != 'review_status'
+            }
+            modification_record['kb_id'] = wiki_id
+            modification_record['modifier'] = current_user.username if current_user.is_authenticated else 'system'
+            modification_record['modification_time'] = operation_time
+            modification_record['change_type'] = 'edit'
+            _attach_change_meta(modification_record, {
+                'source': _resolve_kb_change_source(payload),
+                'before': before_obj,
+                'after': after_obj,
+                'changed_fields': changed_fields,
+                'operation_id': operation_id,
+                'batch_operation': True
+            })
+            modification_records.append(modification_record)
+
+        applied_ids = []
+        for wiki_id, update_data in pending_updates:
+            response = client.update('knowledge_base_v1', update_data, {'question_wiki_id': f'eq.{wiki_id}'})
+            if response is not None and getattr(response, 'status_code', 500) >= 400:
+                return jsonify({
+                    'success': False,
+                    'message': f'保存失败: {getattr(response, "text", "unknown error")}',
+                    'operation_id': operation_id,
+                    'applied_ids': applied_ids,
+                    'failed_id': wiki_id
+                }), 500
+            applied_ids.append(wiki_id)
+
+        try:
+            _kb_batch_replace_tags(client, pending_tag_updates)
+        except Exception as exc:
+            return jsonify({
+                'success': False,
+                'message': f'标签保存失败: {exc}',
+                'operation_id': operation_id,
+                'applied_ids': applied_ids,
+                'tag_sync_failed': True
+            }), 500
+
+        mod_log_ok = True
+        mod_log_error = ''
+        if modification_records:
+            try:
+                _convert_array_fields_to_json(modification_records)
+                log_response = _supabase_insert_drop_unknown_columns(
+                    client,
+                    'knowledge_base_modifications',
+                    modification_records
+                )
+                if log_response is not None and getattr(log_response, 'status_code', 500) >= 400:
+                    mod_log_ok = False
+                    mod_log_error = getattr(log_response, 'text', '修改记录保存失败')
+            except Exception as exc:
+                mod_log_ok = False
+                mod_log_error = str(exc)
+
+        return jsonify({
+            'success': True,
+            'operation_id': operation_id,
+            'count': len(applied_ids),
+            'applied_ids': applied_ids,
+            'skipped_ids': skipped_ids,
+            'mod_log_ok': mod_log_ok,
+            'mod_log_error': mod_log_error,
+            'warning': '修改记录保存失败，但数据已成功保存' if not mod_log_ok else None
+        })
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(exc)}), 500
+
 
 @app.route('/api/kb/delete', methods=['POST'])
 @login_required

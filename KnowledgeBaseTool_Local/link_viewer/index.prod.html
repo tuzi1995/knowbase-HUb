@@ -404,6 +404,7 @@
                 <div class="workbench-nav-group-title">日志与归档</div>
                 <button onclick="switchTab('modificationsView')" class="tab-modern workbench-nav-btn" id="tab-modificationsView">修改记录</button>
                 <button onclick="switchTab('archiveView')" class="tab-modern workbench-nav-btn" id="tab-archiveView">归档管理</button>
+                <button onclick="switchTab('activityArchiveView')" class="tab-modern workbench-nav-btn" id="tab-activityArchiveView">活动暂存</button>
               </div>
             </div>
           </div>
@@ -437,53 +438,25 @@
                     <div style="font-weight: 600; color: #1E3A8A; margin-bottom: 4px;">维护 V1 / V1T-1 知识库内容</div>
                     <div class="text-muted" style="font-size: 13px;">当前数据源: 
                         <label class="radio-label" style="display:inline-flex; margin-left: 8px;">
-                            <input type="radio" name="kbTable" value="knowledge_base_v1" checked onchange="clearKBCache(); loadKBTable()"> 此刻库
+                            <input type="radio" name="kbTable" value="knowledge_base_v1" checked onchange="handleKBTableChange()"> 此刻库
                         </label>
                         <label class="radio-label" style="display:inline-flex; margin-left: 8px;">
-                            <input type="radio" name="kbTable" value="knowledge_base_v1_t1" onchange="clearKBCache(); loadKBTable()"> 前刻库
+                            <input type="radio" name="kbTable" value="knowledge_base_v1_t1" onchange="handleKBTableChange()"> 前刻库
                         </label>
                     </div>
                 </div>
                 
                 <div class="action-bar" style="margin: 0; padding: 0; border: none; background: transparent;">
                     <button onclick="openKBEditModal()" class="primary-btn btn-primary-gradient">➕ 新增数据</button>
-                    <button onclick="loadKBTable()" class="action-btn btn-secondary-outline">🔄 刷新数据</button>
-                    <button onclick="openExportModal()" class="action-btn btn-secondary-outline">📤 导出数据</button>
-                    <button id="kbPreviewSelectedBtn" class="action-btn btn-secondary-outline">👁️ 仅预览勾选</button>
-                    <button id="kbCompareSelectedBtn" onclick="openKBCompareFromSelection()" class="action-btn btn-secondary-outline">🔍 对比选中</button>
-                    <button onclick="showRevisionModal()" class="success-btn btn-success-solid" title="将所有修改中/删除中的状态重置为未调整">✅ 已完成修订</button>
-                    <button onclick="openActivityArchiveModal()" class="action-btn btn-secondary-outline" title="保存选中活动内容并从主知识库移除">📦 暂存活动内容</button>
-                    <button onclick="toggleActivityArchivePanel()" class="action-btn btn-secondary-outline" title="查看并恢复已暂存的活动内容">🗂️ 已暂存活动 <span id="activityArchiveCount">0</span></button>
-                    <button onclick="deleteSelectedKBItems()" class="danger-btn btn-danger-solid">🗑️ 删除选中</button>
-                    <button onclick="switchTab('dataSettingsView')" class="action-btn btn-secondary-outline">⚙️ 数据设置</button>
+                    <button onclick="loadKBTable()" class="action-btn btn-secondary-outline">🔄 刷新</button>
+                    <button onclick="openExportModal()" class="action-btn btn-secondary-outline">📤 导出</button>
+                    <button id="kbPreviewSelectedBtn" class="action-btn btn-secondary-outline">👁️ 仅看选中</button>
+                    <button id="kbCompareSelectedBtn" onclick="openKBCompareFromSelection()" class="action-btn btn-secondary-outline">🔍 对比</button>
+                    <button onclick="showRevisionModal()" class="success-btn btn-success-solid" title="将所有修改中/删除中的状态重置为未调整">✅ 完成修订</button>
+                    <button id="kbDeleteSelectedBtn" onclick="deleteSelectedKBItems()" class="danger-btn btn-danger-solid">🗑️ 删除</button>
+                    <button id="kbBatchEditBtn" onclick="openKBBatchEditModal()" class="action-btn btn-secondary-outline">批量编辑</button>
                 </div>
             </div>
-
-            <section id="activityArchivePanel" class="gov-filter-panel d-none" style="margin-top: 12px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
-                    <strong style="color:#1e293b;">已暂存活动</strong>
-                    <div class="kb-cell-actions-inline">
-                        <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="loadActivityArchives()" title="刷新"><i class="fas fa-rotate"></i></button>
-                        <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="toggleActivityArchivePanel(false)" title="关闭"><i class="fas fa-xmark"></i></button>
-                    </div>
-                </div>
-                <div class="table-container min-h-200 mb-0">
-                    <table class="kb-table">
-                        <thead>
-                            <tr>
-                                <th>活动批次</th>
-                                <th style="width:100px;">内容数</th>
-                                <th style="width:120px;">状态</th>
-                                <th style="width:160px;">暂存时间</th>
-                                <th style="width:100px;">操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="activityArchiveTableBody">
-                            <tr><td colspan="5" class="empty-message">尚未读取暂存活动</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </section>
 
             <!-- Import Panel (Hidden by default) -->
             <div id="importKBPanel" class="gov-filter-panel d-none" style="background: #f8fafc; border-color: #cbd5e1;">
@@ -1237,6 +1210,13 @@
             <section class="knowledge-graph-attention-panel" aria-labelledby="knowledgeGraphAttentionTitle">
               <div class="knowledge-graph-panel-head knowledge-graph-attention-head"><div><h4 id="knowledgeGraphAttentionTitle">待补主题与范围</h4><p>只列出缺少现有侧车主题或已配置产品范围的知识，不根据题目文本推断，也不直接改写来源。</p></div><button type="button" class="icon-btn" onclick="loadKnowledgeGraphAttentionQueue({ force: true })" title="刷新待补清单" aria-label="刷新待补清单"><i class="fas fa-rotate" aria-hidden="true"></i></button></div>
               <div class="knowledge-graph-attention-controls">
+                <div class="knowledge-graph-attention-wiki-search">
+                  <label for="knowledgeGraphAttentionWikiId">Wiki ID</label>
+                  <div class="knowledge-graph-attention-search-control">
+                    <input id="knowledgeGraphAttentionWikiId" class="input-modern" type="search" placeholder="输入完整 Wiki ID" autocomplete="off" onkeydown="if (event.key === 'Enter') updateKnowledgeGraphAttentionFilters()" onsearch="updateKnowledgeGraphAttentionFilters()">
+                    <button type="button" class="icon-btn" onclick="updateKnowledgeGraphAttentionFilters()" title="按 Wiki ID 搜索" aria-label="按 Wiki ID 搜索"><i class="fas fa-magnifying-glass" aria-hidden="true"></i></button>
+                  </div>
+                </div>
                 <label for="knowledgeGraphAttentionCategory">品类<select id="knowledgeGraphAttentionCategory" class="input-modern" onchange="updateKnowledgeGraphAttentionFilters()"><option value="">全部品类</option></select></label>
                 <label for="knowledgeGraphAttentionReason">原因<select id="knowledgeGraphAttentionReason" class="input-modern" onchange="updateKnowledgeGraphAttentionFilters()"><option value="all">全部待补项</option><option value="topic_missing">待归类</option><option value="topic_stale">主题待复核</option><option value="topic_vocabulary_stale">词表待复核</option><option value="scope_unknown">范围未知</option></select></label>
               </div>
@@ -1517,8 +1497,8 @@
                         <span class="page-size-label">每页显示：</span>
                         <select id="matrixPageSizeSelect" onchange="changeMatrixPageSize()" class="page-size-select input-modern input-sm">
                             <option value="10">10</option>
-                            <option value="20" selected>20</option>
-                            <option value="50">50</option>
+                            <option value="20">20</option>
+                            <option value="50" selected>50</option>
                         </select>
                     </div>
                 </div>
@@ -2427,6 +2407,38 @@
                     <button onclick="changeModPage(-1)" id="prevModPageBtn" disabled class="pagination-btn">上一页</button>
                     <button onclick="changeModPage(1)" id="nextModPageBtn" disabled class="pagination-btn">下一页</button>
                 </div>
+            </div>
+          </div>
+      </div>
+
+      <div id="activityArchiveView" class="d-none">
+          <div class="kb-section">
+            <div class="gov-summary-panel activity-archive-summary">
+                <span id="activityArchiveSelectionStatus" class="activity-archive-selection-status" aria-live="polite">未选择活动内容</span>
+                <div class="activity-archive-actions">
+                    <button type="button" onclick="switchTab('kbView')" class="action-btn btn-secondary-outline">选择活动内容</button>
+                    <button type="button" onclick="openActivityArchiveModal()" class="primary-btn">暂存活动内容</button>
+                </div>
+            </div>
+            <div class="activity-archive-table-bar">
+                <div class="activity-archive-table-title">已暂存活动</div>
+                <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="loadActivityArchives()" aria-label="刷新已暂存活动" title="刷新已暂存活动"><i class="fas fa-rotate" aria-hidden="true"></i></button>
+            </div>
+            <div class="table-container min-h-200 mb-0">
+                <table class="kb-table">
+                    <thead>
+                        <tr>
+                            <th>活动批次</th>
+                            <th style="width:100px;">内容数</th>
+                            <th style="width:120px;">状态</th>
+                            <th style="width:160px;">暂存时间</th>
+                            <th style="width:100px;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="activityArchiveTableBody">
+                        <tr><td colspan="5" class="empty-message">尚未读取暂存活动</td></tr>
+                    </tbody>
+                </table>
             </div>
           </div>
       </div>
@@ -3982,6 +3994,29 @@ G10 系列: G10S, G10S Pro"></textarea>
             <div class="modal-footer">
                 <button onclick="closeRevisionModal()" class="btn btn-cancel">取消</button>
                 <button onclick="executeRevisionCompletion()" class="btn btn-confirm">确定完成</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="kbBatchEditModal" class="modal" aria-hidden="true">
+        <div class="modal-content kb-batch-edit-modal-content" role="dialog" aria-modal="true" aria-labelledby="kbBatchEditTitle">
+            <div class="modal-header">
+                <h3 id="kbBatchEditTitle">批量编辑知识库</h3>
+                <span class="close" onclick="closeKBBatchEditModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p id="kbBatchEditSelectionSummary" class="kb-batch-edit-summary"></p>
+                <div class="kb-batch-edit-column-head" aria-hidden="true">
+                    <span>字段</span>
+                    <span>编辑方式</span>
+                    <span>修改内容</span>
+                </div>
+                <div id="kbBatchEditFields" class="kb-batch-edit-fields"></div>
+            </div>
+            <div class="modal-footer">
+                <span id="kbBatchEditHint" class="text-muted" style="margin-right:auto; font-size:12px;">勾选需要统一修改的字段</span>
+                <button type="button" onclick="closeKBBatchEditModal()" class="action-btn">取消</button>
+                <button type="button" id="kbBatchEditSubmitBtn" onclick="submitKBBatchEdit()" class="primary-btn">确认批量编辑</button>
             </div>
         </div>
     </div>

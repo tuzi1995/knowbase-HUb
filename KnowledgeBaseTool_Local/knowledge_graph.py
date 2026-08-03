@@ -2503,12 +2503,14 @@ class GraphStore:
         self,
         category: str | None = None,
         reason: str | None = None,
+        wiki_id: str | None = None,
         page: int = 1,
         page_size: int = 100,
     ) -> dict[str, Any]:
         """List knowledge that lacks a usable topic or product scope without inferring either."""
         selected_category = str(category or "").strip()
         selected_reason = str(reason or "all").strip() or "all"
+        selected_wiki_id = str(wiki_id or "").strip()
         if selected_reason not in {"all", "topic_missing", "topic_stale", "topic_vocabulary_stale", "scope_unknown"}:
             raise ValueError("reason 仅支持 all、topic_missing、topic_stale、topic_vocabulary_stale 或 scope_unknown。")
         if page < 1 or page_size < 1 or page_size > 200:
@@ -2534,6 +2536,7 @@ class GraphStore:
         filtered = [
             record for record in attention_records
             if (not selected_category or selected_category in record["categories"])
+            and (not selected_wiki_id or record["wiki_id"] == selected_wiki_id)
             and (
                 selected_reason == "all"
                 or (selected_reason == "topic_missing" and record["topic_status"] == "待归类")
@@ -2549,6 +2552,7 @@ class GraphStore:
         return {
             "category": selected_category,
             "reason": selected_reason,
+            "wiki_id": selected_wiki_id,
             "page": page,
             "page_size": page_size,
             "total": total,
@@ -3404,6 +3408,7 @@ def register_knowledge_graph_routes(
                 **store.catalog_attention_queue(
                     category=request.args.get("category"),
                     reason=request.args.get("reason"),
+                    wiki_id=request.args.get("wiki_id"),
                     page=page,
                     page_size=page_size,
                 ),

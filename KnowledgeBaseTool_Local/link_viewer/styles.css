@@ -6007,6 +6007,7 @@ button[type="submit"],
 
 #modificationsView .table-container,
 #archiveView .table-container,
+#activityArchiveView .table-container,
 #smartMappingView .table-container {
   flex: 1 1 auto;
   min-height: 260px;
@@ -6031,6 +6032,50 @@ button[type="submit"],
   min-height: 34px;
   display: inline-flex;
   align-items: center;
+}
+
+#activityArchiveView > .kb-section {
+  gap: 12px;
+  padding: 12px !important;
+  overflow: hidden !important;
+}
+
+#activityArchiveView .activity-archive-summary,
+#activityArchiveView .activity-archive-table-bar {
+  flex: 0 0 auto;
+  margin: 0 !important;
+}
+
+#activityArchiveView .activity-archive-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-archive-selection-status {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.activity-archive-actions,
+.activity-archive-table-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity-archive-table-bar {
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 0 2px;
+}
+
+.activity-archive-table-title {
+  color: #1e293b;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 #modificationsView > .kb-section {
@@ -9741,8 +9786,12 @@ main {
 .knowledge-graph-attention-head h4 { margin: 0 0 4px; color: #263e59; font-size: 14px; }
 .knowledge-graph-attention-head p { margin: 0; color: #64748b; font-size: 12px; line-height: 1.45; }
 .knowledge-graph-attention-controls { display: flex; align-items: end; gap: 12px; padding: 10px 16px; border-bottom: 1px solid #e3eaf2; background: #f8fbff; }
-.knowledge-graph-attention-controls label { display: grid; gap: 5px; color: #52657a; font-size: 11px; font-weight: 700; }
+.knowledge-graph-attention-controls label,
+.knowledge-graph-attention-wiki-search { display: grid; gap: 5px; color: #52657a; font-size: 11px; font-weight: 700; }
 .knowledge-graph-attention-controls .input-modern { min-width: 150px; min-height: 32px; font-size: 12px; }
+.knowledge-graph-attention-search-control { display: flex; align-items: center; gap: 6px; }
+.knowledge-graph-attention-search-control .input-modern { min-width: 220px; }
+.knowledge-graph-attention-search-control .icon-btn { min-width: 32px; min-height: 32px; }
 .knowledge-graph-attention-panel > .knowledge-graph-status { margin: 10px 16px; }
 .knowledge-graph-attention-table td { vertical-align: middle; }
 .knowledge-graph-attention-table td small { max-width: 330px; color: #64748b; font-size: 11px; line-height: 1.45; }
@@ -9934,4 +9983,112 @@ main {
 #mainContent .workbench-views > div.is-active-view,
 #mainContent .table-container {
   overscroll-behavior: none;
+}
+
+/* Knowledge-base batch editor */
+.kb-batch-edit-modal-content {
+  width: min(1120px, 94vw);
+  max-height: min(860px, 90vh);
+  display: flex;
+  flex-direction: column;
+}
+
+.kb-batch-edit-modal-content .modal-body {
+  overflow: auto;
+}
+
+.kb-batch-edit-summary {
+  margin: 0 0 14px;
+  color: #52657a;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.kb-batch-edit-column-head,
+.kb-batch-edit-row {
+  display: grid;
+  grid-template-columns: 190px 132px minmax(0, 1fr);
+  column-gap: 12px;
+  align-items: start;
+}
+
+.kb-batch-edit-column-head {
+  padding: 0 12px 8px;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.kb-batch-edit-fields {
+  border-top: 1px solid #d9e2ef;
+  border-bottom: 1px solid #d9e2ef;
+}
+
+.kb-batch-edit-row {
+  min-height: 58px;
+  padding: 10px 12px;
+  border-top: 1px solid #ecf2f8;
+  background: #ffffff;
+}
+
+.kb-batch-edit-row:first-child {
+  border-top: 0;
+}
+
+.kb-batch-edit-row.is-selected {
+  background: #f5f9ff;
+}
+
+.kb-batch-edit-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.kb-batch-edit-field-label input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.kb-batch-edit-row select,
+.kb-batch-edit-row input[type="text"],
+.kb-batch-edit-row textarea {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.kb-batch-edit-row textarea {
+  min-height: 54px;
+  resize: vertical;
+}
+
+.kb-batch-edit-row select:disabled,
+.kb-batch-edit-row input:disabled,
+.kb-batch-edit-row textarea:disabled {
+  border-color: #e5e7eb;
+  background: #f8fafc;
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+.kb-batch-edit-set-mode {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  color: #667085;
+  font-size: 13px;
 }

@@ -674,6 +674,12 @@ class KnowledgeGraphApiTests(unittest.TestCase):
         ).get_json()
         self.assertEqual(unknown_attention["total"], 1)
         self.assertEqual(unknown_attention["items"][0]["wiki_id"], "KB-UNKNOWN")
+        wiki_attention = self.client.get(
+            "/api/kb/graph/catalog/attention?wiki_id=KB-DOWNSTREAM&reason=topic_missing"
+        ).get_json()
+        self.assertEqual(wiki_attention["total"], 1)
+        self.assertEqual(wiki_attention["items"][0]["wiki_id"], "KB-DOWNSTREAM")
+        self.assertEqual(wiki_attention["wiki_id"], "KB-DOWNSTREAM")
 
         rejected_assignment = self.client.post(
             "/api/kb/graph/catalog/topic-assignments",
