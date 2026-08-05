@@ -5403,6 +5403,7 @@ def _kb_batch_fetch_tags_by_id(client, ids):
             'question_wiki_id': _postgrest_in_str(ids)
         },
         columns='question_wiki_id,tag_id',
+        order_by='question_wiki_id',
         page_size=1000
     ) or []
     tag_rows = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
@@ -6198,6 +6199,7 @@ def batch_update_kb_items():
             'knowledge_base_v1',
             filters={'question_wiki_id': _postgrest_in_str(ids)},
             columns='*',
+            order_by='question_wiki_id',
             page_size=1000
         ) or []
         rows_by_id = {

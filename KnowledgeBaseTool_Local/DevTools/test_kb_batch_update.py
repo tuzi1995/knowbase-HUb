@@ -85,7 +85,10 @@ class InMemoryKnowledgeClient:
                     return False
         return True
 
-    def select_all(self, table, filters=None, order_by=None, order_dir='asc', columns='*', page_size=1000):
+    def select_all(self, table, filters=None, order_by='id', order_dir='asc', columns='*', page_size=1000):
+        table_rows = self.tables.get(table, [])
+        if order_by and any(order_by not in row for row in table_rows):
+            raise Exception(f'Database Error: column "{order_by}" does not exist')
         rows = [dict(row) for row in self.tables.get(table, []) if self._matches(row, filters)]
         if order_by:
             rows.sort(key=lambda row: str(row.get(order_by) or ''), reverse=order_dir == 'desc')

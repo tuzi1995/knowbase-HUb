@@ -4923,10 +4923,6 @@ body.kb-action-embed-mode .workbench-views {
     padding: 12px !important;
 }
 
-body.kb-action-embed-mode #kbCompareView .kb-compare-actions {
-    display: none !important;
-}
-
 body.kb-action-embed-mode #mainContent,
 body.kb-action-embed-mode #mainContent .workbench-layout,
 body.kb-action-embed-mode #mainContent .workbench-main,
@@ -5035,33 +5031,6 @@ body.kb-embed-blocked {
     display: flex;
     flex-direction: column;
     gap: 12px;
-}
-
-.kb-compare-hero {
-    align-items: center;
-    padding: 14px 18px;
-    background: #FFFFFF;
-    border-color: #D8E5F8;
-    box-shadow: none;
-}
-
-.kb-compare-title {
-    color: #0F172A;
-    font-size: 16px;
-    font-weight: 700;
-    margin-bottom: 3px;
-}
-
-.kb-compare-desc {
-    color: #475569;
-    font-size: 13px;
-}
-
-.kb-compare-actions {
-    margin: 0;
-    padding: 0;
-    border: 0;
-    background: transparent;
 }
 
 .kb-compare-layout {
@@ -7963,7 +7932,6 @@ textarea {
 #mainContent .workbench-views > div.is-active-view .matrix-summary-title,
 #mainContent .workbench-views > div.is-active-view .data-settings-title,
 #mainContent .workbench-views > div.is-active-view .activity-archive-table-title,
-#mainContent .workbench-views > div.is-active-view .kb-compare-title,
 #mainContent .workbench-views > div.is-active-view .link-import-card-title,
 #mainContent .workbench-views > div.is-active-view .sm-card-title,
 #mainContent .workbench-views > div.is-active-view .pm-content-title,

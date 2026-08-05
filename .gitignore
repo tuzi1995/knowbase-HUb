@@ -56,3 +56,5 @@ backend/data/
 
 .playwright-cli/
 test-results/
+
+node_modules

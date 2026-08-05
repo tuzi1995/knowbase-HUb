@@ -612,17 +612,6 @@
 
       <div id="kbCompareView" class="d-none">
           <div class="kb-section kb-compare-section">
-            <div class="gov-summary-panel kb-compare-hero">
-                <div>
-                    <div class="kb-compare-title">知识对比</div>
-                    <div class="text-muted kb-compare-desc">按 ID 批量导入知识库记录，完成匹配校验、字段差异与合并草稿。</div>
-                </div>
-                <div class="action-bar kb-compare-actions">
-                    <button onclick="clearKBCompareWorkspace()" class="action-btn btn-secondary-outline">清空</button>
-                    <button onclick="switchTab('kbView')" class="action-btn btn-secondary-outline">返回知识库</button>
-                </div>
-            </div>
-
             <div class="kb-compare-layout" id="kbCompareLayout">
                 <section class="kb-compare-import-panel" id="kbCompareImportPanel">
                     <div class="kb-compare-panel-head">
@@ -636,6 +625,7 @@
                                 <label><input type="radio" name="kbCompareTable" value="knowledge_base_v1_t1"> 前刻库</label>
                             </div>
                             <button type="button" id="kbCompareImportToggleBtn" onclick="toggleKBCompareImportCollapsed()" class="action-btn btn-sm">收起</button>
+                            <button type="button" onclick="clearKBCompareWorkspace()" class="action-btn btn-sm">清空</button>
                         </div>
                     </div>
 
