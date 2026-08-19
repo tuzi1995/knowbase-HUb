@@ -14,6 +14,11 @@ import parameter_check
 
 
 class DatabaseIsolationTests(unittest.TestCase):
+    def test_backup_root_honors_external_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {"KMATRIX_BACKUP_ROOT": temp_dir}, clear=False):
+                self.assertEqual(server._resolve_backup_root(), os.path.abspath(temp_dir))
+
     def test_test_process_rejects_instance_database(self):
         instance_db = Path(server._BASE_DIR) / "instance" / "data.db"
         with patch.dict(os.environ, {

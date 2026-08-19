@@ -12,6 +12,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import re
 import uuid
 from collections import Counter, defaultdict
@@ -28,7 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "supabase_config_local.json"
 DEFAULT_XLSX = Path("/Users/guoying/Downloads/最新KB（合并机型）导出_20260818_100044.xlsx")
 REPORT_DIR = ROOT / "DevTools" / "reports"
-BACKUP_DIR = ROOT / "instance" / "v1_import_backups"
+BACKUP_ROOT = Path(os.environ.get("KMATRIX_BACKUP_ROOT", "/Volumes/ORICO/database/knowbasehub-backups")).expanduser()
+BACKUP_DIR = BACKUP_ROOT / "v1_import_backups"
 SHANGHAI = timezone(timedelta(hours=8))
 
 IMPORT_FIELDS = [

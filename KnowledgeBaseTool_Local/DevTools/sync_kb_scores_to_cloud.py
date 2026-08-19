@@ -26,6 +26,7 @@ DEFAULT_REMOTE_HOST = "112.126.63.84"
 DEFAULT_REMOTE_DIR = "~/k-matrix"
 DEFAULT_REMOTE_TMP_DIR = "~/k-matrix/tmp_sync"
 DEFAULT_BATCH_SIZE = 300
+BACKUP_ROOT = Path(os.environ.get("KMATRIX_BACKUP_ROOT", "/Volumes/ORICO/database/knowbasehub-backups")).expanduser()
 
 KB_SCORE_COLUMNS = [
     "kb_id",
@@ -151,6 +152,8 @@ def _write_remote_importer(path: Path):
             from datetime import datetime
             from pathlib import Path
 
+            BACKUP_ROOT = Path(os.environ.get("KMATRIX_BACKUP_ROOT", "/Volumes/ORICO/database/knowbasehub-backups")).expanduser()
+
 
             def chunked(items, size):
                 for i in range(0, len(items), size):
@@ -178,7 +181,7 @@ def _write_remote_importer(path: Path):
                         print("Remote database client unavailable.")
                         return 3
 
-                    backup_dir = Path("sync_backups")
+                    backup_dir = BACKUP_ROOT / "sync-backups"
                     backup_dir.mkdir(parents=True, exist_ok=True)
                     backup_path = backup_dir / f"kb_scores_before_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                     try:

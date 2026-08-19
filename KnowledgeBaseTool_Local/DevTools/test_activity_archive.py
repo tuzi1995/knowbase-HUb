@@ -195,5 +195,88 @@ class ActivityArchiveApiTests(unittest.TestCase):
         self.assertEqual(duplicate.get_json()['conflict_ids'], ['ACT-001'])
 
 
+class ArchiveDeletionApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        server.app.config.update(TESTING=True, LOGIN_DISABLED=True)
+        with server.app.app_context():
+            server.db.create_all()
+
+    def setUp(self):
+        self.client = server.app.test_client()
+        self.remote = InMemoryKnowledgeClient()
+        self.batch_name = f'归档删除测试-{uuid.uuid4()}'
+        self.client_patch = patch.object(server, 'get_supabase_client', return_value=self.remote)
+        self.client_patch.start()
+        with server.app.app_context():
+            batch = server.ArchiveBatch(
+                batch_name=self.batch_name,
+                record_count=2,
+                created_by='test',
+            )
+            server.db.session.add(batch)
+            server.db.session.flush()
+            self.batch_id = batch.id
+            server.db.session.add_all([
+                server.ArchiveRecord(
+                    batch_id=batch.id,
+                    record_json=json.dumps({'question_wiki_id': 'KB-001'}),
+                ),
+                server.ArchiveRecord(
+                    batch_id=batch.id,
+                    record_json=json.dumps({'question_wiki_id': 'KB-002'}),
+                ),
+            ])
+            server.db.session.commit()
+        self.remote.tables.update({
+            'archive_batch': [{'id': self.batch_id, 'batch_name': self.batch_name}],
+            'archive_record': [
+                {'id': 1, 'batch_id': self.batch_id, 'record_json': '{}'},
+                {'id': 2, 'batch_id': self.batch_id, 'record_json': '{}'},
+            ],
+            'knowledge_base_modifications': [
+                {'id': 11, 'archive_batch_id': str(self.batch_id)},
+                {'id': 12, 'archive_batch_id': str(self.batch_id)},
+                {'id': 99, 'archive_batch_id': 'another-batch'},
+            ],
+        })
+
+    def tearDown(self):
+        self.client_patch.stop()
+        with server.app.app_context():
+            server.ArchiveRecord.query.filter_by(batch_id=self.batch_id).delete(synchronize_session=False)
+            server.ArchiveBatch.query.filter_by(id=self.batch_id).delete(synchronize_session=False)
+            server.db.session.commit()
+
+    def test_delete_archive_batch_removes_batch_records_and_archived_modifications(self):
+        needs_confirmation = self.client.delete(f'/api/archives/{self.batch_id}', json={})
+        self.assertEqual(needs_confirmation.status_code, 409)
+        self.assertTrue(needs_confirmation.get_json()['requires_confirmation'])
+
+        with patch.object(server, 'is_supabase_archives_enabled', return_value=True), \
+                patch.object(server, '_supabase_table_exists', return_value=True):
+            deleted = self.client.delete(
+                f'/api/archives/{self.batch_id}',
+                json={'confirm_delete': True},
+            )
+        self.assertEqual(deleted.status_code, 200, deleted.get_data(as_text=True))
+        payload = deleted.get_json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['deleted_record_count'], 2)
+        self.assertEqual(payload['deleted_modification_count'], 2)
+        self.assertEqual(self.remote.tables['archive_batch'], [])
+        self.assertEqual(self.remote.tables['archive_record'], [])
+        self.assertEqual(
+            self.remote.tables['knowledge_base_modifications'],
+            [{'id': 99, 'archive_batch_id': 'another-batch'}],
+        )
+        with server.app.app_context():
+            self.assertIsNone(server.db.session.get(server.ArchiveBatch, self.batch_id))
+            self.assertEqual(
+                server.ArchiveRecord.query.filter_by(batch_id=self.batch_id).count(),
+                0,
+            )
+
+
 if __name__ == '__main__':
     unittest.main()

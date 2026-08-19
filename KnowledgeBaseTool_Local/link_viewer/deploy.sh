@@ -19,9 +19,10 @@ if [ ! -d "dist" ]; then
     exit 1
 fi
 
-# 备份当前文件
+# 备份当前文件到项目外的回滚目录
 echo "📦 备份当前文件..."
-BACKUP_DIR="backup_$(date +%Y%m%d_%H%M%S)"
+BACKUP_ROOT="${KMATRIX_BACKUP_ROOT:-/Volumes/ORICO/database/knowbasehub-backups}"
+BACKUP_DIR="$BACKUP_ROOT/frontend-deploy/backup_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$BACKUP_DIR"
 
 # 备份需要替换的文件

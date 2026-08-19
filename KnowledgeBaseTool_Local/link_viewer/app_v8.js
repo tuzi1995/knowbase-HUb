@@ -10914,6 +10914,7 @@ function renderArchivesTable() {
             <div class="kb-cell-actions-inline kb-cell-actions-center">
                 <button class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="openArchiveRecordsModal(${b.id}, '${_escapeAttr(b.batch_name || '')}')" title="查看批次"><i class="fas fa-eye"></i></button>
                 <button class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="exportArchiveBatch(${b.id})" title="导出批次"><i class="fas fa-file-export"></i></button>
+                <button class="kb-mini-action-btn kb-mini-action-btn-icon archive-delete-btn" onclick="deleteArchiveBatch(${b.id})" title="永久删除批次及其全部归档数据" aria-label="永久删除批次及其全部归档数据"><i class="fas fa-trash-alt" aria-hidden="true"></i></button>
             </div>
         `;
         tr.appendChild(tdAct);
@@ -10964,6 +10965,32 @@ function exportArchiveBatch(batchId) {
     window.location = `${API_BASE}/archives/${batchId}/export`;
 }
 window.exportArchiveBatch = exportArchiveBatch;
+
+async function deleteArchiveBatch(batchId) {
+    const batch = archiveBatches.find(item => String(item?.id || '') === String(batchId || ''));
+    if (!batch) {
+        showToast('未找到归档批次，请刷新后重试。', 'warning');
+        return;
+    }
+    const confirmed = await showDangerConfirmModal(
+        '永久删除归档批次',
+        `将永久删除归档批次“${batch.batch_name || batchId}”的 ${Number(batch.record_count || 0)} 条归档数据，以及该批次对应的修改记录。此操作无法恢复，确认继续？`,
+        '确认永久删除'
+    );
+    if (!confirmed) return;
+
+    try {
+        const response = await api(`/archives/${encodeURIComponent(batchId)}`, 'DELETE', {
+            confirm_delete: true,
+        });
+        if (!response || !response.success) throw new Error(response?.message || '归档删除失败');
+        showToast(`已永久删除归档批次及 ${Number(response.deleted_record_count || 0)} 条归档数据`, 'success');
+        await loadArchives();
+    } catch (error) {
+        showToast(`归档删除失败：${error.message || String(error)}`, 'error');
+    }
+}
+window.deleteArchiveBatch = deleteArchiveBatch;
 
 let archiveCurrentBatchId = null;
 let archiveCurrentBatchName = '';
@@ -23175,7 +23202,7 @@ async function clearScoringCache() {
         const count = summary.count || 0;
         const ok = await showDangerConfirmModal(
             '清空评分缓存确认',
-            `即将删除全部评分缓存 ${count} 条。系统会先在本地 instance/backups/scoring_cache 生成 JSON 备份；操作完成后评分列表会变为空。确认继续？`,
+            `即将删除全部评分缓存 ${count} 条。系统会先在外部备份目录 instance-backups/scoring_cache 生成 JSON 备份；操作完成后评分列表会变为空。确认继续？`,
             '备份并清空'
         );
         if (!ok) return;

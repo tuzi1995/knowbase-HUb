@@ -190,6 +190,15 @@ def _get_matrix_clone_progress(operation_id):
         progress['elapsed_seconds'] = max(0, int(time.time() - progress['started_at']))
     return progress
 _INSTANCE_DIR = os.path.join(_BASE_DIR, 'instance')
+_DEFAULT_BACKUP_ROOT = '/Volumes/ORICO/database/knowbasehub-backups'
+
+
+def _resolve_backup_root():
+    configured = str(os.environ.get('KMATRIX_BACKUP_ROOT') or '').strip()
+    return os.path.abspath(os.path.expanduser(configured or _DEFAULT_BACKUP_ROOT))
+
+
+_BACKUP_ROOT = _resolve_backup_root()
 app = Flask(
     __name__,
     static_folder=os.path.join(_BASE_DIR, 'link_viewer'),
@@ -337,7 +346,7 @@ CORS(app, supports_credentials=True, origins=_get_cors_allowed_origins())
 app.config['SECRET_KEY'] = _resolve_secret_key()
 _DB_PATH = _resolve_sqlite_database_path()
 _KB_V1_SYNC_ARTIFACT_DIR = os.path.join(
-    os.path.dirname(_DB_PATH) if _is_test_process() else _INSTANCE_DIR,
+    os.path.dirname(_DB_PATH) if _is_test_process() else _BACKUP_ROOT,
     'kb_v1_sync_snapshots',
 )
 BADCASE_WORKBENCH_SOURCE = 'badcase标注工作台'
@@ -3790,8 +3799,8 @@ def _save_ai_prompts_to_prompt_folder(config):
         with open(os.path.join(prompt_dir, 'ai_prompts_latest.json'), 'w', encoding='utf-8') as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
 
-        # Also write timestamped snapshots for traceability.
-        history_dir = os.path.join(prompt_dir, 'history')
+        # Timestamped prompt snapshots are rollback data and live outside the project.
+        history_dir = os.path.join(_BACKUP_ROOT, 'prompt-history')
         os.makedirs(history_dir, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         with open(os.path.join(history_dir, f'ai_prompts_{ts}.json'), 'w', encoding='utf-8') as f:
@@ -9472,6 +9481,77 @@ def get_archive_records(batch_id):
     sliced = filtered[start_idx:end_idx]
     return jsonify({'success': True, 'data': sliced, 'total': total})
 
+
+@app.route('/api/archives/<int:batch_id>', methods=['DELETE'])
+@login_required
+def delete_archive(batch_id):
+    payload = request.get_json(silent=True) or {}
+    if not bool(payload.get('confirm_delete')):
+        return jsonify({
+            'success': False,
+            'requires_confirmation': True,
+            'message': '删除归档会永久删除该批次的归档数据及对应修改记录，无法恢复，请确认后继续。',
+        }), 409
+
+    batch = db.session.get(ArchiveBatch, batch_id)
+    if not batch:
+        return jsonify({'success': False, 'message': '归档批次不存在'}), 404
+
+    deleted_remote_records = 0
+    deleted_remote_modifications = 0
+    try:
+        if is_supabase_archives_enabled():
+            client = get_supabase_client()
+            if not client:
+                raise RuntimeError('归档主库连接不可用，未执行删除')
+            archive_record_exists = _supabase_table_exists(client, 'archive_record')
+            archive_batch_exists = _supabase_table_exists(client, 'archive_batch')
+            modifications_exists = _supabase_table_exists(client, 'knowledge_base_modifications')
+
+            if archive_record_exists:
+                remote_records = client.select_all(
+                    'archive_record',
+                    filters={'batch_id': f'eq.{batch_id}'},
+                    page_size=1000,
+                ) or []
+                response = client.delete('archive_record', {'batch_id': f'eq.{batch_id}'})
+                if response is None or getattr(response, 'status_code', 500) >= 400:
+                    raise RuntimeError(getattr(response, 'text', '') or '远端归档明细删除失败')
+                deleted_remote_records = len(remote_records)
+
+            if modifications_exists:
+                remote_modifications = client.select_all(
+                    'knowledge_base_modifications',
+                    filters={'archive_batch_id': f'eq.{batch_id}'},
+                    page_size=1000,
+                ) or []
+                response = client.delete(
+                    'knowledge_base_modifications',
+                    {'archive_batch_id': f'eq.{batch_id}'},
+                )
+                if response is None or getattr(response, 'status_code', 500) >= 400:
+                    raise RuntimeError(getattr(response, 'text', '') or '远端修改记录删除失败')
+                deleted_remote_modifications = len(remote_modifications)
+
+            if archive_batch_exists:
+                response = client.delete('archive_batch', {'id': f'eq.{batch_id}'})
+                if response is None or getattr(response, 'status_code', 500) >= 400:
+                    raise RuntimeError(getattr(response, 'text', '') or '远端归档批次删除失败')
+
+        deleted_local_records = ArchiveRecord.query.filter_by(batch_id=batch.id).delete(synchronize_session=False)
+        db.session.delete(batch)
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'batch_id': batch_id,
+            'deleted_record_count': max(deleted_local_records, deleted_remote_records),
+            'deleted_modification_count': deleted_remote_modifications,
+        })
+    except Exception as exc:
+        db.session.rollback()
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(exc)}), 502
+
 @app.route('/api/archives/<int:batch_id>/export', methods=['GET'])
 @login_required
 def export_archive(batch_id):
@@ -9586,8 +9666,8 @@ def _client_count(client, table, filters=None):
         return 0
 
 def _write_json_backup(kind, table, rows, metadata=None):
-    backup_root = os.path.dirname(_DB_PATH) if _is_test_process() else _INSTANCE_DIR
-    backup_dir = os.path.join(backup_root, 'backups', kind)
+    backup_root = os.path.dirname(_DB_PATH) if _is_test_process() else _BACKUP_ROOT
+    backup_dir = os.path.join(backup_root, 'instance-backups', kind)
     os.makedirs(backup_dir, exist_ok=True)
     filename = f"{table}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     path = os.path.join(backup_dir, filename)
