@@ -35,10 +35,6 @@ try:
         cur.execute("SELECT COUNT(*) as count FROM knowledge_base_v1;")
         v1_count = cur.fetchone()['count']
         
-        # 查询 V1T-1 表记录数
-        cur.execute("SELECT COUNT(*) as count FROM knowledge_base_v1_t1;")
-        v1_t1_count = cur.fetchone()['count']
-        
         # 查询 V1 表最新的几条记录
         cur.execute("""
             SELECT question_wiki_id, question, update_time 
@@ -48,18 +44,8 @@ try:
         """)
         latest_records = cur.fetchall()
         
-        # 查询 V1T-1 表最新的几条记录
-        cur.execute("""
-            SELECT question_wiki_id, question, update_time 
-            FROM knowledge_base_v1_t1 
-            ORDER BY update_time DESC 
-            LIMIT 5;
-        """)
-        latest_t1_records = cur.fetchall()
-        
         print(f"\n📊 数据统计:")
-        print(f"   knowledge_base_v1 (此刻库):    {v1_count:,} 条记录")
-        print(f"   knowledge_base_v1_t1 (前刻库): {v1_t1_count:,} 条记录")
+        print(f"   knowledge_base_v1: {v1_count:,} 条记录")
         
         if v1_count == 6131:
             print(f"\n✅ 全量覆盖导入成功！V1 表已更新为 6131 条记录")
@@ -68,13 +54,6 @@ try:
         
         print(f"\n📝 V1 表最新 5 条记录:")
         for i, record in enumerate(latest_records, 1):
-            wiki_id = record['question_wiki_id']
-            question = record['question'][:50] + '...' if len(record['question']) > 50 else record['question']
-            update_time = record['update_time']
-            print(f"   {i}. ID: {wiki_id} | 问题: {question} | 更新时间: {update_time}")
-        
-        print(f"\n📝 V1T-1 表最新 5 条记录 (备份):")
-        for i, record in enumerate(latest_t1_records, 1):
             wiki_id = record['question_wiki_id']
             question = record['question'][:50] + '...' if len(record['question']) > 50 else record['question']
             update_time = record['update_time']

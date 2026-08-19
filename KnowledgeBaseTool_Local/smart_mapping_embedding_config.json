@@ -6,5 +6,15 @@
   "batch_size": 64,
   "timeout": 60,
   "fallback_to_ngram": true,
+  "ai_review_enabled": true,
+  "ai_review_match_types": [
+    "问题+答案均一致",
+    "仅问题一致",
+    "仅答案一致"
+  ],
+  "ai_review_batch_size": 8,
+  "ai_review_base_url": "",
+  "ai_review_model": "",
+  "ai_review_fail_closed": true,
   "api_key": "sk-swxsksstjfzjhfdaipxwcaigsbckxhbdoveyipcsqiqdrjfd"
 }

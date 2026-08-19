@@ -8,6 +8,13 @@
 import json
 import sys
 import os
+import unittest
+
+if str(os.environ.get('KMATRIX_ALLOW_LIVE_WRITE_TESTS') or '').strip().lower() not in {'1', 'true', 'yes', 'on'}:
+    message = '在线 PostgreSQL 写入测试默认禁用；运行前需设置 KMATRIX_ALLOW_LIVE_WRITE_TESTS=1'
+    if __name__ == '__main__':
+        raise SystemExit(message)
+    raise unittest.SkipTest(message)
 
 # 添加父目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

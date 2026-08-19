@@ -209,7 +209,7 @@ def save_ai_config(config):
 
 # ================= 辅助函数 =================
 
-def calculate_months_diff(update_time_str, baseline_str="2026-02-01"):
+def calculate_months_diff(update_time_str, baseline_str=None):
     """
     计算更新时间距离基准日期的月数差（向下取整）。
     """
@@ -218,7 +218,7 @@ def calculate_months_diff(update_time_str, baseline_str="2026-02-01"):
             return 999 
             
         update_date = pd.to_datetime(update_time_str)
-        baseline_date = pd.to_datetime(baseline_str)
+        baseline_date = pd.to_datetime(baseline_str or datetime.now().strftime("%Y-%m-%d"))
         
         diff = (baseline_date.year - update_date.year) * 12 + (baseline_date.month - update_date.month)
         return max(0, diff)
@@ -264,21 +264,33 @@ def normalize_scoring_result(result):
     if not isinstance(dims, dict):
         raise ValueError("model response missing object field: 维度得分")
 
-    required_dim_keys = ["问题质量", "答案合规与准确性", "时效性", "实际解决力", "非冗余与相关性", "多媒体加分"]
-    for key in required_dim_keys:
+    dimension_limits = {
+        "问题质量": 10,
+        "答案合规与准确性": 30,
+        "时效性": 20,
+        "实际解决力": 30,
+        "非冗余与相关性": 10,
+        "多媒体加分": 10,
+    }
+    for key, maximum in dimension_limits.items():
         if key not in dims:
             raise ValueError(f"model response missing score field: 维度得分.{key}")
         try:
             dims[key] = int(dims[key])
         except (TypeError, ValueError):
             raise ValueError(f"model response score field is not int: 维度得分.{key}")
+        if not 0 <= dims[key] <= maximum:
+            raise ValueError(f"model response score field out of range: 维度得分.{key}")
 
+    expected_total = sum(dims[key] for key in dimension_limits)
     if "总分" not in result:
-        result["总分"] = sum(dims.get(k, 0) for k in required_dim_keys)
+        result["总分"] = expected_total
     try:
         result["总分"] = int(result["总分"])
     except (TypeError, ValueError):
         raise ValueError("model response score field is not int: 总分")
+    if result["总分"] != expected_total:
+        raise ValueError("model response total does not equal dimension sum")
 
     result["分析过程"] = str(result.get("分析过程") or "")
     suggestion = str(result.get("处理建议") or "").strip()
@@ -476,7 +488,10 @@ def calculate_product_overlap(all_items):
                 other_products = group.loc[other_idx, 'product_set']
                 
                 # 覆盖机型完全一致 / 完全包含 才算重叠
-                if current_products.issubset(other_products) or other_products.issubset(current_products):
+                if current_products and other_products and (
+                    current_products.issubset(other_products)
+                    or other_products.issubset(current_products)
+                ):
                     overlap_found += 1
             
             # Use 'id' or 'kb_id' as key
@@ -548,11 +563,7 @@ class LLMScorer:
         update_time = item.get('update_time') or item.get('updated_at') or '2025-01-01'
         
         # Calculate months diff
-        current_date = datetime.now().strftime("%Y-%m-%d") # Use today as baseline or fixed?
-        # User prompt says 2026-02-01 as baseline. Let's stick to the prompt's recommendation for consistency
-        # Or use current real date? The prompt template has a placeholder.
-        # Let's use the one passed in prompt or default.
-        baseline_date = "2026-02-01" 
+        baseline_date = datetime.now().strftime("%Y-%m-%d")
         months_diff = calculate_months_diff(str(update_time), baseline_date)
 
         user_content = USER_PROMPT_TEMPLATE.format(

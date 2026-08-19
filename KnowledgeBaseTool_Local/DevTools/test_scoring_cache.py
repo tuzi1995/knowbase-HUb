@@ -23,8 +23,12 @@ from server import app
 class TestScoringCache(unittest.TestCase):
     def setUp(self):
         app.config['TESTING'] = True
+        self.previous_login_disabled = app.config.get('LOGIN_DISABLED', False)
         app.config['LOGIN_DISABLED'] = True
         self.client = app.test_client()
+
+    def tearDown(self):
+        app.config['LOGIN_DISABLED'] = self.previous_login_disabled
         
     @patch('server.get_supabase_client')
     def test_clear_cache(self, mock_get_client):
@@ -36,17 +40,25 @@ class TestScoringCache(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_supabase.delete.return_value = mock_response
+        count_response = MagicMock()
+        count_response.status_code = 200
+        count_response.headers = {'Content-Range': '*/0'}
+        count_response.json.return_value = []
+        mock_supabase.select.return_value = count_response
+        mock_supabase.select_all.return_value = []
         
         # Call endpoint
-        response = self.client.post('/api/scoring/clear_cache')
+        response = self.client.post('/api/scoring/clear_cache', json={
+            'confirm_clear': True,
+            'expected_count': 0,
+        })
         
         # Assertions
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json, {'success': True})
+        self.assertTrue(response.json['success'])
+        self.assertEqual(response.json['deleted'], 0)
         
-        # Verify delete was called with correct args
-        # delete('kb_scores', {'id': 'gt.0'})
-        mock_supabase.delete.assert_called_once_with('kb_scores', {'id': 'gt.0'})
+        mock_supabase.delete.assert_called_once_with('kb_scores', {'id': 'not.is.null'})
         print("Clear Cache Test Passed")
 
     @patch('server.get_supabase_client')
@@ -149,6 +161,9 @@ class TestScoringCache(unittest.TestCase):
             [{'question_wiki_id': test_kb_id, 'question': 'q', 'answer': 'a'}] # KB item found
         ]
         mock_supabase.select_all.return_value = []
+        mock_upsert_response = MagicMock()
+        mock_upsert_response.status_code = 200
+        mock_supabase.upsert.return_value = mock_upsert_response
         
         # Call endpoint with use_cache=False
         response = self.client.post('/api/scoring/evaluate', json={

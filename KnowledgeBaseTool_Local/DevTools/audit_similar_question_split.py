@@ -31,7 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(os.path.dirname(HERE), 'supabase_config_local.json')
 OUT_CSV = os.path.join(HERE, 'similar_question_audit.csv')
 
-TABLES = ['knowledge_base_v1', 'knowledge_base_v1_t1']
+TABLES = ['knowledge_base_v1']
 
 # 句中续接词：若后段以这些词开头，说明它更可能是上一句的延续而非独立相似问
 CONT_PREFIXES = ('请', '并', '或', '检查', '确认', '然后', '再', '将', '把', '需', '可')

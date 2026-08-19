@@ -150,7 +150,7 @@ class KBBatchUpdateApiTests(unittest.TestCase):
         self.models_patch.stop()
         self.client_patch.stop()
 
-    def test_applies_list_set_and_tag_rules_with_per_item_audit(self):
+    def test_applies_list_set_and_tag_rules_with_tag_audit_field(self):
         response = self.client.post('/api/kb/batch-update', json={
             'table': 'knowledge_base_v1',
             'ids': ['KB-001', 'KB-002'],
@@ -200,7 +200,38 @@ class KBBatchUpdateApiTests(unittest.TestCase):
         self.assertIn('kb_tags', changed_fields)
         self.assertIn('question_type', changed_fields)
 
-    def test_skips_noop_and_rejects_unsupported_or_previous_library_writes(self):
+    def test_tag_only_batch_update_saves_tags_with_modification_record(self):
+        before_update_time = self.remote.tables['knowledge_base_v1'][0]['update_time']
+        response = self.client.post('/api/kb/batch-update', json={
+            'ids': ['KB-001'],
+            'operations': [{'field': 'kb_tags', 'mode': 'add', 'values': ['标签调整']}],
+        })
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        payload = response.get_json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['count'], 1)
+        self.assertEqual(payload['applied_ids'], ['KB-001'])
+        self.assertEqual(payload['skipped_ids'], [])
+        self.assertTrue(payload['mod_log_ok'])
+        modifications = self.remote.tables['knowledge_base_modifications']
+        self.assertEqual(len(modifications), 1)
+        change_meta = json.loads(modifications[0]['change_meta'])
+        self.assertEqual(change_meta['changed_fields'], ['kb_tags'])
+        self.assertEqual(change_meta['before']['kb_tags'], ['维护'])
+        self.assertEqual(change_meta['after']['kb_tags'], ['维护', '标签调整'])
+        self.assertEqual(self.remote.tables['knowledge_base_v1'][0]['review_status'], 'unadjusted')
+        self.assertEqual(self.remote.tables['knowledge_base_v1'][0]['update_time'], before_update_time)
+
+        tag_names = {row['id']: row['name'] for row in self.remote.tables['kb_tags']}
+        saved_tags = {
+            tag_names[row['tag_id']]
+            for row in self.remote.tables['kb_item_tags']
+            if row['question_wiki_id'] == 'KB-001'
+        }
+        self.assertEqual(saved_tags, {'维护', '标签调整'})
+
+    def test_skips_noop_and_rejects_unsupported_or_non_v1_writes(self):
         no_change = self.client.post('/api/kb/batch-update', json={
             'ids': ['KB-001'],
             'operations': [{'field': 'keyword_list', 'mode': 'add', 'values': ['清洁']}],
@@ -223,7 +254,50 @@ class KBBatchUpdateApiTests(unittest.TestCase):
             'operations': [{'field': 'question_type', 'value': '售后'}],
         })
         self.assertEqual(previous_rejected.status_code, 400)
-        self.assertIn('前刻库仅用于对比', previous_rejected.get_json()['message'])
+        self.assertIn('只支持 V1', previous_rejected.get_json()['message'])
+
+    def test_non_v1_library_is_rejected_across_public_entry_points(self):
+        legacy_table = 'knowledge_base_v1_t1'
+        cases = [
+            self.client.get(f'/api/kb/data?table={legacy_table}'),
+            self.client.get(f'/api/kb/data_v2?table={legacy_table}'),
+            self.client.get(f'/api/kb/item?table={legacy_table}&id=KB-001'),
+            self.client.get(f'/api/kb/export?table={legacy_table}'),
+            self.client.get(f'/api/kb/duplicate-check/index/status?library={legacy_table}'),
+            self.client.get(f'/api/smart_mapping/kb/search?table={legacy_table}&q=test'),
+        ]
+
+        for response in cases:
+            with self.subTest(path=response.request.path):
+                self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+                self.assertFalse(response.get_json()['success'])
+
+    def test_retired_sync_route_is_absent(self):
+        registered_paths = {rule.rule for rule in server.app.url_map.iter_rules()}
+        self.assertNotIn('/api/kb/sync', registered_paths)
+
+        response = self.client.post('/api/kb/sync')
+        self.assertIn(response.status_code, (404, 405))
+
+    def test_restore_table_rows_replaces_partial_v1_data(self):
+        backup_rows = [
+            {'question_wiki_id': 'KB-BACKUP-1', 'question': 'Q1', 'answer': 'A1'},
+            {'question_wiki_id': 'KB-BACKUP-2', 'question': 'Q2', 'answer': 'A2'},
+        ]
+        self.remote.tables['knowledge_base_v1'] = [
+            {'question_wiki_id': 'KB-PARTIAL', 'question': 'partial', 'answer': 'partial'},
+        ]
+
+        result = server._restore_table_rows(
+            self.remote,
+            'knowledge_base_v1',
+            backup_rows,
+            conflict_col='question_wiki_id',
+        )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['count'], 2)
+        self.assertEqual(self.remote.tables['knowledge_base_v1'], backup_rows)
 
 
 if __name__ == '__main__':

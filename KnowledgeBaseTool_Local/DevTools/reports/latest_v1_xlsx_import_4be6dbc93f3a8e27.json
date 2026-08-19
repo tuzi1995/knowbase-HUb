@@ -1,0 +1,33 @@
+{
+  "summary": {
+    "xlsx": "/Users/guoying/Downloads/最新KB（合并机型）导出_20260818_100044.xlsx",
+    "sha256": "4be6dbc93f3a8e27e6c492c7a7a91b4c2808bbb8cf49bdba031071c0fddd7dda",
+    "headers": [
+      "update_time",
+      "问题编号",
+      "问题",
+      "问题类型",
+      "答案",
+      "答案类型",
+      "错误列表",
+      "关键词",
+      "相似提问",
+      "bm25",
+      "机型",
+      "图片链接",
+      "视频链接",
+      "文件链接",
+      "跳转链接类型",
+      "跳转链接（url/key）"
+    ],
+    "incoming_rows": 6076,
+    "current_v1_rows": 6076,
+    "insert_rows": 0,
+    "update_rows": 0,
+    "db_only_rows_kept": 0,
+    "changed_field_counts": {},
+    "operation_id": "full_import_4be6dbc93f3a8e27",
+    "applied": false
+  },
+  "rows": []
+}

@@ -57,7 +57,7 @@ BEGIN
     END IF;
 END $$;
 
--- Update KB schema: split urls and remove answer_info (knowledge_base_v1 + knowledge_base_v1_t1)
+-- Update KB schema: split urls and remove answer_info (knowledge_base_v1)
 ALTER TABLE IF EXISTS knowledge_base_v1
     ADD COLUMN IF NOT EXISTS image_urls JSONB,
     ADD COLUMN IF NOT EXISTS video_urls JSONB,
@@ -66,16 +66,5 @@ ALTER TABLE IF EXISTS knowledge_base_v1
     ADD COLUMN IF NOT EXISTS link_url TEXT;
 
 ALTER TABLE IF EXISTS knowledge_base_v1
-    DROP COLUMN IF EXISTS answer_info,
-    DROP COLUMN IF EXISTS urls;
-
-ALTER TABLE IF EXISTS knowledge_base_v1_t1
-    ADD COLUMN IF NOT EXISTS image_urls JSONB,
-    ADD COLUMN IF NOT EXISTS video_urls JSONB,
-    ADD COLUMN IF NOT EXISTS file_urls JSONB,
-    ADD COLUMN IF NOT EXISTS link_type TEXT,
-    ADD COLUMN IF NOT EXISTS link_url TEXT;
-
-ALTER TABLE IF EXISTS knowledge_base_v1_t1
     DROP COLUMN IF EXISTS answer_info,
     DROP COLUMN IF EXISTS urls;

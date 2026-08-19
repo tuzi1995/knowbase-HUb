@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from runtime_safety import is_test_process, validate_test_sqlite_path
 
 
 NODE_TYPES = {"knowledge", "product_model", "product_category", "topic"}
@@ -390,6 +391,8 @@ def _source_snapshot(source: dict[str, Any]) -> dict[str, Any]:
 
 
 def connect_sqlite(database_path: str | Path) -> sqlite3.Connection:
+    if is_test_process():
+        database_path = validate_test_sqlite_path(database_path, Path(__file__).resolve().parent)
     connection = sqlite3.connect(str(database_path))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")

@@ -3,11 +3,14 @@ import json
 import re
 import hmac
 import ipaddress
+import secrets
+import socket
 import base64
 import email as email_parser
 import imaplib
 import pandas as pd
 import requests
+import urllib3
 import traceback
 import uuid
 import hashlib
@@ -26,7 +29,8 @@ from collections import Counter, OrderedDict
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlparse
+from types import SimpleNamespace
+from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify, send_from_directory, send_file, Response, stream_with_context
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func, or_, desc, asc, case, text
@@ -38,14 +42,39 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from scoring_logic import LLMScorer, calculate_product_overlap, load_scoring_config, save_scoring_config, load_ai_config, save_ai_config
+from clone_difference_rules import (
+    difference_feature_terms,
+    merge_difference_rules,
+    normalize_detection_methods,
+    parse_manual_difference_text,
+    validate_ai_difference_rules,
+)
 from matrix_submit_validation import validate_submit_changes
-from parameter_check import register_parameter_check_routes
+from parameter_check import (
+    NUMERIC_CLAIM_RULES,
+    _unique_normalized_numeric_value,
+    connect_main_database,
+    fetch_catalog_snapshot,
+    refresh_model_bindings,
+    run_current_knowledge_parameter_comparison,
+    store_snapshot,
+    normalize_model_name,
+    register_parameter_check_routes,
+)
 from knowledge_graph import (
     init_knowledge_graph_schema,
     invalidate_relationships_for_source_change,
     register_knowledge_graph_routes,
 )
 from kb_v1_sync import SYNC_FIELDS, create_import_snapshot, get_snapshot, get_sync_event, update_event_status
+from runtime_safety import (
+    assert_external_write_allowed as _shared_assert_external_write_allowed,
+    env_flag as _shared_env_flag,
+    is_temporary_path as _shared_is_temporary_path,
+    path_is_within as _shared_path_is_within,
+    is_test_process as _shared_is_test_process,
+    resolve_test_sqlite_path as _shared_resolve_test_sqlite_path,
+)
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 try:
@@ -72,6 +101,94 @@ except ImportError:
     HAS_PSYCOPG2 = False
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _env_flag(name):
+    return _shared_env_flag(name)
+
+
+def _is_test_process():
+    return _shared_is_test_process()
+
+
+def _path_is_within(path, directory):
+    return _shared_path_is_within(path, directory)
+
+
+def _is_temporary_path(path):
+    return _shared_is_temporary_path(path)
+
+
+def _resolve_sqlite_database_path():
+    instance_dir = os.path.join(_BASE_DIR, 'instance')
+    configured = str(os.environ.get('KMATRIX_SQLITE_PATH') or '').strip()
+    if not _is_test_process():
+        return configured or os.path.join(instance_dir, 'data.db')
+
+    return _shared_resolve_test_sqlite_path(_BASE_DIR, configured)
+
+
+def _assert_external_write_allowed(operation):
+    return _shared_assert_external_write_allowed(operation)
+
+# Clone progress is process-local because it is short-lived UI feedback for a
+# single request. The operation id still makes retries idempotent.
+_MATRIX_CLONE_PROGRESS = {}
+_MATRIX_CLONE_PROGRESS_LOCK = threading.Lock()
+_MATRIX_CLONE_SCAN_BATCHES = set()
+_MATRIX_CLONE_SCAN_BATCHES_LOCK = threading.Lock()
+
+
+def _claim_matrix_clone_scan(batch_id):
+    batch_id = str(batch_id or '').strip()
+    if not batch_id:
+        return False
+    with _MATRIX_CLONE_SCAN_BATCHES_LOCK:
+        if batch_id in _MATRIX_CLONE_SCAN_BATCHES:
+            return False
+        _MATRIX_CLONE_SCAN_BATCHES.add(batch_id)
+    return True
+
+
+def _release_matrix_clone_scan(batch_id):
+    with _MATRIX_CLONE_SCAN_BATCHES_LOCK:
+        _MATRIX_CLONE_SCAN_BATCHES.discard(str(batch_id or '').strip())
+
+
+def _matrix_clone_scan_is_active(batch):
+    if not batch or batch.status != 'scanning':
+        return False
+    with _MATRIX_CLONE_SCAN_BATCHES_LOCK:
+        return batch.batch_id in _MATRIX_CLONE_SCAN_BATCHES
+
+
+def _set_matrix_clone_progress(operation_id, *, status='running', phase='准备中', completed=0,
+                               total=0, detail='', error_message=''):
+    operation_id = str(operation_id or '').strip()
+    if not operation_id:
+        return
+    with _MATRIX_CLONE_PROGRESS_LOCK:
+        current = _MATRIX_CLONE_PROGRESS.get(operation_id, {})
+        _MATRIX_CLONE_PROGRESS[operation_id] = {
+            'operation_id': operation_id,
+            'status': status,
+            'phase': phase,
+            'completed': max(0, int(completed or 0)),
+            'total': max(0, int(total or 0)),
+            'detail': str(detail or ''),
+            'error_message': str(error_message or ''),
+            'started_at': current.get('started_at') or time.time(),
+            'updated_at': time.time(),
+        }
+
+
+def _get_matrix_clone_progress(operation_id):
+    operation_id = str(operation_id or '').strip()
+    with _MATRIX_CLONE_PROGRESS_LOCK:
+        progress = dict(_MATRIX_CLONE_PROGRESS.get(operation_id) or {})
+    if progress:
+        progress['elapsed_seconds'] = max(0, int(time.time() - progress['started_at']))
+    return progress
 _INSTANCE_DIR = os.path.join(_BASE_DIR, 'instance')
 app = Flask(
     __name__,
@@ -81,6 +198,52 @@ app = Flask(
 )
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 app.config['SESSION_COOKIE_NAME'] = os.environ.get('KMATRIX_SESSION_COOKIE_NAME', 'kmatrix_8085_session')
+
+
+def _resolve_secret_key():
+    """Return a configured session key, or create a local persistent one.
+
+    A generated key keeps local deployments usable while avoiding the insecure
+    process-wide default that used to sign every installation's sessions with
+    the same value.  The file is intentionally kept under ``instance`` and
+    created with owner-only permissions.
+    """
+    configured = str(os.environ.get('KMATRIX_SECRET_KEY') or '').strip()
+    if configured:
+        return configured
+
+    if _is_test_process():
+        key_dir = os.path.join(tempfile.gettempdir(), f'kmatrix-tests-{os.getpid()}')
+    else:
+        key_dir = _INSTANCE_DIR
+    key_path = str(os.environ.get('KMATRIX_SECRET_KEY_FILE') or '').strip()
+    if not key_path:
+        key_path = os.path.join(key_dir, 'secret_key')
+    elif not os.path.isabs(key_path):
+        key_path = os.path.join(_BASE_DIR, key_path)
+
+    try:
+        with open(key_path, 'r', encoding='utf-8') as handle:
+            value = handle.read().strip()
+        if len(value) >= 32:
+            return value
+    except OSError:
+        pass
+
+    value = secrets.token_urlsafe(48)
+    os.makedirs(os.path.dirname(key_path) or '.', exist_ok=True)
+    try:
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(value + '\n')
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        # Read-only package deployments still get a strong per-process key.
+        return value
+    return value
 
 
 def _normalize_http_origin(value):
@@ -171,10 +334,150 @@ def _get_cors_allowed_origins():
     return list(OrderedDict.fromkeys(default_origins + env_origins))
 
 CORS(app, supports_credentials=True, origins=_get_cors_allowed_origins())
-app.config['SECRET_KEY'] = os.environ.get('KMATRIX_SECRET_KEY', 'dev-only-change-me')
-_DB_PATH = os.path.join(_INSTANCE_DIR, 'data.db')
-_KB_V1_SYNC_ARTIFACT_DIR = os.path.join(_INSTANCE_DIR, 'kb_v1_sync_snapshots')
+app.config['SECRET_KEY'] = _resolve_secret_key()
+_DB_PATH = _resolve_sqlite_database_path()
+_KB_V1_SYNC_ARTIFACT_DIR = os.path.join(
+    os.path.dirname(_DB_PATH) if _is_test_process() else _INSTANCE_DIR,
+    'kb_v1_sync_snapshots',
+)
 BADCASE_WORKBENCH_SOURCE = 'badcase标注工作台'
+
+# Cross-module data contract.  The display label is intentionally kept out of
+# persistence and filtering logic so copy changes cannot invalidate audits.
+SOURCE_CODE_LABELS = {
+    'knowledge_base': '知识库管理',
+    'product_matrix': '机型矩阵管理',
+    'new_product_entry': '新品录入',
+    'full_import': '全量导入',
+    'system_migration': '系统迁移',
+}
+SOURCE_CODE_BY_LEGACY_LABEL = {label: code for code, label in SOURCE_CODE_LABELS.items()}
+
+
+def _normalize_source_code(value, default='knowledge_base'):
+    raw = str(value or '').strip()
+    if raw in SOURCE_CODE_LABELS:
+        return raw
+    if raw in SOURCE_CODE_BY_LEGACY_LABEL:
+        return SOURCE_CODE_BY_LEGACY_LABEL[raw]
+    # Existing callers may still send the older badcase source label.  Keep it
+    # auditable while assigning it to the regular KB workflow.
+    return default if default in SOURCE_CODE_LABELS else 'knowledge_base'
+
+
+def _source_display_name(value):
+    code = _normalize_source_code(value)
+    return SOURCE_CODE_LABELS.get(code, SOURCE_CODE_LABELS['knowledge_base'])
+
+
+def _normalize_product_names_for_current(value):
+    """Return a stable, duplicate-free product list for knowledge_base_v1."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        text_value = str(value).strip()
+        if text_value.startswith('[') and text_value.endswith(']'):
+            try:
+                parsed = json.loads(text_value)
+                raw_values = parsed if isinstance(parsed, list) else [text_value]
+            except Exception:
+                raw_values = re.split(r'[,，\n]+', text_value)
+        else:
+            raw_values = re.split(r'[,，\n]+', text_value)
+    seen = set()
+    result = []
+    for item in raw_values:
+        name = re.sub(r'\s+', ' ', str(item or '').replace('\u3000', ' ')).strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    return sorted(result, key=lambda item: (item.casefold(), item))
+
+
+def _modification_status_from_rows(rows):
+    """Derive handling status only from currently unarchived events."""
+    active = [row for row in (rows or []) if isinstance(row, dict) and not row.get('archived_at')]
+    if not active:
+        return {'status': 'unadjusted', 'pending_activity': None}
+    active.sort(key=lambda row: str(row.get('modification_time') or ''), reverse=True)
+    latest = active[0]
+    source_code = _normalize_source_code(latest.get('source_code') or latest.get('source_module') or latest.get('change_meta'))
+    return {
+        'status': 'adjusted',
+        'pending_activity': {
+            'modification_time': latest.get('modification_time'),
+            'source_code': source_code,
+            'source': SOURCE_CODE_LABELS[source_code],
+        },
+    }
+
+
+def _atomic_update_kb_current(client, wiki_id, update_data, base_version=None):
+    """Update one V1 row with a database-level content_version predicate."""
+    wiki_id = str(wiki_id or '').strip()
+    if not wiki_id:
+        return {'ok': False, 'code': 'invalid_id', 'message': 'question_wiki_id 不能为空'}
+    current = None
+    try:
+        current_rows = client.select_all(
+            'knowledge_base_v1',
+            filters={'question_wiki_id': f'eq.{wiki_id}'},
+            columns='question_wiki_id,content_version,product_name,update_time',
+            order_by='question_wiki_id',
+            page_size=1,
+        ) or []
+        current = current_rows[0] if current_rows and isinstance(current_rows[0], dict) else None
+    except Exception as exc:
+        return {'ok': False, 'code': 'read_failed', 'message': str(exc)}
+    if not current:
+        return {'ok': False, 'code': 'not_found', 'message': f'未找到知识 {wiki_id}'}
+    try:
+        server_version = int(current.get('content_version') or 1)
+    except (TypeError, ValueError):
+        server_version = 1
+    try:
+        expected_version = int(base_version) if base_version is not None else server_version
+    except (TypeError, ValueError):
+        expected_version = server_version
+    if expected_version != server_version:
+        return {
+            'ok': False,
+            'code': 'conflict',
+            'server': current,
+            'base_version': expected_version,
+            'server_version': server_version,
+        }
+    payload = dict(update_data or {})
+    payload['content_version'] = server_version + 1
+    response = client.update('knowledge_base_v1', payload, {
+        'question_wiki_id': f'eq.{wiki_id}',
+        'content_version': f'eq.{server_version}',
+    })
+    if response is None or getattr(response, 'status_code', 500) >= 400:
+        return {'ok': False, 'code': 'write_failed', 'message': getattr(response, 'text', '') or '知识库更新失败'}
+    # A second read distinguishes a successful conditional update from a
+    # zero-row update when PostgREST returns an empty 204 response.
+    try:
+        after_rows = client.select_all(
+            'knowledge_base_v1',
+            filters={'question_wiki_id': f'eq.{wiki_id}'},
+            columns='question_wiki_id,content_version,product_name,update_time',
+            order_by='question_wiki_id',
+            page_size=1,
+        ) or []
+        after = after_rows[0] if after_rows and isinstance(after_rows[0], dict) else {}
+        after_version = int(after.get('content_version') or 0)
+        if after_version != server_version + 1:
+            return {'ok': False, 'code': 'conflict', 'server': after, 'base_version': server_version, 'server_version': after_version}
+    except Exception:
+        after = {}
+    return {'ok': True, 'before': current, 'after': after or dict(current, **payload), 'submitted_version': server_version + 1}
 os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)  # Ensure SQLite folder exists
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + _DB_PATH.replace('\\', '/')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -396,6 +699,87 @@ class ProductMatrix(db.Model):
         db.UniqueConstraint('question_wiki_id', 'product_name', name='unique_matrix_item'),
     )
 
+
+class MatrixCloneReviewBatch(db.Model):
+    __tablename__ = 'matrix_clone_review_batch'
+    batch_id = db.Column(db.String(36), primary_key=True)
+    operation_id = db.Column(db.String(80), unique=True, nullable=False, index=True)
+    source_mode = db.Column(db.String(20), nullable=False)
+    source_value = db.Column(db.String(200), nullable=False)
+    target_models_json = db.Column(db.Text, default='[]')
+    scope_mode = db.Column(db.String(20), default='all')
+    scope_snapshot_json = db.Column(db.Text, default='{}')
+    strategy = db.Column(db.String(20), default='append')
+    status = db.Column(db.String(30), default='created', index=True)
+    detection_methods_json = db.Column(db.Text, default='[]')
+    manual_difference_text = db.Column(db.Text, default='')
+    difference_rules_json = db.Column(db.Text, default='[]')
+    difference_rule_version = db.Column(db.Integer, default=1)
+    ai_parse_status = db.Column(db.String(30), default='not_required')
+    manual_scope_confirmed_by = db.Column(db.String(80))
+    manual_scope_confirmed_at = db.Column(db.DateTime)
+    source_count = db.Column(db.Integer, default=0)
+    item_count = db.Column(db.Integer, default=0)
+    created_by = db.Column(db.String(80), default='')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_by = db.Column(db.String(80))
+    completed_at = db.Column(db.DateTime)
+    submitted_at = db.Column(db.DateTime)
+    error_message = db.Column(db.Text)
+
+
+class MatrixCloneDifferenceRule(db.Model):
+    __tablename__ = 'matrix_clone_difference_rule'
+    rule_id = db.Column(db.String(36), primary_key=True)
+    batch_id = db.Column(db.String(36), nullable=False, index=True)
+    target_model = db.Column(db.String(200), nullable=False)
+    feature_id = db.Column(db.String(120), nullable=False)
+    feature_name = db.Column(db.String(200), default='')
+    source_value = db.Column(db.String(200), default='')
+    target_value = db.Column(db.String(200), default='')
+    difference_type = db.Column(db.String(40), default='comparison_unavailable')
+    evidence_sources_json = db.Column(db.Text, default='[]')
+    source_search_terms_json = db.Column(db.Text, default='[]')
+    target_search_terms_json = db.Column(db.Text, default='[]')
+    kb_intents_json = db.Column(db.Text, default='[]')
+    evidence_quote = db.Column(db.Text, default='')
+    status = db.Column(db.String(30), default='needs_confirmation', index=True)
+    rule_version = db.Column(db.Integer, default=1)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class MatrixCloneReviewItem(db.Model):
+    __tablename__ = 'matrix_clone_review_item'
+    item_id = db.Column(db.String(36), primary_key=True)
+    batch_id = db.Column(db.String(36), nullable=False, index=True)
+    question_wiki_id = db.Column(db.String(100), nullable=False, index=True)
+    target_model = db.Column(db.String(200), nullable=False)
+    source_model = db.Column(db.String(200), nullable=False)
+    knowledge_revision = db.Column(db.String(80), default='')
+    question = db.Column(db.Text, default='')
+    answer = db.Column(db.Text, default='')
+    product_category = db.Column(db.String(200), default='')
+    detection_status = db.Column(db.String(30), default='pending_scan')
+    risk_level = db.Column(db.String(20), default='unknown')
+    suggested_action = db.Column(db.String(30), default='defer')
+    decision = db.Column(db.String(30), default='pending')
+    decision_reason = db.Column(db.Text, default='')
+    difference_rule_ids_json = db.Column(db.Text, default='[]')
+    evidence_sources_json = db.Column(db.Text, default='[]')
+    reuse_candidate_ids_json = db.Column(db.Text, default='[]')
+    ai_impact_review_json = db.Column(db.Text, default='{}')
+    selected_existing_wiki_id = db.Column(db.String(100))
+    apply_status = db.Column(db.String(30), default='not_applied')
+    result_wiki_id = db.Column(db.String(100))
+    decided_by = db.Column(db.String(80))
+    decided_at = db.Column(db.DateTime)
+    applied_at = db.Column(db.DateTime)
+    error_message = db.Column(db.Text)
+
+    __table_args__ = (
+        db.UniqueConstraint('batch_id', 'question_wiki_id', 'target_model', name='uq_clone_review_item'),
+    )
+
 def _matrix_scope_bool(value, default=True):
     if value is None:
         return default
@@ -454,12 +838,7 @@ def _matrix_scope_diff_compare_ids(ids_subq, selected_models):
 def _matrix_scope_modified_ids(ids_subq, columns_list):
     edit_query = db.session.query(ProductMatrix.question_wiki_id).filter(
         ProductMatrix.question_wiki_id.in_(ids_subq)
-    ).filter(
-        or_(
-            ProductMatrix.edit_source.in_(['cell', 'bulk']),
-            ProductMatrix.manual_edit == True
-        )
-    )
+    ).filter(ProductMatrix.edit_source.in_(['cell', 'bulk']))
     wiki_ids_for_edits = [
         str(r[0]).strip()
         for r in edit_query.distinct().all()
@@ -488,10 +867,7 @@ def _matrix_scope_modified_ids(ids_subq, columns_list):
     ])
 
     qy = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(wiki_ids_for_edits)).filter(
-        or_(
-            ProductMatrix.edit_source.in_(['cell', 'bulk']),
-            ProductMatrix.manual_edit == True
-        )
+        ProductMatrix.edit_source.in_(['cell', 'bulk'])
     )
     if columns_list:
         qy = qy.filter(ProductMatrix.product_name.in_(columns_list))
@@ -683,7 +1059,78 @@ def _resolve_matrix_clone_scope_ids(scope, allow_empty_selected=False):
         )
     return scope_mode, scope_ids
 
-def _resolve_matrix_clone_source_items(mode, source, scope_ids=None):
+def _normalize_matrix_clone_exclude_tag_names(value):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError('Excluded tag names must be a list')
+    names = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError('Excluded tag names must contain non-empty strings')
+        name = item.strip()
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    if len(names) > 100:
+        raise ValueError('Too many excluded tag names')
+    return names
+
+
+def _resolve_matrix_clone_excluded_wiki_ids(scope):
+    scope = scope if isinstance(scope, dict) else {}
+    requested_names = _normalize_matrix_clone_exclude_tag_names(scope.get('exclude_tag_names'))
+    if not requested_names:
+        return set(), []
+
+    client = get_supabase_client()
+    if not client:
+        raise ValueError('标签数据源不可用，无法确认克隆排除范围')
+    tag_rows = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
+    tag_by_name = {
+        str(row.get('name')).strip().casefold(): row
+        for row in tag_rows
+        if isinstance(row, dict) and row.get('id') is not None and str(row.get('name') or '').strip()
+    }
+    missing_names = [name for name in requested_names if name.casefold() not in tag_by_name]
+    if missing_names:
+        raise ValueError(f'标签不存在或已删除: {", ".join(missing_names)}')
+
+    canonical_names = [str(tag_by_name[name.casefold()]['name']).strip() for name in requested_names]
+    tag_ids = [tag_by_name[name.casefold()]['id'] for name in requested_names]
+    mappings = client.select_all(
+        'kb_item_tags',
+        filters={
+            'library_type': 'eq.current',
+            'tag_id': _postgrest_in_str(tag_ids),
+        },
+        columns='question_wiki_id,tag_id',
+        order_by='question_wiki_id',
+        page_size=1000,
+    ) or []
+    excluded_ids = {
+        str(row.get('question_wiki_id')).strip()
+        for row in mappings
+        if isinstance(row, dict) and str(row.get('question_wiki_id') or '').strip()
+    }
+    return excluded_ids, canonical_names
+
+
+def _filter_matrix_clone_source_items(source_items, excluded_wiki_ids):
+    excluded = {str(value) for value in (excluded_wiki_ids or set())}
+    if not excluded:
+        return source_items, 0
+    matched_count = len(set(str(wiki_id) for wiki_id in source_items).intersection(excluded))
+    return {
+        wiki_id: item for wiki_id, item in source_items.items()
+        if str(wiki_id) not in excluded
+    }, matched_count
+
+
+def _resolve_matrix_clone_source_items(mode, source, scope_ids=None, excluded_wiki_ids=None):
     source_items = {}
     source_products_to_remove = set()
 
@@ -729,12 +1176,18 @@ def _resolve_matrix_clone_source_items(mode, source, scope_ids=None):
                 exact_ids = exact_query.all()
                 valid_ids = [row[0] for row in exact_ids]
                 if valid_ids:
-                    all_rows = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(valid_ids)).all()
+                    all_rows = ProductMatrix.query.filter(
+                        ProductMatrix.question_wiki_id.in_(valid_ids),
+                        ProductMatrix.is_configured == True,
+                    ).all()
                     for row in all_rows:
                         if row.question_wiki_id not in source_items:
                             source_items[row.question_wiki_id] = row
         else:
-            category_query = ProductMatrix.query.filter(ProductMatrix.product_category == source)
+            category_query = ProductMatrix.query.filter(
+                ProductMatrix.product_category == source,
+                ProductMatrix.is_configured == True,
+            )
             if scope_ids is not None:
                 category_query = category_query.filter(ProductMatrix.question_wiki_id.in_(scope_ids))
             items = category_query.all()
@@ -743,7 +1196,23 @@ def _resolve_matrix_clone_source_items(mode, source, scope_ids=None):
                     source_items[item.question_wiki_id] = item
             source_products_to_remove.update([str(r.product_name) for r in items if r.product_name])
 
+    source_items, _ = _filter_matrix_clone_source_items(source_items, excluded_wiki_ids)
     return source_items, source_products_to_remove
+
+
+def _resolve_matrix_clone_source_scope(mode, source, scope, allow_empty_selected=False):
+    scope_mode, scope_ids = _resolve_matrix_clone_scope_ids(scope, allow_empty_selected=allow_empty_selected)
+    excluded_wiki_ids, canonical_tag_names = _resolve_matrix_clone_excluded_wiki_ids(scope)
+    source_items, source_products_to_remove = _resolve_matrix_clone_source_items(mode, source, scope_ids)
+    source_items, excluded_count = _filter_matrix_clone_source_items(source_items, excluded_wiki_ids)
+    return {
+        'scope_mode': scope_mode,
+        'scope_ids': scope_ids,
+        'source_items': source_items,
+        'source_products_to_remove': source_products_to_remove,
+        'exclude_tag_names': canonical_tag_names,
+        'excluded_count': excluded_count,
+    }
 
 class MatrixSubmitOperation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -1056,12 +1525,53 @@ def init_db():
                 db.session.commit()
         except Exception:
             db.session.rollback()
-        # Create default user if not exists
+        try:
+            cols = db.session.execute(text("PRAGMA table_info(matrix_clone_review_item)")).fetchall()
+            col_names = {row[1] for row in cols}
+            if 'ai_impact_review_json' not in col_names:
+                db.session.execute(text("ALTER TABLE matrix_clone_review_item ADD COLUMN ai_impact_review_json TEXT DEFAULT '{}'"))
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
+        # Bootstrap a user only with an explicit password or a generated
+        # one-time credential.  Never recreate the historical admin/123456
+        # account on a fresh database.
         if not User.query.filter_by(username='admin').first():
-            user = User(username='admin', password_hash=generate_password_hash('123456'))
+            admin_password = str(os.environ.get('KMATRIX_ADMIN_PASSWORD') or '').strip()
+            # Legacy test fixtures intentionally use their documented
+            # credentials; this branch is reachable only for an isolated
+            # test process and never affects a normal deployment.
+            if not admin_password and _is_test_process():
+                admin_password = str(os.environ.get('KMATRIX_TEST_ADMIN_PASSWORD') or '123456')
+            credential_path = os.path.join(
+                os.path.dirname(_DB_PATH) if _is_test_process() else _INSTANCE_DIR,
+                'admin_initial_password.txt',
+            )
+            if not admin_password:
+                admin_password = secrets.token_urlsafe(18)
+                try:
+                    fd = os.open(credential_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                        handle.write(admin_password + '\n')
+                    print(f"Created secure admin bootstrap credential at {credential_path}")
+                except FileExistsError:
+                    # A prior bootstrap file is authoritative when an
+                    # interrupted startup left the database uninitialized.
+                    try:
+                        with open(credential_path, 'r', encoding='utf-8') as handle:
+                            admin_password = handle.read().strip()
+                    except OSError:
+                        pass
+                except OSError:
+                    print("Created secure admin bootstrap credential; set KMATRIX_ADMIN_PASSWORD for repeatable startup")
+            if not admin_password:
+                raise RuntimeError(
+                    'Cannot create admin account without KMATRIX_ADMIN_PASSWORD '
+                    'or a writable bootstrap credential file'
+                )
+            user = User(username='admin', password_hash=generate_password_hash(admin_password))
             db.session.add(user)
             db.session.commit()
-            print("Created default user: admin / 123456")
 
 # Routes
 @app.route('/')
@@ -1379,6 +1889,65 @@ def _detect_link_type_backend(url):
         return 'file'
     return 'link'
 
+
+def _normalize_link_preview_payload(item, *, require_base_fields=True):
+    if not isinstance(item, dict):
+        raise ValueError('链接记录必须是对象')
+
+    normalized = {}
+    if require_base_fields:
+        missing = [field for field in ('id', 'url', 'tags', 'createdAt') if field not in item]
+        if missing:
+            raise ValueError(f"缺少必要字段: {', '.join(missing)}")
+
+    if 'id' in item:
+        link_id = str(item.get('id') or '').strip()
+        if not link_id or len(link_id) > 200 or any(ord(ch) < 32 for ch in link_id):
+            raise ValueError('链接 ID 不合法')
+        normalized['id'] = link_id
+
+    if 'kb_id' in item:
+        kb_id = str(item.get('kb_id') or '').strip()
+        if len(kb_id) > 2000 or any(ord(ch) < 32 for ch in kb_id):
+            raise ValueError('KB ID 不合法')
+        normalized['kb_id'] = kb_id or None
+
+    if 'url' in item:
+        raw_url = str(item.get('url') or '').strip()
+        try:
+            parsed = urlparse(raw_url)
+        except ValueError as exc:
+            raise ValueError('链接 URL 不合法') from exc
+        if (
+            len(raw_url) > 4096
+            or parsed.scheme.lower() not in {'http', 'https'}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError('链接 URL 仅支持不含账号密码的 HTTP/HTTPS 地址')
+        normalized['url'] = raw_url
+        normalized['type'] = _detect_link_type_backend(raw_url)
+
+    if 'tags' in item:
+        tags = item.get('tags')
+        if not isinstance(tags, list):
+            raise ValueError('tags 必须是字符串数组')
+        clean_tags = []
+        for value in tags:
+            tag = str(value or '').strip()
+            if not tag:
+                continue
+            if len(tag) > 100 or any(ord(ch) < 32 for ch in tag):
+                raise ValueError('标签不合法或超过 100 个字符')
+            if tag not in clean_tags:
+                clean_tags.append(tag)
+        normalized['tags'] = clean_tags[:200]
+
+    if 'createdAt' in item:
+        normalized['created_at'] = _dt_to_iso(item.get('createdAt'))
+    return normalized
+
 @app.route('/api/links', methods=['POST'])
 @login_required
 def add_link():
@@ -1387,19 +1956,10 @@ def add_link():
     if not client:
         return jsonify({'success': False, 'message': '本地主库未配置'}), 500
 
-    required_fields = ['id', 'url', 'type', 'tags', 'createdAt']
-    missing_fields = [field for field in required_fields if field not in data]
-    if missing_fields:
-        return jsonify({'success': False, 'message': f"缺少必要字段: {', '.join(missing_fields)}"}), 400
-
-    new_link = {
-        'id': data['id'],
-        'kb_id': data.get('kb_id'),
-        'url': data['url'],
-        'type': data['type'],
-        'tags': data['tags'], # Send as list, requests will dump to JSON
-        'created_at': _dt_to_iso(data['createdAt'])
-    }
+    try:
+        new_link = _normalize_link_preview_payload(data)
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
 
     try:
         resp = client.upsert('link_previews', [new_link], on_conflict='id')
@@ -1430,16 +1990,12 @@ def add_links_batch():
 
     # Ensure all items have required fields
     new_links = []
-    for item in data:
-        new_links.append({
-            'id': item['id'],
-            'kb_id': item.get('kb_id'),
-            'url': item['url'],
-            'type': item['type'],
-            'tags': item['tags'],
-            'created_at': _dt_to_iso(item['createdAt'])
-        })
-    
+    try:
+        for item in data:
+            new_links.append(_normalize_link_preview_payload(item))
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+
     if not new_links:
         return jsonify({'success': True, 'count': 0})
 
@@ -1465,7 +2021,10 @@ def update_link(link_id):
 
     update_data = {}
     if 'tags' in data:
-        update_data['tags'] = data['tags']
+        try:
+            update_data.update(_normalize_link_preview_payload({'tags': data['tags']}, require_base_fields=False))
+        except ValueError as exc:
+            return jsonify({'success': False, 'message': str(exc)}), 400
     
     if not update_data:
         return jsonify({'success': False, 'message': 'No update fields'}), 400
@@ -2072,7 +2631,7 @@ def _build_product_catalog_impact(new_catalog):
     if orphan_models:
         orphan_row_count = ProductMatrix.query.filter(ProductMatrix.product_name.in_(orphan_models)).count()
 
-    return {
+    payload = {
         'removed_models': removed_models,
         'removed_model_count': len(removed_models),
         'matrix_column_count': matrix_column_count,
@@ -2082,6 +2641,7 @@ def _build_product_catalog_impact(new_catalog):
         'orphan_row_count': orphan_row_count,
         'requires_confirmation': bool(removed_models or matrix_column_count or matrix_row_count or orphan_row_count)
     }
+    return payload
 
 def _sync_product_catalog_to_matrix(new_catalog):
     catalog_products = set()
@@ -2322,19 +2882,126 @@ def sample_scoring_data():
     })
 
 
+def _resolve_proxy_target(raw_url):
+    """Validate a proxy target and return the public addresses it resolved to."""
+    value = str(raw_url or '').strip()
+    if not value or len(value) > 2048:
+        return None, [], '无效的 URL'
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme.lower() not in {'http', 'https'} or not parsed.hostname:
+            return None, [], '仅支持 HTTP/HTTPS URL'
+        if parsed.username or parsed.password:
+            return None, [], 'URL 不允许携带账号或密码'
+        port = parsed.port
+        if port is not None and not (1 <= int(port) <= 65535):
+            return None, [], 'URL 端口无效'
+        host = parsed.hostname.rstrip('.').lower()
+        if host in {'localhost', 'localhost.localdomain', 'ip6-localhost'} or host.endswith('.localhost'):
+            return None, [], '禁止访问本机地址'
+        addresses = []
+        try:
+            for item in socket.getaddrinfo(host, port or (443 if parsed.scheme.lower() == 'https' else 80), type=socket.SOCK_STREAM):
+                addresses.append(item[4][0])
+        except (OSError, ValueError):
+            return None, [], '无法解析目标地址'
+        if not addresses:
+            return None, [], '无法解析目标地址'
+        for address in set(addresses):
+            try:
+                ip = ipaddress.ip_address(address)
+            except ValueError:
+                continue
+            if not ip.is_global:
+                return None, [], '禁止访问内网或保留地址'
+        return value, list(dict.fromkeys(addresses)), ''
+    except (TypeError, ValueError):
+        return None, [], '无效的 URL'
+
+
+def _validate_proxy_url(raw_url):
+    value, _addresses, error = _resolve_proxy_target(raw_url)
+    return value, error
+
+
+def _open_pinned_proxy_response(url, addresses, headers):
+    """Open a request to a validated IP while preserving Host and HTTPS SNI."""
+    parsed = urlparse(url)
+    hostname = parsed.hostname.rstrip('.').encode('idna').decode('ascii')
+    scheme = parsed.scheme.lower()
+    port = parsed.port or (443 if scheme == 'https' else 80)
+    default_port = 443 if scheme == 'https' else 80
+    host_header = f'[{hostname}]' if ':' in hostname else hostname
+    if port != default_port:
+        host_header = f'{host_header}:{port}'
+    path = parsed.path or '/'
+    if parsed.params:
+        path += ';' + parsed.params
+    if parsed.query:
+        path += '?' + parsed.query
+
+    request_headers = dict(headers or {})
+    request_headers['Host'] = host_header
+    last_error = None
+    for address in addresses:
+        pool = None
+        try:
+            common = {
+                'host': address,
+                'port': port,
+                'timeout': urllib3.Timeout(connect=10, read=30),
+                'retries': False,
+            }
+            if scheme == 'https':
+                pool = urllib3.HTTPSConnectionPool(
+                    **common,
+                    cert_reqs='CERT_REQUIRED',
+                    ca_certs=requests.certs.where(),
+                    assert_hostname=hostname,
+                    server_hostname=hostname,
+                )
+            else:
+                pool = urllib3.HTTPConnectionPool(**common)
+            raw = pool.urlopen(
+                'GET', path, headers=request_headers, redirect=False,
+                preload_content=False, decode_content=False,
+            )
+            response = requests.Response()
+            response.status_code = raw.status
+            response.headers = raw.headers
+            response.raw = raw
+            response.url = url
+            response._kmatrix_pool = pool
+            return response
+        except (OSError, urllib3.exceptions.HTTPError) as exc:
+            last_error = exc
+            if pool is not None:
+                pool.close()
+    raise RuntimeError('无法连接已校验的目标地址') from last_error
+
+
+def _close_pinned_proxy_response(response):
+    try:
+        response.close()
+    finally:
+        pool = getattr(response, '_kmatrix_pool', None)
+        if pool is not None:
+            pool.close()
+
+
+def _stream_pinned_proxy_response(response):
+    try:
+        yield from response.iter_content(chunk_size=1024 * 128)
+    finally:
+        _close_pinned_proxy_response(response)
+
+
 @app.route('/api/proxy_image')
+@login_required
 def proxy_image():
-    url = request.args.get('url')
+    url, addresses, validation_error = _resolve_proxy_target(request.args.get('url'))
     if not url:
-        return "Missing url parameter", 400
-    
-    # Simple security check to prevent SSRF against localhost/intranet
-    # Allow external URLs only
-    if 'localhost' in url or '127.0.0.1' in url or url.startswith('http://192.') or url.startswith('http://10.'):
-         # Allow only if it's explicitly whitelisted or pass through if you trust the user (Authenticated tool)
-         # For now, let's just log and proceed if it's not critical, or block if needed.
-         # But wait, our client side might be requesting localhost? No, client requests external URLs via proxy.
-         pass
+        return jsonify({'success': False, 'message': validation_error}), 400
 
     try:
         # Stream the request to avoid loading large files into memory
@@ -2348,9 +3015,21 @@ def proxy_image():
         if 'If-Range' in request.headers:
             headers['If-Range'] = request.headers['If-Range']
 
-        # Disable SSL verification for some sites if needed (use with caution)
-        # roborock might have SSL issues or just strict filtering.
-        resp = requests.get(url, headers=headers, stream=True, timeout=30, verify=False)
+        # Do not follow redirects blindly: every hop must pass the same SSRF
+        # checks, and certificate verification must remain enabled.
+        resp = None
+        for _ in range(4):
+            resp = _open_pinned_proxy_response(url, addresses, headers)
+            if resp.status_code not in {301, 302, 303, 307, 308}:
+                break
+            location = resp.headers.get('Location')
+            _close_pinned_proxy_response(resp)
+            redirect_url, addresses, redirect_error = _resolve_proxy_target(urljoin(url, location or ''))
+            if not redirect_url:
+                return jsonify({'success': False, 'message': redirect_error}), 502
+            url = redirect_url
+        else:
+            return jsonify({'success': False, 'message': '代理重定向次数过多'}), 502
         
         # Headers to exclude (Hop-by-hop + Content-Encoding/Length which we might want to control)
         excluded_headers = [
@@ -2382,12 +3061,12 @@ def proxy_image():
 
         from flask import Response, stream_with_context
         # Increase chunk size to 128KB for better video performance
-        return Response(stream_with_context(resp.iter_content(chunk_size=1024*128)), 
+        return Response(stream_with_context(_stream_pinned_proxy_response(resp)),
                         status=resp.status_code,
                         headers=response_headers)
     except Exception as e:
         print(f"Proxy Error for {url}: {e}")
-        return str(e), 500
+        return jsonify({'success': False, 'message': '代理请求失败'}), 502
 
 # Scoring Endpoints
 
@@ -2789,18 +3468,19 @@ def sync_scoring_data():
 @login_required
 def manage_scoring_config():
     if request.method == 'GET':
-        config = load_scoring_config()
-        api_key_value = str(config.get('api_key') or '')
-        config['api_key_configured'] = bool(api_key_value.strip())
-        config['api_key_length'] = len(api_key_value)
-        config['api_key_prefix'] = api_key_value[:8]
-        config['api_key_suffix'] = api_key_value[-6:] if api_key_value else ''
-        config['config_status'] = '已配置' if config['api_key_configured'] else '未配置'
-        return jsonify(config)
+        return jsonify(_public_llm_config(load_scoring_config()))
     
     else:
         new_data = request.json or {}
         config = load_scoring_config()
+
+        # The browser deliberately cannot read the stored key.  Preserve it
+        # when an older client submits an empty field while editing other
+        # settings; clearing requires an explicit ``clear_api_key`` flag.
+        if 'api_key' in new_data and not str(new_data.get('api_key') or '').strip() and not new_data.get('clear_api_key'):
+            new_data = dict(new_data)
+            new_data.pop('api_key', None)
+        new_data.pop('clear_api_key', None)
 
         # Update config with new data
         config.update(new_data)
@@ -2816,26 +3496,40 @@ def manage_scoring_config():
                     'success': False,
                     'message': '配置文件保存后回读不一致: ' + ', '.join(mismatches)
                 }), 500
-            api_key_value = str(saved.get('api_key') or '')
-            saved['api_key_configured'] = bool(api_key_value.strip())
-            saved['api_key_length'] = len(api_key_value)
-            saved['api_key_prefix'] = api_key_value[:8]
-            saved['api_key_suffix'] = api_key_value[-6:] if api_key_value else ''
-            saved['config_status'] = '已配置' if saved['api_key_configured'] else '未配置'
-            return jsonify({'success': True, 'config': saved})
+            return jsonify({'success': True, 'config': _public_llm_config(saved)})
         else:
             return jsonify({'success': False, 'message': 'Failed to save config'}), 500
 
+def _public_llm_config(config):
+    """Return LLM settings safe to send to a browser.
+
+    The API key is intentionally omitted rather than partially masked: a
+    prefix/suffix materially helps an attacker identify or brute-force a key,
+    and the browser does not need the stored value to edit other settings.
+    """
+    source = dict(config or {})
+    api_key_value = str(source.pop('api_key', '') or '')
+    source['api_key_configured'] = bool(api_key_value.strip())
+    source['api_key_length'] = len(api_key_value)
+    source['config_status'] = '已配置' if api_key_value.strip() else '未配置'
+    return source
+
+
+def _redact_secret_text(value, secret):
+    text_value = str(value or '')
+    secret_value = str(secret or '')
+    return text_value.replace(secret_value, '[REDACTED_SECRET]') if secret_value else text_value
+
+
 def _llm_config_meta(api_key, base_url, model):
     api_key_value = str(api_key or '')
-    return {
+    payload = {
         'api_key_configured': bool(api_key_value.strip()),
         'api_key_length': len(api_key_value),
-        'api_key_prefix': api_key_value[:8],
-        'api_key_suffix': api_key_value[-6:] if api_key_value else '',
         'base_url': base_url,
         'model': model,
     }
+    return payload
 
 def _test_llm_connection(data, fallback_config):
     api_key = str(data.get('api_key') if 'api_key' in data else fallback_config.get('api_key') or '').strip()
@@ -2869,7 +3563,11 @@ def _test_llm_connection(data, fallback_config):
         meta['response_preview'] = str(content or '')[:200]
         return {'success': True, 'message': 'API 连接测试成功', 'config': meta}
     except Exception as e:
-        return {'success': False, 'message': str(e), 'config': meta}
+        return {
+            'success': False,
+            'message': _redact_secret_text(str(e), api_key),
+            'config': meta,
+        }
 
 @app.route('/api/scoring/test_config', methods=['POST'])
 @login_required
@@ -2888,17 +3586,15 @@ def manage_ai_config():
     独立的 AI 配置（用于问题/答案润色、相似问题生成等），与评分配置解耦。
     """
     if request.method == 'GET':
-        config = load_ai_config()
-        api_key_value = str(config.get('api_key') or '')
-        config['api_key_configured'] = bool(api_key_value.strip())
-        config['api_key_length'] = len(api_key_value)
-        config['api_key_prefix'] = api_key_value[:8]
-        config['api_key_suffix'] = api_key_value[-6:] if api_key_value else ''
-        config['config_status'] = '已配置' if config['api_key_configured'] else '未配置'
-        return jsonify(config)
+        return jsonify(_public_llm_config(load_ai_config()))
 
     data = request.json or {}
     config = load_ai_config()
+
+    if 'api_key' in data and not str(data.get('api_key') or '').strip() and not data.get('clear_api_key'):
+        data = dict(data)
+        data.pop('api_key', None)
+    data.pop('clear_api_key', None)
 
     if 'ai_prompts' in data and not isinstance(data['ai_prompts'], dict):
         data['ai_prompts'] = {}
@@ -2916,16 +3612,10 @@ def manage_ai_config():
                 'success': False,
                 'message': 'AI配置文件保存后回读不一致: ' + ', '.join(mismatches)
             }), 500
-        api_key_value = str(saved.get('api_key') or '')
-        saved['api_key_configured'] = bool(api_key_value.strip())
-        saved['api_key_length'] = len(api_key_value)
-        saved['api_key_prefix'] = api_key_value[:8]
-        saved['api_key_suffix'] = api_key_value[-6:] if api_key_value else ''
-        saved['config_status'] = '已配置' if saved['api_key_configured'] else '未配置'
         ok, err = _save_ai_prompts_to_prompt_folder(config)
         if ok:
-            return jsonify({'success': True, 'prompt_saved': True, 'config': saved})
-        return jsonify({'success': True, 'prompt_saved': False, 'config': saved, 'message': f'AI配置已保存，但Prompt落盘失败: {err}'})
+            return jsonify({'success': True, 'prompt_saved': True, 'config': _public_llm_config(saved)})
+        return jsonify({'success': True, 'prompt_saved': False, 'config': _public_llm_config(saved), 'message': f'AI配置已保存，但Prompt落盘失败: {err}'})
     else:
         return jsonify({'success': False, 'message': 'Failed to save AI config'}), 500
 
@@ -4204,9 +4894,9 @@ def get_kb_data():
     tag_mode = 'AND' if tag_mode_search == 'AND' else 'OR'
     
     # Security check: only allow specific tables
-    allowed_tables = ['knowledge_base_v1', 'knowledge_base_v1_t1']
+    allowed_tables = ['knowledge_base_v1']
     if table_name not in allowed_tables:
-        return jsonify([])
+        return jsonify({'success': False, 'message': 'Invalid table'}), 400
     
     # Determine sort column
     sort_by_raw = str(request.args.get('sortBy') or '').strip()
@@ -4218,9 +4908,6 @@ def get_kb_data():
         'product_category_name', 'question_type', 'answer_type', 'if_bm25',
         'update_time'
     }
-    if table_name == 'knowledge_base_v1_t1':
-        allowed_sort_by.discard('review_status')
-
     sort_by = sort_by_raw if sort_by_raw in allowed_sort_by else (
         'question_wiki_id' if 'knowledge_base_v1' in table_name else 'id'
     )
@@ -4231,7 +4918,8 @@ def get_kb_data():
         kb_columns = (
             'question_wiki_id,review_status,question,answer,product_name,product_category_name,'
             'question_type,answer_type,similar_questions,if_bm25,error_list,keyword_list,'
-            'image_urls,video_urls,file_urls,link_type,link_url,update_time'
+            'image_urls,video_urls,file_urls,link_type,link_url,update_time,content_version,'
+            'content_lifecycle_status'
         )
 
     # Build filters
@@ -4340,8 +5028,7 @@ def get_kb_data():
 
     # Tag filter (kb tags): restrict by matching item tags
     if tag_names_search and not ids:
-        # For current/previous library, kb_item_tags.library_type maps to table_name
-        library_type = 'current' if table_name == 'knowledge_base_v1' else 'previous'
+        library_type = 'current'
 
         # Parse tag names: allow comma / chinese comma / newline
         raw = str(tag_names_search)
@@ -4498,7 +5185,7 @@ def get_kb_data():
 
             # Attach KB item tags for table rendering (方案A：把标签回填到 kb_tags 字段)
             try:
-                library_type = 'current' if table_name == 'knowledge_base_v1' else 'previous'
+                library_type = 'current'
                 wiki_ids = [
                     str(r.get('question_wiki_id')).strip()
                     for r in (data_out or [])
@@ -4603,7 +5290,7 @@ def get_kb_data():
             
             # Attach KB item tags for table rendering
             try:
-                library_type = 'current' if table_name == 'knowledge_base_v1' else 'previous'
+                library_type = 'current'
                 wiki_ids = [
                     str(r.get('question_wiki_id')).strip()
                     for r in (rows or [])
@@ -4758,6 +5445,10 @@ def _attach_change_meta(record, meta):
         # 同时设置 source_module 字段（从 meta 中的 source 提取）
         if 'source' in meta:
             record['source_module'] = meta['source']
+            record['source_code'] = _normalize_source_code(meta.get('source_code') or meta.get('source'))
+        for field in ('operation_id', 'base_version', 'submitted_version', 'conflict_resolution', 'archived_at', 'archive_batch_id'):
+            if field in meta and meta.get(field) is not None:
+                record[field] = meta.get(field)
         
         return record
     except Exception:
@@ -4784,6 +5475,13 @@ def _resolve_kb_change_source(payload):
     if _request_from_port(8083):
         return BADCASE_WORKBENCH_SOURCE
     return '知识库管理'
+
+
+def _resolve_kb_source_code(payload=None, source_label=None):
+    """Normalize a source to the stable code required by the data contract."""
+    payload = payload if isinstance(payload, dict) else {}
+    value = payload.get('source_code') or source_label or payload.get('change_source') or payload.get('source_module')
+    return _normalize_source_code(value)
 
 def _convert_array_fields_to_json(record_or_records):
     """
@@ -4863,6 +5561,7 @@ def _build_kb_modification_record(source, modifier, change_type, kb_id, before_o
     if kb_id:
         rec['question_wiki_id'] = kb_id
     rec['modifier'] = modifier
+    rec['source_code'] = _resolve_kb_source_code({}, source)
     rec['modification_time'] = _now_iso_with_tz()
     rec['change_type'] = change_type
     rec.pop('id', None)
@@ -5094,7 +5793,17 @@ def _normalize_mod_diff_value(v):
             return cleaned
         if isinstance(v, dict):
             return v
-        return str(v).strip()
+        text = str(v).strip()
+        if not text or text.lower() == 'null':
+            return None
+        if text[:1] in ('[', '{', '"'):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, (list, dict)) or (isinstance(parsed, str) and parsed != text):
+                    return _normalize_mod_diff_value(parsed)
+            except Exception:
+                pass
+        return text
     except Exception:
         return v
 
@@ -5472,6 +6181,49 @@ def _kb_batch_replace_tags(client, tags_by_id):
         if response is not None and getattr(response, 'status_code', 500) >= 400:
             raise RuntimeError(getattr(response, 'text', '保存标签关联失败'))
 
+
+def _kb_batch_rollback_content_and_tags(client, before_rows, content_ids, tag_ids, operation_time):
+    """Best-effort compensation for a failed remote batch update.
+
+    Supabase/PostgREST does not expose a transaction spanning multiple HTTP
+    requests.  Restore only rows carrying this operation's timestamp so a
+    concurrent edit is not overwritten silently; tag mappings are restored
+    from the request snapshot and any failures are reported to the caller.
+    """
+    failures = []
+    for wiki_id in content_ids:
+        before = before_rows.get(wiki_id) or {}
+        rollback_data = {
+            field: before.get(field)
+            for field in _kb_all_fields_allowlist()
+            if field in before and field not in ('question_wiki_id', 'review_status', 'update_time', 'kb_tags')
+        }
+        rollback_data['review_status'] = before.get('review_status')
+        rollback_data['update_time'] = before.get('update_time')
+        try:
+            response = client.update(
+                'knowledge_base_v1',
+                rollback_data,
+                {
+                    'question_wiki_id': f'eq.{wiki_id}',
+                    'update_time': f'eq.{operation_time}',
+                },
+            )
+            if response is None or getattr(response, 'status_code', 500) >= 400:
+                failures.append(f'{wiki_id}:内容回滚失败')
+        except Exception as exc:
+            failures.append(f'{wiki_id}:内容回滚异常 {exc}')
+
+    if tag_ids:
+        try:
+            _kb_batch_replace_tags(
+                client,
+                {wiki_id: (before_rows.get(wiki_id) or {}).get('kb_tags') or [] for wiki_id in tag_ids},
+            )
+        except Exception as exc:
+            failures.append(f'标签回滚异常: {exc}')
+    return failures
+
 def _is_blank_cell_value(value):
     if value is None:
         return True
@@ -5670,13 +6422,20 @@ def _normalize_mod_record(row):
     if not isinstance(row, dict):
         return None
     meta = _extract_change_meta(row.get('change_meta')) or {}
-    src = (meta.get('source') if isinstance(meta, dict) else None) or _extract_change_source_from_change_meta(row.get('change_meta')) or '知识库管理'
+    src = (row.get('source_module') or (meta.get('source') if isinstance(meta, dict) else None)
+           or _extract_change_source_from_change_meta(row.get('change_meta')) or '知识库管理')
+    if str(src).strip() in SOURCE_CODE_LABELS:
+        src = SOURCE_CODE_LABELS[str(src).strip()]
+    source_code = (row.get('source_code') or (meta.get('source_code') if isinstance(meta, dict) else None)
+                   or _resolve_kb_source_code({}, src))
     wiki_id = row.get('question_wiki_id') or row.get('kb_id') or ''
     change_type = row.get('change_type') or row.get('modification_type') or 'edit'
     before_obj = meta.get('before') if isinstance(meta, dict) else None
     after_obj = meta.get('after') if isinstance(meta, dict) else None
     changed_fields = meta.get('changed_fields') if isinstance(meta, dict) else None
-    operation_id = meta.get('operation_id') if isinstance(meta, dict) else None
+    operation_id = row.get('operation_id') or (meta.get('operation_id') if isinstance(meta, dict) else None)
+    action_kind = meta.get('action_kind') if isinstance(meta, dict) else None
+    association_changes = meta.get('association_changes') if isinstance(meta, dict) else []
     if not isinstance(after_obj, dict) or not after_obj:
         after_obj = _snapshot_mod_fields(row)
     if isinstance(before_obj, dict) and not before_obj:
@@ -5729,12 +6488,19 @@ def _normalize_mod_record(row):
         'link_url': link_url_val,
         'source': src,
         'source_module': src,
+        'source_code': source_code,
+        'source_display_name': src,
         'modification_time': mod_time,
         'modify_time': mod_time,
         'before': before_obj,
         'after': after_obj,
         'changed_fields': changed_fields,
-        'operation_id': operation_id
+        'operation_id': operation_id,
+        'base_version': row.get('base_version') or (meta.get('base_version') if isinstance(meta, dict) else None),
+        'committed_version': row.get('committed_version') or (meta.get('committed_version') if isinstance(meta, dict) else None),
+        'archived_at': row.get('archived_at'),
+        'action_kind': action_kind or ('association' if association_changes else ('model_scope_edit' if 'products' in changed_fields else 'content_edit')),
+        'association_changes': association_changes if isinstance(association_changes, list) else [],
     }
     return out
 
@@ -5782,9 +6548,11 @@ def _get_archived_mod_keys():
     return keys
 
 def _is_archived_mod_item(item, archived_keys):
-    if not archived_keys:
-        return False
     if not isinstance(item, dict):
+        return False
+    if str(item.get('archived_at') or '').strip():
+        return True
+    if not archived_keys:
         return False
     kb = str(item.get('kb_id') or item.get('question_wiki_id') or '').strip()
     mt = str(item.get('modification_time') or item.get('modify_time') or '').strip()
@@ -5799,7 +6567,11 @@ def _mod_source_match(source_val, wanted):
     w = str(wanted or '').strip()
     if not w:
         return True
-    return w in s
+    if w in s:
+        return True
+    wanted_code = _normalize_source_code(w)
+    source_code = _normalize_source_code(s)
+    return wanted_code == source_code and (w in SOURCE_CODE_LABELS or w in SOURCE_CODE_BY_LEGACY_LABEL)
 
 def _mod_operation_match(op_val, wanted):
     if not wanted:
@@ -5823,16 +6595,164 @@ def _mod_operation_match(op_val, wanted):
     ss = aliases.get(s, s)
     return ss == ww
 
+
+def _kb_reference_search_tokens(value):
+    """Return lightweight, dependency-free search terms for FAQ reference suggestions."""
+    text = str(value or '').lower()
+    latin_terms = re.findall(r'[a-z0-9]{2,}', text)
+    chinese = ''.join(re.findall(r'[\u4e00-\u9fff]', text))
+    chinese_bigrams = [chinese[index:index + 2] for index in range(max(0, len(chinese) - 1))]
+    return set(latin_terms + chinese_bigrams)
+
+
+def _kb_reference_excerpt(value, limit=180):
+    text = re.sub(r'\s+', ' ', str(value or '')).strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + '...'
+
+
+def _kb_reference_candidate(query, row, selected_products=None, selected_categories=None):
+    query_tokens = _kb_reference_search_tokens(f"{query.get('question') or ''} {query.get('answer') or ''}")
+    source_question = str(row.get('question') or '')
+    source_answer = str(row.get('answer') or '')
+    question_overlap = query_tokens & _kb_reference_search_tokens(source_question)
+    answer_overlap = query_tokens & _kb_reference_search_tokens(source_answer)
+    score = min(len(question_overlap) * 3, 15) + min(len(answer_overlap) * 2, 10)
+    reasons = []
+    if question_overlap:
+        reasons.append('问题内容相近')
+    if answer_overlap:
+        reasons.append('答案内容相近')
+
+    source_products = {item.strip() for item in re.split(r'[,，\n]+', str(row.get('product_name') or '')) if item.strip()}
+    source_categories = {item.strip() for item in re.split(r'[,，\n]+', str(row.get('product_category_name') or '')) if item.strip()}
+    if selected_products and source_products & selected_products:
+        score += 8
+        reasons.append('适用型号一致')
+    if selected_categories and source_categories & selected_categories:
+        score += 3
+        reasons.append('产品分类一致')
+    if score <= 0:
+        return None
+    return {
+        'wiki_id': str(row.get('question_wiki_id') or '').strip(),
+        'question': _kb_reference_excerpt(source_question, 120),
+        'answer_excerpt': _kb_reference_excerpt(source_answer),
+        'product_name': str(row.get('product_name') or '').strip(),
+        'product_category_name': str(row.get('product_category_name') or '').strip(),
+        'update_time': str(row.get('update_time') or '').strip(),
+        'score': score,
+        'reason': '；'.join(reasons),
+    }
+
+
+def _kb_confirmed_references(client, raw_references):
+    if raw_references is None:
+        return []
+    if not isinstance(raw_references, list):
+        raise ValueError('confirmed_references 必须是数组')
+    ids = []
+    for raw in raw_references[:8]:
+        source_id = str((raw or {}).get('wiki_id') or '').strip() if isinstance(raw, dict) else ''
+        if source_id and source_id not in ids:
+            ids.append(source_id)
+    if not ids:
+        return []
+    source_rows = client.select_all(
+        'knowledge_base_v1',
+        filters={'question_wiki_id': _postgrest_in_str(ids)},
+        order_by='question_wiki_id',
+        columns='question_wiki_id,question,answer,product_name,product_category_name,update_time',
+        page_size=max(100, len(ids)),
+    ) or []
+    source_map = {str(row.get('question_wiki_id') or '').strip(): row for row in source_rows if isinstance(row, dict)}
+    if any(source_id not in source_map for source_id in ids):
+        raise ValueError('已选引用知识不可用，请刷新推荐后重新确认')
+    return [{
+        'wiki_id': source_id,
+        'question_excerpt': _kb_reference_excerpt(source_map[source_id].get('question'), 160),
+        'answer_excerpt': _kb_reference_excerpt(source_map[source_id].get('answer'), 260),
+        'product_name': str(source_map[source_id].get('product_name') or '').strip(),
+        'product_category_name': str(source_map[source_id].get('product_category_name') or '').strip(),
+        'source_update_time': str(source_map[source_id].get('update_time') or '').strip(),
+        'source_content_hash': _kd_content_hash(source_map[source_id]),
+    } for source_id in ids]
+
+
+@app.route('/api/kb/reference-candidates', methods=['POST'])
+@login_required
+def kb_reference_candidates():
+    payload = request.get_json(silent=True) or {}
+    question = str(payload.get('question') or '').strip()
+    answer = str(payload.get('answer') or '').strip()
+    if len(question) + len(answer) < 4:
+        return jsonify({'success': True, 'candidates': []})
+    if len(question) > 8000 or len(answer) > 30000:
+        return jsonify({'success': False, 'message': '问题或答案内容过长'}), 400
+    selected_products = {item.strip() for item in re.split(r'[,，\n]+', str(payload.get('product_name') or '')) if item.strip()}
+    selected_categories = {item.strip() for item in re.split(r'[,，\n]+', str(payload.get('product_category_name') or '')) if item.strip()}
+    current_wiki_id = str(payload.get('current_wiki_id') or '').strip()
+    try:
+        limit = min(max(int(payload.get('limit') or 6), 1), 12)
+    except (TypeError, ValueError):
+        limit = 6
+    client = get_supabase_client()
+    if not client:
+        return jsonify({'success': False, 'message': '本地主库未配置'}), 500
+    try:
+        rows = client.select_all(
+            'knowledge_base_v1', order_by='question_wiki_id',
+            columns='question_wiki_id,question,answer,product_name,product_category_name,update_time', page_size=1000,
+        ) or []
+        query = {'question': question, 'answer': answer}
+        candidates = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if current_wiki_id and str(row.get('question_wiki_id') or '').strip() == current_wiki_id:
+                continue
+            candidate = _kb_reference_candidate(query, row, selected_products, selected_categories)
+            if candidate:
+                candidates.append(candidate)
+        candidates.sort(key=lambda item: (-item['score'], item['question']))
+        return jsonify({'success': True, 'candidates': candidates[:limit]})
+    except Exception as exc:
+        print(f'[ERROR] Failed to load KB reference candidates: {exc}')
+        return jsonify({'success': False, 'message': '推荐知识读取失败'}), 500
+
 @app.route('/api/kb/update', methods=['POST'])
 @login_required
 def update_kb_item():
     raw_payload = request.get_json(silent=True) or {}
     base_update_time = str(raw_payload.get('base_update_time') or '').strip()
     change_source = _resolve_kb_change_source(raw_payload)
+    source_code = _resolve_kb_source_code(raw_payload, change_source)
+    operation_id = str(raw_payload.get('operation_id') or '').strip() or str(uuid.uuid4())
+    requested_changed_fields = [str(value).strip() for value in (raw_payload.get('changed_fields') or []) if str(value).strip()]
+    base_values = raw_payload.get('base_values') if isinstance(raw_payload.get('base_values'), dict) else {}
+    conflict_resolution = str(raw_payload.get('conflict_resolution') or 'normal').strip().lower()
+    try:
+        force_version = int(raw_payload.get('force_version')) if raw_payload.get('force_version') is not None else None
+    except (TypeError, ValueError):
+        force_version = None
+    if not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', operation_id):
+        return jsonify({'success': False, 'message': 'operation_id 格式无效'}), 400
+    try:
+        base_version = int(raw_payload.get('base_version')) if raw_payload.get('base_version') is not None else None
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'base_version 必须是整数'}), 400
+    raw_confirmed_references = raw_payload.get('confirmed_references')
     data = raw_payload
     client = get_supabase_client()
     if not client:
         return jsonify({'success': False, 'message': '本地主库未配置'}), 500
+
+    try:
+        confirmed_references = _kb_confirmed_references(client, raw_confirmed_references)
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    except Exception as exc:
+        print(f'[ERROR] Failed to verify confirmed KB references: {exc}')
+        return jsonify({'success': False, 'message': '引用知识校验失败'}), 500
 
     allow = _kb_all_fields_allowlist()
     data = {k: v for k, v in (data or {}).items() if k in allow}
@@ -5928,6 +6848,27 @@ def update_kb_item():
         return jsonify({'success': False, 'message': 'answer 不能为空'}), 400
     
     try:
+        # Idempotency guard for retried submits.  Query errors are ignored so
+        # installations that have not applied the additive migration retain
+        # the historical metadata-based behavior.
+        if kb_id and operation_id:
+            try:
+                existing_ops = client.select_all(
+                    'knowledge_base_modifications',
+                    filters={'and': f'(kb_id.eq.{kb_id},operation_id.eq.{operation_id})'},
+                    columns='id,kb_id,question_wiki_id,operation_id,committed_version',
+                    page_size=2,
+                ) or []
+                if existing_ops:
+                    return jsonify({
+                        'success': True,
+                        'idempotent': True,
+                        'question_wiki_id': kb_id,
+                        'operation_id': operation_id,
+                        'content_version': existing_ops[0].get('committed_version'),
+                    })
+            except Exception:
+                pass
         # Fetch current row before update so modification logs store a real "before" snapshot
         # (required for 修改记录详情对比; one extra SELECT per edit).
         before_row = None
@@ -5936,7 +6877,7 @@ def update_kb_item():
                 _kb_cols = (
                     'question_wiki_id,question_type,question,answer,answer_type,if_bm25,'
                     'similar_questions,error_list,keyword_list,image_urls,video_urls,file_urls,'
-                    'link_type,link_url,update_time,product_category_name,product_name'
+                    'link_type,link_url,update_time,product_category_name,product_name,content_version'
                 )
                 before_resp = client.select(
                     'knowledge_base_v1',
@@ -5959,6 +6900,7 @@ def update_kb_item():
                         'knowledge_base_v1',
                         filters={'question_wiki_id': f'eq.{kb_id}'},
                         columns=_kb_cols,
+                        order_by='question_wiki_id',
                         page_size=1
                     ) or []
                     if rows2 and isinstance(rows2[0], dict):
@@ -5985,7 +6927,60 @@ def update_kb_item():
                         'base_update_time': base_update_time
                     }), 409
 
-        after_row_for_diff = dict(data or {})
+            if base_version is not None:
+                try:
+                    current_version = int(before_row.get('content_version'))
+                except (TypeError, ValueError):
+                    current_version = 1
+                if current_version != base_version:
+                    # Non-overlapping edits can be merged onto the server's
+                    # latest row.  Same-field edits remain an explicit conflict.
+                    business_fields = set(_kb_all_fields_allowlist()) - {'question_wiki_id', 'review_status'}
+                    changed_fields = [field for field in requested_changed_fields if field in business_fields]
+                    if changed_fields and conflict_resolution not in ('force', 'conflict_forced'):
+                        server_changed = []
+                        for field in changed_fields:
+                            base_value = base_values.get(field)
+                            current_value = before_row.get(field)
+                            if _normalize_mod_diff_value(base_value) != _normalize_mod_diff_value(current_value):
+                                server_changed.append(field)
+                        if not server_changed:
+                            data = {key: value for key, value in data.items() if key in changed_fields}
+                            data['question_wiki_id'] = kb_id
+                            base_version = current_version
+                            conflict_resolution = 'auto_merge'
+                        else:
+                            return jsonify({
+                                'success': False,
+                                'message': '知识库内容存在同字段并发修改，请选择取消、拉取最新继续编辑或仍然覆盖。',
+                                'conflict': True,
+                                'conflict_fields': server_changed,
+                                'current_version': current_version,
+                                'base_version': base_version,
+                                'current': before_row,
+                            }), 409
+                    elif conflict_resolution in ('force', 'conflict_forced') and force_version == current_version:
+                        base_version = current_version
+                        conflict_resolution = 'conflict_forced'
+                    else:
+                        return jsonify({
+                            'success': False,
+                            'message': '知识库内容已被他人修改，请拉取最新内容后再提交。',
+                            'conflict': True,
+                            'current_version': current_version,
+                            'base_version': base_version,
+                            'current': before_row,
+                        }), 409
+            else:
+                # Older clients may omit the field, but the server still
+                # establishes an explicit optimistic-lock baseline.
+                try:
+                    base_version = int(before_row.get('content_version') or 1)
+                except (TypeError, ValueError):
+                    base_version = 1
+
+        after_row_for_diff = dict(before_row or {})
+        after_row_for_diff.update(data or {})
 
         before_obj = _snapshot_mod_fields(before_row) if before_row else None
         after_obj = _snapshot_mod_fields(after_row_for_diff)
@@ -5997,6 +6992,9 @@ def update_kb_item():
             return jsonify({
                 'success': True,
                 'question_wiki_id': kb_id,
+                'operation_id': operation_id,
+                'content_version': before_row.get('content_version'),
+                'source_code': source_code,
                 'no_change': True,
                 'message': 'No changes detected',
                 'mod_log_ok': True,
@@ -6004,17 +7002,28 @@ def update_kb_item():
             })
 
         # Prepare modification record
-        modification_record = data.copy()
+        modification_record = {key: value for key, value in after_row_for_diff.items() if key in _kb_all_fields_allowlist()}
+        modification_record.update(data or {})
         modification_record['kb_id'] = kb_id
         modification_record['modifier'] = current_user.username if current_user.is_authenticated else 'system'
         modification_record['modification_time'] = _now_iso_with_tz()
         modification_record['change_type'] = 'edit' if kb_id else 'create'
         _attach_change_meta(modification_record, {
             'source': change_source,
+            'source_code': source_code,
             'before': before_obj,
             'after': after_obj,
-            'changed_fields': changed_fields
+            'changed_fields': changed_fields,
+            'confirmed_references': confirmed_references,
+            'operation_id': operation_id,
+            'base_version': base_version,
+            'conflict_resolution': conflict_resolution,
         })
+        modification_record['source_code'] = source_code
+        modification_record['operation_id'] = operation_id
+        modification_record['conflict_resolution'] = conflict_resolution
+        if base_version is not None:
+            modification_record['base_version'] = base_version
         
         # Cleanup modification record
         if 'question_wiki_id' in modification_record:
@@ -6031,9 +7040,14 @@ def update_kb_item():
         data['update_time'] = _now_iso_with_tz()
 
         saved_id = None
+        committed_version = None
         if kb_id:
             # Update existing
-            response = client.update('knowledge_base_v1', data, {'question_wiki_id': kb_id})
+            update_filters = {'question_wiki_id': kb_id}
+            if base_version is not None:
+                update_filters['content_version'] = f'eq.{base_version}'
+                data['content_version'] = base_version + 1
+            response = client.update('knowledge_base_v1', data, update_filters)
             saved_id = kb_id
         else:
             # Insert new
@@ -6053,6 +7067,35 @@ def update_kb_item():
 
         if response.status_code >= 400:
              return jsonify({'success': False, 'message': f"Database error: {response.text}"}), 500
+
+        if base_version is not None:
+            committed_version = base_version + 1
+            # ``return=minimal`` hides PostgREST's affected-row count.  Read
+            # back the version so a race that matched zero rows is surfaced as
+            # a conflict instead of being reported as a successful overwrite.
+            try:
+                verify_rows = client.select_all(
+                    'knowledge_base_v1',
+                    filters={'question_wiki_id': f'eq.{saved_id}'},
+                    columns='question_wiki_id,content_version',
+                    order_by='question_wiki_id',
+                    page_size=1,
+                ) or []
+                actual_version = int(verify_rows[0].get('content_version')) if verify_rows else None
+                if actual_version != committed_version:
+                    return jsonify({
+                        'success': False,
+                        'message': '提交期间内容版本发生变化，请重新拉取最新值。',
+                        'conflict': True,
+                        'current_version': actual_version,
+                        'base_version': base_version,
+                    }), 409
+            except (TypeError, ValueError, AttributeError):
+                # Legacy databases without the additive column are handled by
+                # the migration; do not turn a successful old write into a
+                # false-negative solely because the read-back is unavailable.
+                pass
+            modification_record['committed_version'] = committed_version
 
         # Log Modification
         # 改为同步插入，确保修改记录一定被保存
@@ -6143,9 +7186,13 @@ def update_kb_item():
         return jsonify({
             'success': True,
             'question_wiki_id': saved_id or data.get('question_wiki_id') or kb_id,
+            'operation_id': operation_id,
+            'content_version': committed_version,
+            'source_code': source_code,
             'mod_log_ok': mod_log_ok,
             'mod_log_error': mod_log_error,
             'quality_task_updated': quality_task_updated,
+            'confirmed_reference_count': len(confirmed_references),
             'graph_relation_refresh': graph_relation_refresh,
             'graph_relation_error': graph_relation_error,
             'warning': '；'.join(warnings) if warnings else None
@@ -6160,7 +7207,7 @@ def update_kb_item():
 def batch_update_kb_items():
     payload = request.get_json(silent=True) or {}
     if str(payload.get('table') or 'knowledge_base_v1').strip() != 'knowledge_base_v1':
-        return jsonify({'success': False, 'message': '前刻库仅用于对比，批量编辑只支持此刻库'}), 400
+        return jsonify({'success': False, 'message': '批量编辑只支持 V1'}), 400
 
     raw_ids = payload.get('ids') or []
     if not isinstance(raw_ids, list):
@@ -6222,6 +7269,7 @@ def batch_update_kb_items():
         pending_tag_updates = {}
         modification_records = []
         skipped_ids = []
+        before_snapshots = {}
 
         for wiki_id in ids:
             before_row = dict(rows_by_id[wiki_id])
@@ -6230,6 +7278,7 @@ def batch_update_kb_items():
                     normalized_before = _kb_batch_normalize_list(before_row.get(list_field), list_field)
                     before_row[list_field] = _kb_batch_store_list(normalized_before, list_field)
             before_row['kb_tags'] = tags_by_id.get(wiki_id, [])
+            before_snapshots[wiki_id] = dict(before_row)
             after_row = dict(before_row)
 
             for operation in operations:
@@ -6251,64 +7300,92 @@ def batch_update_kb_items():
             before_obj = _snapshot_mod_fields(before_row)
             after_obj = _snapshot_mod_fields(after_row)
             changed_fields = _compute_mod_changed_fields(before_obj, after_obj)
+            content_changed_fields = [field for field in changed_fields if field != 'kb_tags']
+            tags_changed = 'kb_tags' in changed_fields
             if not changed_fields:
                 skipped_ids.append(wiki_id)
                 continue
 
-            after_row['review_status'] = 'modifying'
-            after_row['update_time'] = operation_time
-            update_data = {
-                field: after_row.get(field)
-                for field in _kb_all_fields_allowlist()
-                if field in after_row and field not in ('question_wiki_id', 'review_status', 'update_time')
-            }
-            update_data['review_status'] = 'modifying'
-            update_data['update_time'] = operation_time
-            pending_updates.append((wiki_id, update_data))
-            if 'kb_tags' in changed_fields:
+            if content_changed_fields:
+                after_row['review_status'] = 'modifying'
+                after_row['update_time'] = operation_time
+                update_data = {
+                    field: after_row.get(field)
+                    for field in _kb_all_fields_allowlist()
+                    if field in after_row and field not in ('question_wiki_id', 'review_status', 'update_time', 'kb_tags')
+                }
+                update_data['review_status'] = 'modifying'
+                update_data['update_time'] = operation_time
+                pending_updates.append((wiki_id, update_data))
+            if tags_changed:
                 pending_tag_updates[wiki_id] = after_row['kb_tags']
 
-            modification_record = {
-                field: after_row.get(field)
-                for field in _kb_all_fields_allowlist()
-                if field in after_row and field != 'review_status'
-            }
-            modification_record['kb_id'] = wiki_id
-            modification_record['modifier'] = current_user.username if current_user.is_authenticated else 'system'
-            modification_record['modification_time'] = operation_time
-            modification_record['change_type'] = 'edit'
-            _attach_change_meta(modification_record, {
-                'source': _resolve_kb_change_source(payload),
-                'before': before_obj,
-                'after': after_obj,
-                'changed_fields': changed_fields,
-                'operation_id': operation_id,
-                'batch_operation': True
-            })
-            modification_records.append(modification_record)
+            if changed_fields:
+                modification_record = {
+                    field: after_row.get(field)
+                    for field in _kb_all_fields_allowlist()
+                    if field in after_row and field != 'review_status'
+                }
+                modification_record['kb_id'] = wiki_id
+                modification_record['modifier'] = current_user.username if current_user.is_authenticated else 'system'
+                modification_record['modification_time'] = operation_time
+                modification_record['change_type'] = 'edit'
+                modification_record['source_code'] = _resolve_kb_source_code(payload, _resolve_kb_change_source(payload))
+                _attach_change_meta(modification_record, {
+                    'source': _resolve_kb_change_source(payload),
+                    'before': before_obj,
+                    'after': after_obj,
+                    'changed_fields': changed_fields,
+                    'operation_id': operation_id,
+                    'batch_operation': True
+                })
+                modification_records.append(modification_record)
 
         applied_ids = []
+        applied_content_ids = []
         for wiki_id, update_data in pending_updates:
             response = client.update('knowledge_base_v1', update_data, {'question_wiki_id': f'eq.{wiki_id}'})
             if response is not None and getattr(response, 'status_code', 500) >= 400:
+                rollback_failures = _kb_batch_rollback_content_and_tags(
+                    client,
+                    before_snapshots,
+                    applied_content_ids,
+                    [],
+                    operation_time,
+                )
                 return jsonify({
                     'success': False,
-                    'message': f'保存失败: {getattr(response, "text", "unknown error")}',
+                    'message': f'保存失败，已尝试回滚: {getattr(response, "text", "unknown error")}',
                     'operation_id': operation_id,
                     'applied_ids': applied_ids,
-                    'failed_id': wiki_id
+                    'failed_id': wiki_id,
+                    'rollback_failures': rollback_failures,
                 }), 500
-            applied_ids.append(wiki_id)
+            if wiki_id not in applied_ids:
+                applied_ids.append(wiki_id)
+            if wiki_id not in applied_content_ids:
+                applied_content_ids.append(wiki_id)
 
         try:
             _kb_batch_replace_tags(client, pending_tag_updates)
+            for wiki_id in pending_tag_updates:
+                if wiki_id not in applied_ids:
+                    applied_ids.append(wiki_id)
         except Exception as exc:
+            rollback_failures = _kb_batch_rollback_content_and_tags(
+                client,
+                before_snapshots,
+                applied_content_ids,
+                list(pending_tag_updates),
+                operation_time,
+            )
             return jsonify({
                 'success': False,
-                'message': f'标签保存失败: {exc}',
+                'message': f'标签保存失败，已尝试回滚: {exc}',
                 'operation_id': operation_id,
                 'applied_ids': applied_ids,
-                'tag_sync_failed': True
+                'tag_sync_failed': True,
+                'rollback_failures': rollback_failures,
             }), 500
 
         mod_log_ok = True
@@ -6725,7 +7802,7 @@ def get_kb_item_tags():
         return jsonify({'success': False, 'message': '本地主库未配置'}), 500
 
     library_type = str(request.args.get('libraryType') or 'current').strip().lower()
-    if library_type not in ('current', 'previous'):
+    if library_type != 'current':
         return jsonify({'success': False, 'message': 'Invalid libraryType'}), 400
 
     wiki_id = str(request.args.get('question_wiki_id') or request.args.get('id') or '').strip()
@@ -6785,7 +7862,7 @@ def put_kb_item_tags():
 
     data = request.json or {}
     library_type = str(data.get('libraryType') or 'current').strip().lower()
-    if library_type not in ('current', 'previous'):
+    if library_type != 'current':
         return jsonify({'success': False, 'message': 'Invalid libraryType'}), 400
 
     wiki_id = str(data.get('question_wiki_id') or data.get('id') or '').strip()
@@ -6814,34 +7891,56 @@ def put_kb_item_tags():
     normalized = normalized[:200]
 
     try:
+        # Tags are stored in kb_item_tags, so capture their old value before
+        # replacing the association. This makes tag-only edits auditable.
+        before_tags = _kb_batch_fetch_tags_by_id(client, [wiki_id]).get(wiki_id, []) if library_type == 'current' else []
+        before_row = None
+        try:
+            rows = client.select_all(
+                'knowledge_base_v1',
+                filters={'question_wiki_id': f'eq.{wiki_id}'},
+                columns='*',
+                page_size=1,
+            ) or []
+            if rows and isinstance(rows[0], dict):
+                before_row = dict(rows[0])
+        except Exception:
+            before_row = None
+        before_obj = _snapshot_mod_fields({**(before_row or {}), 'kb_tags': before_tags})
+        after_obj = _snapshot_mod_fields({**before_obj, 'kb_tags': normalized})
+        tags_changed = _normalize_mod_diff_value(before_tags) != _normalize_mod_diff_value(normalized)
+
         # Always replace mapping for this item/library_type
         client.delete('kb_item_tags', {'library_type': f'eq.{library_type}', 'question_wiki_id': f'eq.{wiki_id}'})
 
         if not normalized:
-            return jsonify({'success': True, 'count': 0})
+            tag_ids = []
+        else:
+            tag_ids = None
 
-        # 1) Fetch all existing tags to avoid N queries
-        exist_tags = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
-        name_to_id_lower = {}
-        for t in exist_tags:
-            if isinstance(t, dict) and t.get('id') and t.get('name'):
-                name_to_id_lower[str(t['name']).strip().lower()] = t['id']
-
-        # 2) Insert missing tags
-        missing = [n for n in normalized if n.lower() not in name_to_id_lower]
-        if missing:
-            to_insert = [{'name': n} for n in missing]
-            # Unique constraint: name
-            client.upsert('kb_tags', to_insert, on_conflict='name')
-
-            # Re-fetch to get ids
+        if normalized:
+            # 1) Fetch all existing tags to avoid N queries
             exist_tags = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
             name_to_id_lower = {}
             for t in exist_tags:
                 if isinstance(t, dict) and t.get('id') and t.get('name'):
                     name_to_id_lower[str(t['name']).strip().lower()] = t['id']
 
-        tag_ids = [name_to_id_lower[n.lower()] for n in normalized if n.lower() in name_to_id_lower and name_to_id_lower[n.lower()]]
+            # 2) Insert missing tags
+            missing = [n for n in normalized if n.lower() not in name_to_id_lower]
+            if missing:
+                to_insert = [{'name': n} for n in missing]
+                # Unique constraint: name
+                client.upsert('kb_tags', to_insert, on_conflict='name')
+
+                # Re-fetch to get ids
+                exist_tags = client.select_all('kb_tags', columns='id,name', page_size=1000) or []
+                name_to_id_lower = {}
+                for t in exist_tags:
+                    if isinstance(t, dict) and t.get('id') and t.get('name'):
+                        name_to_id_lower[str(t['name']).strip().lower()] = t['id']
+
+            tag_ids = [name_to_id_lower[n.lower()] for n in normalized if n.lower() in name_to_id_lower and name_to_id_lower[n.lower()]]
 
         if tag_ids:
             # 3) Insert mapping rows
@@ -6861,7 +7960,38 @@ def put_kb_item_tags():
                     return jsonify({'success': False, 'message': getattr(resp, 'text', 'insert failed')}), 500
                 time.sleep(0.05)
 
-        return jsonify({'success': True, 'count': len(tag_ids)})
+        mod_log_ok = True
+        mod_log_error = ''
+        if tags_changed and library_type == 'current':
+            try:
+                mod_record = {
+                    field: before_row.get(field)
+                    for field in _kb_all_fields_allowlist()
+                    if isinstance(before_row, dict) and field in before_row and field != 'review_status'
+                }
+                mod_record['kb_id'] = wiki_id
+                mod_record['question_wiki_id'] = wiki_id
+                mod_record['modifier'] = current_user.username if current_user.is_authenticated else 'system'
+                mod_record['modification_time'] = _now_iso_with_tz()
+                mod_record['change_type'] = 'edit'
+                _attach_change_meta(mod_record, {
+                    'source': _resolve_kb_change_source(data),
+                    'before': before_obj,
+                    'after': after_obj,
+                    'changed_fields': ['kb_tags'],
+                    'action_kind': 'tag_edit',
+                })
+                _convert_array_fields_to_json(mod_record)
+                log_response = _supabase_insert_drop_unknown_columns(client, 'knowledge_base_modifications', mod_record)
+                if log_response is not None and getattr(log_response, 'status_code', 500) >= 400:
+                    mod_log_ok = False
+                    mod_log_error = getattr(log_response, 'text', '修改记录保存失败')
+            except Exception as exc:
+                mod_log_ok = False
+                mod_log_error = str(exc)
+
+        return jsonify({'success': True, 'count': len(tag_ids), 'changed': tags_changed,
+                        'mod_log_ok': mod_log_ok, 'mod_log_error': mod_log_error})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
@@ -6917,6 +8047,7 @@ def get_kb_modifications():
     sort_dir = request.args.get('sortDir', 'desc')
 
     filters = {}
+    filters['archived_at'] = 'is.null'
     if kb_id:
         filters['kb_id'] = f"ilike.*{kb_id}*"
     if product:
@@ -7078,14 +8209,15 @@ def get_kb_modifications():
                 item = _normalize_mod_record(row)
                 if not item:
                     continue
+                if item.get('archived_at'):
+                    continue
                 if not _mod_source_match(item.get('source_module'), source_module):
                     continue
                 if operation and not _mod_operation_match(item.get('change_type'), operation):
                     continue
                 normalized.append(item)
 
-            if archived_keys:
-                normalized = [it for it in normalized if not _is_archived_mod_item(it, archived_keys)]
+            normalized = [it for it in normalized if not _is_archived_mod_item(it, archived_keys)]
             normalized = _fill_from_kb_base(normalized)
             total = len(normalized)
             start_idx = max(0, (page_int - 1) * page_size_int)
@@ -7110,16 +8242,103 @@ def get_kb_modifications():
         normalized = []
         for row in raw:
             item = _normalize_mod_record(row)
-            if item:
+            if item and not item.get('archived_at'):
                 normalized.append(item)
-        if archived_keys:
-            normalized = [it for it in normalized if not _is_archived_mod_item(it, archived_keys)]
+        normalized = [it for it in normalized if not _is_archived_mod_item(it, archived_keys)]
         normalized = _fill_from_kb_base(normalized)
         return jsonify({'success': True, 'data': normalized, 'total': total})
             
     except Exception as e:
         print(f"Error fetching modifications: {e}")
         return jsonify([])
+
+
+@app.route('/api/kb/pending-activity', methods=['GET'])
+@login_required
+def get_kb_pending_activity():
+    client = get_supabase_client()
+    if not client:
+        return jsonify({'success': False, 'message': '本地主库未配置'}), 500
+    raw_ids = request.args.getlist('ids')
+    if len(raw_ids) == 1 and ',' in raw_ids[0]:
+        raw_ids = raw_ids[0].split(',')
+    wiki_ids = list(dict.fromkeys(str(value or '').strip() for value in raw_ids if str(value or '').strip()))
+    if not wiki_ids:
+        single_id = str(request.args.get('question_wiki_id') or '').strip()
+        if single_id:
+            wiki_ids = [single_id]
+    if not wiki_ids:
+        return jsonify({'success': False, 'message': 'question_wiki_id 不能为空'}), 400
+    try:
+        rows = client.select_all(
+            'knowledge_base_modifications',
+            filters={'question_wiki_id': _postgrest_in_str(wiki_ids)},
+            order_by='modification_time',
+            order_dir='desc',
+            columns='id,kb_id,question_wiki_id,source_code,source_module,modification_time,archived_at,change_meta',
+            page_size=1000,
+        ) or []
+        archived_keys = _get_archived_mod_keys()
+        grouped = {wiki_id: [] for wiki_id in wiki_ids}
+        for row in rows:
+            item = _normalize_mod_record(row)
+            if not item or item.get('archived_at') or _is_archived_mod_item(item, archived_keys):
+                continue
+            wiki_id = str(item.get('question_wiki_id') or '').strip()
+            if wiki_id in grouped:
+                grouped[wiki_id].append(item)
+        result = {}
+        for wiki_id in wiki_ids:
+            derived = _modification_status_from_rows(grouped.get(wiki_id))
+            derived['pending_count'] = len(grouped.get(wiki_id) or [])
+            result[wiki_id] = derived
+        return jsonify({'success': True, 'data': result})
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(exc)}), 500
+
+
+@app.route('/api/kb/<wiki_id>/modification-status', methods=['GET'])
+@login_required
+def get_kb_modification_status(wiki_id):
+    """Derive pending activity from the same unarchived event set as logs/export."""
+    wiki_id = str(wiki_id or '').strip()
+    if not wiki_id:
+        return jsonify({'success': False, 'message': 'question_wiki_id 不能为空'}), 400
+    client = get_supabase_client()
+    if not client:
+        return jsonify({'success': False, 'message': '本地主库未配置'}), 500
+    try:
+        rows = client.select_all(
+            'knowledge_base_modifications',
+            filters={'kb_id': f'eq.{wiki_id}'},
+            order_by='modification_time',
+            order_dir='desc',
+            page_size=1000,
+        ) or []
+        archived_keys = _get_archived_mod_keys()
+        active = []
+        for row in rows:
+            item = _normalize_mod_record(row)
+            if item and not _is_archived_mod_item(item, archived_keys):
+                active.append(item)
+        latest = active[0] if active else None
+        return jsonify({
+            'success': True,
+            'question_wiki_id': wiki_id,
+            'modification_status': 'adjusted' if active else 'unadjusted',
+            'pending_count': len(active),
+            'pending_activity': ({
+                'modification_time': latest.get('modification_time'),
+                'source_code': latest.get('source_code'),
+                'source_module': latest.get('source_module'),
+                'source_display_name': latest.get('source_display_name') or latest.get('source_module'),
+                'operation_id': latest.get('operation_id'),
+            } if latest else None),
+        })
+    except Exception as exc:
+        print(f'[ERROR] Failed to derive modification status for {wiki_id}: {exc}')
+        return jsonify({'success': False, 'message': '修改处理状态读取失败'}), 500
 
 @app.route('/api/kb/modifications/delete', methods=['POST'])
 @login_required
@@ -7220,8 +8439,7 @@ def export_kb_modifications_raw():
             normalized.append(item)
 
         archived_keys = _get_archived_mod_keys()
-        if archived_keys:
-            normalized = [it for it in normalized if not _is_archived_mod_item(it, archived_keys)]
+        normalized = [it for it in normalized if not _is_archived_mod_item(it, archived_keys)]
 
         export_rows = []
         for it in normalized:
@@ -7333,7 +8551,7 @@ def export_kb_modifications_smart_merge():
         filtered_norm = []
         for r in (filtered_raw or []):
             it = _normalize_mod_record(r)
-            if not it:
+            if not it or it.get('archived_at'):
                 continue
             if source_module and not _mod_source_match(it.get('source_module'), source_module):
                 continue
@@ -7342,8 +8560,7 @@ def export_kb_modifications_smart_merge():
             filtered_norm.append(it)
 
         archived_keys = _get_archived_mod_keys()
-        if archived_keys:
-            filtered_norm = [it for it in filtered_norm if not _is_archived_mod_item(it, archived_keys)]
+        filtered_norm = [it for it in filtered_norm if not _is_archived_mod_item(it, archived_keys)]
 
         ids = sorted(list({str(it.get('question_wiki_id') or '').strip() for it in filtered_norm if str(it.get('question_wiki_id') or '').strip()}))
         if not ids:
@@ -7399,10 +8616,9 @@ def export_kb_modifications_smart_merge():
         all_mod_norm = []
         for r in all_mod_rows:
             it = _normalize_mod_record(r)
-            if it:
+            if it and not it.get('archived_at'):
                 all_mod_norm.append(it)
-        if archived_keys:
-            all_mod_norm = [it for it in all_mod_norm if not _is_archived_mod_item(it, archived_keys)]
+        all_mod_norm = [it for it in all_mod_norm if not _is_archived_mod_item(it, archived_keys)]
 
         by_id = {}
         for it in all_mod_norm:
@@ -7421,40 +8637,30 @@ def export_kb_modifications_smart_merge():
             mods = by_id.get(wid, [])
             kb_base = kb_map.get(wid, {}) if isinstance(kb_map.get(wid, {}), dict) else {}
 
-            matrix_mods = [m for m in mods if _is_matrix_source(m.get('source_module'))]
-            kb_mods = [m for m in mods if _is_kb_source(m.get('source_module'))]
-
-            final_opera = 'edit'
-            if kb_mods:
-                m0 = kb_mods[0]
-                final_opera = m0.get('change_type') or m0.get('opera') or m0.get('operation') or final_opera
-            elif matrix_mods:
-                m0 = matrix_mods[0]
-                final_opera = m0.get('change_type') or m0.get('opera') or m0.get('operation') or final_opera
-
-            final_products = kb_base.get('product_name') or ''
-            if matrix_mods:
-                m0 = matrix_mods[0]
-                final_products = _get_field_from_mod(m0, 'products') or _get_field_from_mod(m0, 'product_name') or final_products
+            # The V1 row is the sole current-value source.  Modification rows
+            # only select candidates and provide audit/source metadata.  A
+            # delete event is the explicit exception: when its current row is
+            # gone, export the immutable pre-delete snapshot instead.
+            latest_mod = mods[0] if mods else {}
+            final_opera = latest_mod.get('change_type') or latest_mod.get('opera') or 'edit'
+            delete_mod = next((m for m in mods if str(m.get('change_type') or '').lower() in ('delete', 'del', 'remove')), None)
+            if delete_mod and not kb_base:
+                final_opera = delete_mod.get('change_type') or 'delete'
+                delete_snapshot = delete_mod.get('before') if isinstance(delete_mod.get('before'), dict) else {}
+                if not delete_snapshot or not str(delete_snapshot.get('question') or '').strip() or not str(delete_snapshot.get('answer') or '').strip():
+                    return jsonify({
+                        'success': False,
+                        'message': f'删除记录 {wid} 缺少完整删除前快照，已阻止导出。',
+                        'repair_required': True,
+                        'question_wiki_id': wid,
+                    }), 409
+                final_obj = {'question_wiki_id': wid, 'products': delete_snapshot.get('products') or delete_snapshot.get('product_name') or ''}
+                for f in fields_b:
+                    final_obj[f] = delete_snapshot.get(f)
             else:
-                kb_prod_mods = [m for m in kb_mods if _mod_products_changed(m)]
-                if kb_prod_mods:
-                    m0 = kb_prod_mods[0]
-                    final_products = _get_field_from_mod(m0, 'products') or _get_field_from_mod(m0, 'product_name') or final_products
-
-            final_obj = {
-                'question_wiki_id': wid,
-                'products': final_products
-            }
-
-            for f in fields_b:
-                val = kb_base.get(f)
-                if kb_mods:
-                    m0 = kb_mods[0]
-                    v2 = _get_field_from_mod(m0, f)
-                    if v2 is not None:
-                        val = v2
-                final_obj[f] = val
+                final_obj = {'question_wiki_id': wid, 'products': kb_base.get('product_name') or ''}
+                for f in fields_b:
+                    final_obj[f] = kb_base.get(f)
             op_raw = str(final_opera or '').strip().lower()
             if op_raw in ('create', 'insert', 'add', '新增', '增加'):
                 op_label = '增加'
@@ -7979,7 +9185,7 @@ def _collect_archive_candidates(client, operation_id=None, ids=None):
         if selected_id_set and str(rid).strip() not in selected_id_set:
             continue
         it = _normalize_mod_record(r)
-        if not it:
+        if not it or it.get('archived_at'):
             continue
         if operation_id and str(it.get('operation_id') or '').strip() != operation_id:
             continue
@@ -8105,7 +9311,7 @@ def create_archive():
             return jsonify({
                 'success': False,
                 'requires_confirmation': True,
-                'message': '归档会把当前修改记录迁移到归档表，并删除当前列表中的对应记录，请确认后继续。',
+                'message': '归档会让当前修改记录退出待处理列表，同时保留完整审计历史，请确认后继续。',
                 'count': len(normalized),
                 'delete_count': len(raw_ids),
                 'selected_count': len(_clean_modification_ids(archive_ids))
@@ -8173,17 +9379,22 @@ def create_archive():
                 # Keep local success as source of truth if remote write is temporarily unavailable.
                 pass
 
-        deleted = 0
+        archived = 0
         if raw_ids:
             chunk_size = 500
             for i in range(0, len(raw_ids), chunk_size):
                 chunk = raw_ids[i:i + chunk_size]
-                ok, count, message = _delete_modification_rows_by_ids(client, chunk)
-                if not ok:
-                    return jsonify({'success': False, 'message': f'归档已保存，但清理主库失败: {message}'}), 500
-                deleted += count
+                inner = ",".join([json.dumps(value, ensure_ascii=False) for value in _clean_modification_ids(chunk)])
+                response = client.update('knowledge_base_modifications', {
+                    'archived_at': _now_iso_with_tz(),
+                    'archived_by': current_user.username,
+                    'archive_batch_id': str(archive_id),
+                }, {'id': f'in.({inner})'})
+                if response is None or getattr(response, 'status_code', 500) >= 400:
+                    return jsonify({'success': False, 'message': f'归档已保存，但修改记录标记失败: {getattr(response, "text", "") or "unknown error"}'}), 500
+                archived += len(chunk)
 
-        return jsonify({'success': True, 'id': archive_id, 'record_count': batch.record_count, 'deleted_count': deleted})
+        return jsonify({'success': True, 'id': archive_id, 'record_count': batch.record_count, 'archived_count': archived, 'deleted_count': 0})
     except Exception as e:
         db.session.rollback()
         traceback.print_exc()
@@ -8375,7 +9586,8 @@ def _client_count(client, table, filters=None):
         return 0
 
 def _write_json_backup(kind, table, rows, metadata=None):
-    backup_dir = os.path.join(_BASE_DIR, 'instance', 'backups', kind)
+    backup_root = os.path.dirname(_DB_PATH) if _is_test_process() else _INSTANCE_DIR
+    backup_dir = os.path.join(backup_root, 'backups', kind)
     os.makedirs(backup_dir, exist_ok=True)
     filename = f"{table}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     path = os.path.join(backup_dir, filename)
@@ -9184,27 +10396,17 @@ def import_governance_data_route():
         if not id_col:
              return jsonify({'success': False, 'message': f'Missing ID column. Expected one of: {possible_id_cols}'}), 400
              
-        local_deleted = _delete_sqlite_governance_month(month)
-        use_supabase = False
-        client = None
-        try:
-            client = get_supabase_client()
-            if client:
-                use_supabase = True
-                del_resp = client.delete('kb_recall', {'month': f"eq.{month}"})
-                if not del_resp or getattr(del_resp, 'status_code', 500) >= 400:
-                    print(f"[Governance] 主库删除失败，回退 sqlite: {getattr(del_resp, 'text', '')}")
-                    use_supabase = False
-        except Exception as e:
-            print(f"[Governance] 主库删除失败，回退 sqlite: {e}")
-            use_supabase = False
-        
-        # 插入新数据。按 (kb_id, month) 去重，避免源文件里重复行导致冲突或重复写入。
+        # 先完整解析并校验文件，再开始任何删除或写入，避免坏文件清空整个月份。
+        # 同一 (kb_id, month) 出现多次时拒绝导入，不能静默采用最后一行。
         payload_by_key = {}
+        duplicate_ids = set()
         for _, row in df.iterrows():
             kb_id = str(row[id_col]).strip()
             if not kb_id or kb_id.lower() == 'nan':
                 continue
+
+            if (kb_id, month) in payload_by_key:
+                duplicate_ids.add(kb_id)
                 
             recall_val = 0
             if recall_col:
@@ -9230,35 +10432,106 @@ def import_governance_data_route():
                 'valid_recall_count': valid_val
             }
 
+        if duplicate_ids:
+            sample = ', '.join(sorted(duplicate_ids)[:10])
+            suffix = '…' if len(duplicate_ids) > 10 else ''
+            return jsonify({
+                'success': False,
+                'message': f'导入文件包含重复 Wiki ID，已拒绝导入: {sample}{suffix}'
+            }), 400
+
         payload_rows = list(payload_by_key.values())
         count = len(payload_rows)
 
+        local_deleted = 0
+        use_supabase = False
+        client = None
+        try:
+            client = get_supabase_client()
+            use_supabase = client is not None
+        except Exception as e:
+            print(f"[Governance] 主库连接失败，改用本地事务: {e}")
+
         if use_supabase:
-            errors = []
-            for i in range(0, len(payload_rows), 500):
-                chunk = payload_rows[i:i + 500]
-                resp = client.insert('kb_recall', chunk)
-                if resp is None or getattr(resp, 'status_code', 500) >= 400:
-                    errors.append({
-                        'table': 'kb_recall',
-                        'status_code': getattr(resp, 'status_code', None) if resp is not None else None,
-                        'text': getattr(resp, 'text', '') if resp is not None else 'no response',
-                        'offset': i,
-                        'count': len(chunk)
-                    })
-            if errors:
-                print(f"[Governance] 主库写入失败，回退 sqlite: {errors}")
-                use_supabase = False
-            else:
+            try:
+                # 治理读取会优先使用本地覆盖同键远端数据，因此先提交同一
+                # 份已校验载荷到本地；远端失败时不会继续显示旧月份快照。
+                local_deleted = _delete_sqlite_governance_month(month)
+                for item in payload_rows:
+                    db.session.add(KBRecall(
+                        kb_id=item['kb_id'],
+                        month=item['month'],
+                        recall_count=item['recall_count'],
+                        valid_recall_count=item['valid_recall_count'],
+                    ))
                 db.session.commit()
-                return jsonify({'success': True, 'count': count})
+
+                # 先 upsert 并校验全部新键，再清理旧键。这样失败时不会留下“整月为空”。
+                existing_rows = client.select_all(
+                    'kb_recall',
+                    filters={'month': f'eq.{month}'},
+                    columns='kb_id,month',
+                    order_by='kb_id',
+                    page_size=1000,
+                ) or []
+                existing_ids = {
+                    str(item.get('kb_id') or '').strip()
+                    for item in existing_rows
+                    if isinstance(item, dict) and str(item.get('kb_id') or '').strip()
+                }
+                for i in range(0, len(payload_rows), 500):
+                    chunk = payload_rows[i:i + 500]
+                    resp = client.upsert('kb_recall', chunk, on_conflict='kb_id,month')
+                    if resp is None or getattr(resp, 'status_code', 500) >= 400:
+                        raise RuntimeError(
+                            f'主库导入失败（批次起点 {i}）: '
+                            f'{getattr(resp, "text", "no response")}'
+                        )
+
+                after_rows = client.select_all(
+                    'kb_recall',
+                    filters={'month': f'eq.{month}'},
+                    columns='kb_id,month',
+                    order_by='kb_id',
+                    page_size=1000,
+                ) or []
+                after_ids = {
+                    str(item.get('kb_id') or '').strip()
+                    for item in after_rows
+                    if isinstance(item, dict) and str(item.get('kb_id') or '').strip()
+                }
+                expected_ids = {str(item['kb_id']).strip() for item in payload_rows}
+                missing_ids = sorted(expected_ids - after_ids)
+                if missing_ids:
+                    raise RuntimeError(f'主库导入校验失败，缺少 {len(missing_ids)} 个 Wiki ID')
+
+                stale_ids = sorted(existing_ids - expected_ids)
+                for i in range(0, len(stale_ids), 100):
+                    stale_chunk = stale_ids[i:i + 100]
+                    resp = client.delete('kb_recall', {
+                        'month': f'eq.{month}',
+                        'kb_id': _postgrest_in_str(stale_chunk),
+                    })
+                    if resp is None or getattr(resp, 'status_code', 500) >= 400:
+                        raise RuntimeError(
+                            f'主库旧数据清理失败: {getattr(resp, "text", "no response")}'
+                        )
+                db.session.commit()
+                return jsonify({'success': True, 'count': count, 'remote_deleted': len(stale_ids)})
+            except Exception as e:
+                # 远端可能已完成部分 upsert；不要误回退到旧本地数据，避免双落点产生不一致。
+                traceback.print_exc()
+                return jsonify({
+                    'success': False,
+                    'message': f'主库导入未完成，本地已保存本次导入：{e}',
+                    'local_committed': True,
+                    'remote_committed': False,
+                }), 502
+
         if not use_supabase:
-            # 远端写入失败时改为落本地，保证本地部署可用。
-            existing_keys = set()
+            # 本地替代路径使用同一个 SQLAlchemy 事务，删除和插入要么同时提交，要么全部回滚。
+            local_deleted = _delete_sqlite_governance_month(month)
             for item in payload_rows:
-                key = (item['kb_id'], item['month'])
-                if key in existing_keys:
-                    continue
                 recall_obj = KBRecall(
                     kb_id=item['kb_id'],
                     month=item['month'],
@@ -9266,7 +10539,6 @@ def import_governance_data_route():
                     valid_recall_count=item['valid_recall_count']
                 )
                 db.session.add(recall_obj)
-                existing_keys.add(key)
             db.session.commit()
             return jsonify({'success': True, 'count': count, 'local_deleted': local_deleted})
         
@@ -11220,6 +12492,7 @@ class SupabaseClient:
         self.session.mount("http://", adapter)
 
     def insert(self, table, data, ignore_duplicates=False):
+        _assert_external_write_allowed(f'Supabase insert:{table}')
         headers = self.headers.copy()
         if ignore_duplicates:
             headers["Prefer"] = "resolution=ignore-duplicates"
@@ -11243,6 +12516,7 @@ class SupabaseClient:
             return MockResponse()
 
     def upsert(self, table, data, on_conflict=None):
+        _assert_external_write_allowed(f'Supabase upsert:{table}')
         headers = self.headers.copy()
         # Supabase specific: use on_conflict to specify unique column
         # and Prefer header to specify resolution
@@ -11342,6 +12616,7 @@ class SupabaseClient:
             return MockResponse()
 
     def rpc(self, func_name, params=None):
+        _assert_external_write_allowed(f'Supabase rpc:{func_name}')
         response = self.session.post(f"{self.url}/rest/v1/rpc/{func_name}", headers=self.headers, json=params or {}, timeout=60)
         return response
 
@@ -11353,6 +12628,7 @@ class SupabaseClient:
         Upload object to Supabase Storage.
         Note: Requires Storage policy allowing this key to upload.
         """
+        _assert_external_write_allowed(f'Supabase storage_upload:{bucket}')
         bucket = str(bucket or '').strip()
         object_path = str(object_path or '').lstrip('/')
         url = f"{self.url}/storage/v1/object/{bucket}/{object_path}"
@@ -11375,6 +12651,7 @@ class SupabaseClient:
         return self.session.get(url, headers=headers, timeout=300)
 
     def update(self, table, data, filters):
+        _assert_external_write_allowed(f'Supabase update:{table}')
         # filters: dict of {col: val} for equality check or raw operator string
         params = {}
         for k, v in filters.items():
@@ -11407,6 +12684,7 @@ class SupabaseClient:
             return MockResponse()
 
     def delete(self, table, filters):
+        _assert_external_write_allowed(f'Supabase delete:{table}')
         # filters: dict of {col: val} for equality check or raw operator string
         params = {}
         for k, v in filters.items():
@@ -11439,6 +12717,7 @@ class SupabaseClient:
             return MockResponse()
     
     def delete_in(self, table, column, values):
+        _assert_external_write_allowed(f'Supabase delete_in:{table}')
         if not values:
             return None
         # format: in.(val1,val2)
@@ -11798,6 +13077,8 @@ class LocalPostgreSQLClient:
 
     def _execute_query(self, query, params=None, fetch=True):
         """执行 SQL 查询"""
+        if not fetch:
+            _assert_external_write_allowed('Local PostgreSQL write')
         self._ensure_connection()
         try:
             with self.connection.cursor(cursor_factory=RealDictCursor) as cur:
@@ -12187,15 +13468,23 @@ class LocalPostgreSQLClient:
         """
         调用存储过程（兼容 SupabaseClient.rpc）
         """
+        _assert_external_write_allowed(f'Local PostgreSQL rpc:{func_name}')
         try:
             # 构建函数调用
             if params:
-                param_values = list(params.values())
+                param_values = [
+                    json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value
+                    for value in params.values()
+                ]
                 sql = f"SELECT * FROM {self._quote_qualified_identifier(func_name)}({','.join(['%s'] * len(param_values))})"
                 results = self._execute_query(sql, param_values, fetch=True)
             else:
                 sql = f"SELECT * FROM {self._quote_qualified_identifier(func_name)}()"
                 results = self._execute_query(sql, fetch=True)
+
+            # PostgreSQL functions may write rows even though they are invoked
+            # with SELECT. Persist those writes before returning success.
+            self.connection.commit()
             
             class MockResponse:
                 status_code = 200
@@ -12205,10 +13494,11 @@ class LocalPostgreSQLClient:
         
         except Exception as e:
             print(f"❌ RPC 调用失败: {e}")
+            error_text = str(e)
             class MockResponse:
                 status_code = 500
-                text = str(e)
-                def json(self): return {"error": str(e)}
+                text = error_text
+                def json(self): return {"error": error_text}
             return MockResponse()
     
     def _local_storage_path(self, bucket, object_path):
@@ -12229,6 +13519,7 @@ class LocalPostgreSQLClient:
         """
         上传文件到本地存储目录 instance/storage/<bucket>/<object_path>。
         """
+        _assert_external_write_allowed(f'Local storage upload:{bucket}')
         try:
             root, abs_path = self._local_storage_path(bucket, object_path)
             os.makedirs(os.path.dirname(abs_path), exist_ok=True)
@@ -13271,7 +14562,11 @@ def migrate_sqlite_to_supabase():
             missing = []
             missing_details = {}
             for t in required_tables:
-                ok, detail = _supabase_table_exists(client, t)
+                table_check = _supabase_table_exists(client, t)
+                if isinstance(table_check, tuple):
+                    ok, detail = table_check
+                else:
+                    ok, detail = bool(table_check), None
                 if not ok:
                     missing.append(t)
                     if detail:
@@ -13664,7 +14959,10 @@ def _kb_mail_config():
         or ''
     ).strip()
     if not email_address or not password:
-        raise ValueError('飞书邮箱未配置，请设置 KMATRIX_IMAP_EMAIL/KMATRIX_IMAP_PASSWORD 或 macOS 钥匙串凭证。')
+        raise ValueError(
+            '飞书邮箱未配置，请设置 KMATRIX_IMAP_EMAIL/KMATRIX_IMAP_PASSWORD 或 macOS 钥匙串凭证；'
+            '也可双击 KnowledgeBaseTool_Local/mac脚本/configure_feishu_imap_keychain.command 安全录入。'
+        )
 
     try:
         port = int(os.environ.get('KMATRIX_IMAP_PORT', '993'))
@@ -14359,7 +15657,8 @@ def kb_import():
         details = {'added_ids': [], 'updated_ids': [], 'skipped_ids': []}
         file_ids_all = [str(r['question_wiki_id']) for r in processed_records if 'question_wiki_id' in r]
         errors = []
-        pre_t1_sync_note = None
+        v1_backup_path = None
+        v1_backup_rows = []
         score_backup_path = None
         score_backup_rows = []
         delete_missing_requested = (
@@ -14414,7 +15713,7 @@ def kb_import():
                 return jsonify({
                     'success': False,
                     'requires_confirmation': True,
-                    'message': '全量覆盖导入会备份 V1 到 V1T-1，然后清空当前 V1 与评分缓存。请确认影响范围后继续。',
+                    'message': '全量覆盖导入会先将当前 V1 与评分缓存备份到本地文件，然后清空并重建数据。请确认影响范围后继续。',
                     'preview': {
                         'incoming_count': len(processed_records),
                         'current_v1_count': current_count,
@@ -14446,19 +15745,14 @@ def kb_import():
 
         # Mode 2: Overwrite (Clear all data first)
         if mode == 'overwrite':
-            # 0. 先把当前 V1 备份到前刻库 V1T-1，再执行清空与导入（与手动「同步此刻到前刻」同一逻辑）
-            print("DEBUG: Overwrite mode — V1 -> V1T-1 backup before destructive import...")
-            sync_res = _run_kb_v1_to_t1_sync(client)
-            if not sync_res.get('success'):
-                return jsonify({
-                    'success': False,
-                    'message': (
-                        f"全量覆盖前自动同步到前刻库失败：{sync_res.get('message', 'unknown')}。"
-                        "此刻库未清空，请检查网络或权限后重试；亦可先手动点击「同步此刻到前刻」再导入。"
-                    )
-                }), 500
-            pre_t1_sync_note = sync_res.get('message') or ''
             try:
+                v1_backup_rows = client.select_all(
+                    'knowledge_base_v1', order_by='question_wiki_id', page_size=1000
+                ) or []
+                v1_backup_path = _write_json_backup('kb_import_overwrite', 'knowledge_base_v1', v1_backup_rows, {
+                    'action': 'overwrite_import_pre_clear',
+                    'incoming_count': len(processed_records)
+                })
                 score_backup_rows = client.select_all('kb_scores', order_by='id', page_size=1000) or []
                 score_backup_path = _write_json_backup('kb_import_overwrite', 'kb_scores', score_backup_rows, {
                     'action': 'overwrite_import_pre_clear',
@@ -14467,7 +15761,7 @@ def kb_import():
             except Exception as _e:
                 return jsonify({
                     'success': False,
-                    'message': f'全量覆盖前评分缓存备份失败：{str(_e)}。此刻库未清空，请检查磁盘权限后重试。'
+                    'message': f'全量覆盖前本地备份失败：{str(_e)}。V1 未清空，请检查数据库与磁盘权限后重试。'
                 }), 500
             # 1. Fetch all IDs first to ensure complete deletion
             # This avoids issues with implicit delete limits or partial content
@@ -14683,7 +15977,9 @@ def kb_import():
                 error_summary += "..."
             restore_info = {}
             if mode == 'overwrite':
-                restore_info['v1_restore'] = _run_kb_t1_to_v1_restore(client)
+                restore_info['v1_restore'] = _restore_table_rows(
+                    client, 'knowledge_base_v1', v1_backup_rows, conflict_col='question_wiki_id'
+                )
                 restore_info['score_restore'] = _restore_table_rows(client, 'kb_scores', score_backup_rows, conflict_col='id')
             return jsonify({
                 'success': False,
@@ -14693,6 +15989,7 @@ def kb_import():
                 'stats': stats,
                 'details': details,
                 'restore': restore_info,
+                'v1_backup_path': v1_backup_path,
                 'score_backup_path': score_backup_path
             }), 500
 
@@ -14722,8 +16019,8 @@ def kb_import():
             # The import is already committed.  Do not hide that result or attempt
             # a destructive rollback; make the missing downstream event explicit.
             out['sync_event_error'] = f'固定快照生成失败：{sync_error}'
-        if pre_t1_sync_note:
-            out['pre_sync_v1_to_t1'] = pre_t1_sync_note
+        if v1_backup_path:
+            out['v1_backup_path'] = v1_backup_path
         if score_backup_path:
             out['score_backup_path'] = score_backup_path
         if delete_missing_result is not None:
@@ -15047,7 +16344,7 @@ def kb_item_upsert():
 
     if request.method == 'GET':
         table = request.args.get('table', 'knowledge_base_v1')
-        if table not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+        if table != 'knowledge_base_v1':
             return jsonify({'success': False, 'message': 'Invalid table'}), 400
         wiki_id = request.args.get('id') or request.args.get('question_wiki_id')
         wiki_id = str(wiki_id or '').strip()
@@ -15185,108 +16482,6 @@ def kb_item_upsert():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
-def _run_kb_v1_to_t1_sync(client):
-    """
-    将 knowledge_base_v1 全量复制到 knowledge_base_v1_t1（按 t1 允许的列白名单）。
-    用于「同步此刻到前刻」以及「全量覆盖导入」前先备份 V1。
-    Returns dict: success (bool), message (str), count (int, 同步行数；v1 空时为 0)。
-    """
-    import time
-    try:
-        print("Starting manual sync from v1 to v1_t1...")
-        print("Fetching all data from v1 with page_size=1000...")
-        v1_data = client.select_all('knowledge_base_v1', order_by='question_wiki_id', page_size=1000)
-        if not v1_data:
-            print("v1 is empty, nothing to sync.")
-            client.delete('knowledge_base_v1_t1', {'question_wiki_id': 'not.is.null'})
-            # Also clear KB tag mapping for previous (方案A：previous 全量重建)
-            try:
-                client.delete('kb_item_tags', {'library_type': 'eq.previous'})
-            except Exception:
-                pass
-            return {'success': True, 'message': 'v1 is empty, t1 cleared.', 'count': 0}
-
-        allowed_columns = [
-            'question_wiki_id', 'question_type', 'question', 'answer', 'answer_type',
-            'if_bm25', 'similar_questions', 'error_list', 'keyword_list',
-            'image_urls', 'video_urls', 'file_urls', 'link_type', 'link_url',
-            'update_time', 'product_category_name', 'product_name'
-        ]
-        to_insert = []
-        for item in v1_data:
-            new_item = {}
-            for col in allowed_columns:
-                if col in item:
-                    new_item[col] = item[col]
-            to_insert.append(new_item)
-
-        print(f"Prepared {len(to_insert)} items for sync.")
-        print("Clearing v1_t1...")
-        del_resp = client.delete('knowledge_base_v1_t1', {'question_wiki_id': 'not.is.null'})
-        if del_resp.status_code >= 400:
-            return {'success': False, 'message': f"Failed to clear t1: {del_resp.text}", 'count': 0}
-
-        batch_size = 500
-        print(f"Inserting into v1_t1 in batches of {batch_size}...")
-        for i in range(0, len(to_insert), batch_size):
-            batch = to_insert[i:i + batch_size]
-            print(f"Inserting batch {i // batch_size + 1}/{len(to_insert) // batch_size + 1}...")
-            resp = client.insert('knowledge_base_v1_t1', batch)
-            if resp.status_code >= 400:
-                print(f"Batch insert failed: {resp.text}")
-                return {'success': False, 'message': f"Batch insert failed at index {i}: {resp.text}", 'count': 0}
-            time.sleep(0.1)
-
-        # Sync KB item tag mappings: current -> previous (全量重建)
-        try:
-            print("Syncing KB tags mapping current -> previous...")
-            client.delete('kb_item_tags', {'library_type': 'eq.previous'})
-            v1_ids = [str(it.get('question_wiki_id') or '').strip() for it in (v1_data or [])]
-            v1_ids = [x for x in v1_ids if x]
-            if v1_ids:
-                in_str = _postgrest_in_str(v1_ids)
-                cur_maps = client.select_all(
-                    'kb_item_tags',
-                    filters={'library_type': 'eq.current', 'question_wiki_id': in_str},
-                    columns='question_wiki_id,tag_id',
-                    order_by='question_wiki_id',
-                    page_size=1000
-                ) or []
-            else:
-                cur_maps = []
-
-            to_insert_maps = []
-            for m in cur_maps:
-                if not isinstance(m, dict):
-                    continue
-                wid = str(m.get('question_wiki_id') or '').strip()
-                tag_id = m.get('tag_id')
-                if wid and tag_id:
-                    to_insert_maps.append({
-                        'library_type': 'previous',
-                        'question_wiki_id': wid,
-                        'tag_id': tag_id
-                    })
-
-            if to_insert_maps:
-                map_batch_size = 500
-                for i in range(0, len(to_insert_maps), map_batch_size):
-                    batch = to_insert_maps[i:i + map_batch_size]
-                    resp = client.insert('kb_item_tags', batch)
-                    if resp.status_code >= 400:
-                        print(f"KB tags mapping insert failed: {resp.text}")
-                        # Non-fatal: keep data sync success
-                    time.sleep(0.05)
-        except Exception as e:
-            print(f"WARN: KB tags mapping sync failed: {e}")
-
-        print("Sync completed successfully.")
-        return {'success': True, 'message': f"Synced {len(to_insert)} items.", 'count': len(to_insert)}
-    except Exception as e:
-        print(f"Sync Exception: {e}")
-        traceback.print_exc()
-        return {'success': False, 'message': str(e), 'count': 0}
-
 def _restore_table_rows(client, table, rows, conflict_col='id'):
     """
     Full-replace restore helper used after destructive operations fail.
@@ -15306,51 +16501,6 @@ def _restore_table_rows(client, table, rows, conflict_col='id'):
     except Exception as e:
         traceback.print_exc()
         return {'success': False, 'message': str(e), 'count': 0}
-
-def _run_kb_t1_to_v1_restore(client):
-    """
-    Restore current V1 from V1T-1 after an overwrite import fails.
-    """
-    try:
-        allowed_columns = [
-            'question_wiki_id', 'question_type', 'question', 'answer', 'answer_type',
-            'if_bm25', 'similar_questions', 'error_list', 'keyword_list',
-            'image_urls', 'video_urls', 'file_urls', 'link_type', 'link_url',
-            'update_time', 'product_category_name', 'product_name'
-        ]
-        t1_data = client.select_all('knowledge_base_v1_t1', order_by='question_wiki_id', page_size=1000) or []
-        restore_rows = []
-        for item in t1_data:
-            if not isinstance(item, dict):
-                continue
-            restore_rows.append({col: item.get(col) for col in allowed_columns if col in item})
-
-        client.delete('knowledge_base_v1', {'question_wiki_id': 'not.is.null'})
-        client.delete('knowledge_base_v1', {'question_wiki_id': 'is.null'})
-        if restore_rows:
-            batch_size = 500
-            for i in range(0, len(restore_rows), batch_size):
-                resp = client.insert('knowledge_base_v1', restore_rows[i:i + batch_size])
-                if resp is None or getattr(resp, 'status_code', 500) >= 400:
-                    return {'success': False, 'message': getattr(resp, 'text', '') or f'V1 restore failed at {i}', 'count': i}
-        return {'success': True, 'message': f'Restored {len(restore_rows)} rows from V1T-1 to V1', 'count': len(restore_rows)}
-    except Exception as e:
-        traceback.print_exc()
-        return {'success': False, 'message': str(e), 'count': 0}
-
-
-@app.route('/api/kb/sync', methods=['POST'])
-@login_required
-def kb_sync():
-    client = get_supabase_client()
-    if not client:
-        return jsonify({'success': False, 'message': '本地主库未配置'}), 400
-    r = _run_kb_v1_to_t1_sync(client)
-    payload = {'success': r.get('success'), 'message': r.get('message')}
-    if 'count' in r:
-        payload['count'] = r['count']
-    code = 200 if r.get('success') else 500
-    return jsonify(payload), code
 
 @app.route('/api/kb/data_v2', methods=['GET'])
 @login_required
@@ -15406,7 +16556,7 @@ def kb_data_v2():
         filters['or'] = f"({','.join(or_clauses)})"
 
     # Security check to prevent arbitrary table access
-    if table not in ['knowledge_base_v1', 'knowledge_base_v1_t1']:
+    if table != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': 'Invalid table'}), 400
 
     try:
@@ -15444,7 +16594,7 @@ def kb_export():
     
     table = request.args.get('table', 'knowledge_base_v1')
     
-    if table not in ['knowledge_base_v1', 'knowledge_base_v1_t1']:
+    if table != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': 'Invalid table'}), 400
     
     # Filter params
@@ -15562,6 +16712,14 @@ _SM_EMBEDDING_DEFAULTS = {
     'timeout': 60,
     'fallback_to_ngram': True,
 }
+_SM_AI_REVIEW_DEFAULTS = {
+    'ai_review_enabled': False,
+    'ai_review_match_types': ['问题+答案均一致', '仅问题一致', '仅答案一致'],
+    'ai_review_batch_size': 8,
+    'ai_review_base_url': '',
+    'ai_review_model': '',
+    'ai_review_fail_closed': True,
+}
 _SM_EMBEDDING_TEXT_MAX_CHARS = 12000
 _SM_EMBEDDING_TRANSIENT_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
@@ -15615,6 +16773,25 @@ def _sm_normalize_embedding_config(raw=None, fallback_key=True):
     config['fallback_to_ngram'] = _sm_embedding_bool(
         raw.get('fallback_to_ngram'), config['fallback_to_ngram']
     )
+    config['ai_review_enabled'] = _sm_embedding_bool(
+        raw.get('ai_review_enabled'), _SM_AI_REVIEW_DEFAULTS['ai_review_enabled']
+    )
+    raw_types = raw.get('ai_review_match_types')
+    if not isinstance(raw_types, list):
+        raw_types = _SM_AI_REVIEW_DEFAULTS['ai_review_match_types']
+    config['ai_review_match_types'] = [
+        item for item in dict.fromkeys(str(item or '').strip() for item in raw_types)
+        if item in {'问题+答案均一致', '仅问题一致', '仅答案一致'}
+    ] or list(_SM_AI_REVIEW_DEFAULTS['ai_review_match_types'])
+    config['ai_review_batch_size'] = _sm_embedding_number(
+        raw.get('ai_review_batch_size'), _SM_AI_REVIEW_DEFAULTS['ai_review_batch_size'], int, 1, 20
+    )
+    for key in ('ai_review_base_url', 'ai_review_model'):
+        value = str(raw.get(key) or '').strip()
+        config[key] = value
+    config['ai_review_fail_closed'] = _sm_embedding_bool(
+        raw.get('ai_review_fail_closed'), _SM_AI_REVIEW_DEFAULTS['ai_review_fail_closed']
+    )
 
     custom_key = str(raw.get('api_key') or '').strip()
     embedding_host = urlparse(str(config.get('api_url') or '')).netloc.lower()
@@ -15635,6 +16812,20 @@ def _sm_normalize_embedding_config(raw=None, fallback_key=True):
             root_key = ''
     config['api_key'] = env_key or custom_key or root_key
     config['api_key_source'] = 'environment' if env_key else ('custom' if custom_key else ('ai_config' if root_key else ''))
+    review_custom_key = str(raw.get('ai_review_api_key') or '').strip()
+    config['ai_review_api_key'] = review_custom_key
+    try:
+        shared_ai_config = load_ai_config() or {}
+    except Exception:
+        shared_ai_config = {}
+    review_base_url = str(config.get('ai_review_base_url') or '').strip()
+    review_model = str(config.get('ai_review_model') or '').strip()
+    shared_base_url = str(shared_ai_config.get('base_url') or '').strip()
+    shared_model = str(shared_ai_config.get('model') or '').strip()
+    config['ai_review_resolved_base_url'] = review_base_url or shared_base_url
+    config['ai_review_resolved_model'] = review_model or shared_model
+    config['ai_review_resolved_api_key'] = review_custom_key or str(shared_ai_config.get('api_key') or '').strip()
+    config['ai_review_api_key_source'] = 'custom' if review_custom_key else ('ai_config' if config['ai_review_resolved_api_key'] else '')
     return config
 
 
@@ -15645,8 +16836,22 @@ def _sm_load_embedding_config():
 def _sm_public_embedding_config(config=None):
     config = dict(config or _sm_load_embedding_config())
     api_key = str(config.pop('api_key', '') or '')
+    review_key = str(config.pop('ai_review_api_key', '') or '')
+    config.pop('ai_review_resolved_api_key', None)
+    config.pop('ai_review_resolved_base_url', None)
+    config.pop('ai_review_resolved_model', None)
     config['api_key_configured'] = bool(api_key)
     config['api_key_source'] = str(config.get('api_key_source') or '')
+    config['ai_review'] = {
+        'enabled': bool(config.pop('ai_review_enabled', False)),
+        'match_types': config.pop('ai_review_match_types', list(_SM_AI_REVIEW_DEFAULTS['ai_review_match_types'])),
+        'batch_size': int(config.pop('ai_review_batch_size', _SM_AI_REVIEW_DEFAULTS['ai_review_batch_size'])),
+        'base_url': str(config.pop('ai_review_base_url', '') or ''),
+        'model': str(config.pop('ai_review_model', '') or ''),
+        'fail_closed': bool(config.pop('ai_review_fail_closed', True)),
+        'api_key_configured': bool(review_key or config.get('ai_review_api_key_source') == 'ai_config'),
+        'api_key_source': str(config.pop('ai_review_api_key_source', '') or ''),
+    }
     try:
         config['cache_count'] = int(
             SmartMappingEmbeddingCache.query.filter_by(
@@ -15677,7 +16882,11 @@ def _sm_save_embedding_config(payload):
     current_raw = _sm_read_embedding_config_file()
     merged = dict(current_raw)
     payload = payload if isinstance(payload, dict) else {}
-    for key in ('api_url', 'model', 'dimensions', 'threshold', 'batch_size', 'timeout', 'fallback_to_ngram'):
+    for key in (
+        'api_url', 'model', 'dimensions', 'threshold', 'batch_size', 'timeout', 'fallback_to_ngram',
+        'ai_review_enabled', 'ai_review_match_types', 'ai_review_batch_size', 'ai_review_base_url',
+        'ai_review_model', 'ai_review_fail_closed',
+    ):
         if key in payload:
             merged[key] = payload.get(key)
     if _sm_embedding_bool(payload.get('clear_api_key'), False):
@@ -15686,12 +16895,26 @@ def _sm_save_embedding_config(payload):
         new_key = str(payload.get('api_key') or '').strip()
         if new_key:
             merged['api_key'] = new_key
+    if _sm_embedding_bool(payload.get('clear_ai_review_api_key'), False):
+        merged.pop('ai_review_api_key', None)
+    else:
+        review_key = str(payload.get('ai_review_api_key') or '').strip()
+        if review_key:
+            merged['ai_review_api_key'] = review_key
 
     normalized = _sm_normalize_embedding_config(merged)
     _sm_validate_embedding_config(normalized)
+    review_config = _sm_ai_review_config(normalized)
+    if review_config['enabled']:
+        missing = [name for name in ('base_url', 'model', 'api_key') if not review_config.get(name)]
+        if missing:
+            raise ValueError(f'AI 事实复核配置不完整：缺少 {", ".join(missing)}')
     stored = {key: normalized[key] for key in _SM_EMBEDDING_DEFAULTS}
+    stored.update({key: normalized[key] for key in _SM_AI_REVIEW_DEFAULTS})
     if str(merged.get('api_key') or '').strip():
         stored['api_key'] = str(merged.get('api_key') or '').strip()
+    if str(merged.get('ai_review_api_key') or '').strip():
+        stored['ai_review_api_key'] = str(merged.get('ai_review_api_key') or '').strip()
 
     path = _sm_embedding_config_path()
     temp_path = ''
@@ -15890,6 +17113,167 @@ def _sm_embedding_reason(match_type, question_score, answer_score, fallback_reas
     return f'Embedding问题{q_text}、答案{a_text}均达到阈值'
 
 
+_SM_AI_REVIEW_DECISIONS = {'consistent', 'conflict', 'uncertain'}
+
+
+def _sm_ai_review_config(config):
+    config = config if isinstance(config, dict) else {}
+    return {
+        'enabled': bool(config.get('ai_review_enabled')),
+        'match_types': set(config.get('ai_review_match_types') or _SM_AI_REVIEW_DEFAULTS['ai_review_match_types']),
+        'batch_size': max(1, min(20, int(config.get('ai_review_batch_size') or 8))),
+        'base_url': str(config.get('ai_review_resolved_base_url') or '').strip(),
+        'model': str(config.get('ai_review_resolved_model') or '').strip(),
+        'api_key': str(config.get('ai_review_resolved_api_key') or '').strip(),
+        'fail_closed': bool(config.get('ai_review_fail_closed', True)),
+    }
+
+
+def _sm_ai_review_parse(raw_text, expected_count):
+    text_value = str(raw_text or '').strip()
+    if text_value.startswith('```'):
+        text_value = re.sub(r'^```(?:json)?\s*', '', text_value, flags=re.IGNORECASE)
+        text_value = re.sub(r'\s*```$', '', text_value).strip()
+    parsed = json.loads(text_value)
+    reviews = parsed.get('reviews') if isinstance(parsed, dict) else parsed
+    if not isinstance(reviews, list):
+        raise ValueError('AI 复核响应缺少 reviews 数组')
+    normalized = {}
+    for item in reviews:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get('index'))
+        except (TypeError, ValueError):
+            continue
+        if index < 0 or index >= int(expected_count):
+            continue
+        decision = str(item.get('decision') or '').strip().lower()
+        if decision not in _SM_AI_REVIEW_DECISIONS:
+            decision = 'uncertain'
+        try:
+            confidence = max(0.0, min(1.0, float(item.get('confidence') or 0)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        conflicts = item.get('conflicts')
+        if not isinstance(conflicts, list):
+            conflicts = [conflicts] if conflicts else []
+        normalized[index] = {
+            'decision': decision,
+            'confidence': round(confidence, 4),
+            'conflicts': [str(value).strip()[:160] for value in conflicts if str(value or '').strip()][:8],
+            'reason': str(item.get('reason') or item.get('evidence') or '').strip()[:500],
+        }
+    return normalized
+
+
+def _sm_ai_review_batch(batch, review_config, match_type):
+    if not batch:
+        return {}
+    if not review_config['api_key'] or not review_config['base_url'] or not review_config['model']:
+        raise ValueError('AI 复核配置不完整，请配置 API Key、Base URL 和模型')
+    payload = []
+    for index, row in enumerate(batch):
+        faq = row.get('faq') or {}
+        match = row.get('match') or {}
+        payload.append({
+            'index': index,
+            'match_type': match_type,
+            'faq_question': str(faq.get('question') or '')[:12000],
+            'faq_answer': str(faq.get('answer') or '')[:12000],
+            'kb_question': str(match.get('kb_question') or '')[:12000],
+            'kb_answer': str(match.get('kb_answer') or '')[:12000],
+        })
+    system_prompt = (
+        '你是企业知识库事实一致性复核员。只根据输入的 FAQ 和知识库文本判断，不能补造外部事实。\n'
+        'Embedding 只代表主题相近，必须重点核对数字、尺寸、单位、型号、范围、条件、步骤和结论。\n'
+        '同一主题但关键事实不同，必须判 conflict；信息不足或无法确定，必须判 uncertain。\n'
+        'match_type=问题+答案均一致：问题和答案都必须没有关键事实冲突。\n'
+        'match_type=仅问题一致：问题事实必须一致；答案允许补充或表达不同，但出现明确事实冲突仍判 conflict。\n'
+        'match_type=仅答案一致：答案事实必须一致；问题允许表达不同，但出现明确事实冲突仍判 conflict。\n'
+        '只输出严格 JSON，不要 Markdown 或其他文字。格式：'
+        '{"reviews":[{"index":0,"decision":"consistent|conflict|uncertain",'
+        '"confidence":0.0,"conflicts":["冲突点"],"reason":"可核验依据"}]}'
+    )
+    user_prompt = json.dumps({'items': payload}, ensure_ascii=False)
+    raw = _ai_call_llm(
+        {'api_key': review_config['api_key'], 'base_url': review_config['base_url'], 'model': review_config['model']},
+        system_prompt,
+        user_prompt,
+        temperature=0.0,
+    )
+    return _sm_ai_review_parse(raw, len(batch))
+
+
+def _sm_apply_ai_reviews(results, embedding_config, on_update=None):
+    review_config = _sm_ai_review_config(embedding_config)
+    target_types = review_config['match_types']
+    targets = [
+        row for row in (results or [])
+        if isinstance(row, dict)
+        and isinstance(row.get('match'), dict)
+        and row['match'].get('type') in target_types
+    ]
+    for row in results or []:
+        match = row.get('match') if isinstance(row, dict) else None
+        if isinstance(match, dict):
+            match['ai_review_enabled'] = review_config['enabled']
+            match['ai_review_status'] = 'not_applicable'
+            match['ai_review_model'] = review_config['model'] if review_config['enabled'] else ''
+            match['ai_review_blocking'] = False
+    if not review_config['enabled'] or not targets:
+        return {'enabled': review_config['enabled'], 'reviewed': 0, 'status': 'skipped'}
+
+    for row in targets:
+        row['match']['ai_review_status'] = 'pending'
+        row['match']['ai_review_blocking'] = True
+    grouped = {}
+    for row in targets:
+        grouped.setdefault(str(row['match'].get('type')), []).append(row)
+    reviewed = 0
+    for match_type, group in grouped.items():
+        for start in range(0, len(group), review_config['batch_size']):
+            batch = group[start:start + review_config['batch_size']]
+            try:
+                decisions = _sm_ai_review_batch(batch, review_config, match_type)
+            except Exception as exc:
+                message = str(exc or '').replace('\n', ' ')[:240]
+                for row in batch:
+                    row['match']['ai_review_status'] = 'error'
+                    row['match']['ai_review_reason'] = message
+                    row['match']['ai_review_blocking'] = review_config['fail_closed']
+                    if callable(on_update):
+                        on_update(row)
+                continue
+            for index, row in enumerate(batch):
+                review = decisions.get(index) or {
+                    'decision': 'uncertain', 'confidence': 0.0,
+                    'conflicts': [], 'reason': 'AI 未返回该条记录的完整复核结果',
+                }
+                match = row['match']
+                match['ai_review_decision'] = review['decision']
+                match['ai_review_confidence'] = review['confidence']
+                match['ai_review_conflicts'] = review['conflicts']
+                match['ai_review_reason'] = review['reason']
+                reviewed += 1
+                if review['decision'] == 'consistent':
+                    match['ai_review_status'] = 'pass'
+                    match['ai_review_blocking'] = False
+                elif review['decision'] == 'conflict':
+                    match['ai_review_status'] = 'conflict'
+                    match['ai_review_blocking'] = False
+                    match['ai_original_type'] = match.get('type')
+                    match['type'] = '无匹配'
+                    conflict_text = '；'.join(review['conflicts']) or review['reason'] or '关键事实不一致'
+                    row['reason'] = _sm_trim_reason(f'AI事实复核冲突：{conflict_text}', 80)
+                else:
+                    match['ai_review_status'] = 'uncertain'
+                    match['ai_review_blocking'] = review_config['fail_closed']
+                if callable(on_update):
+                    on_update(row)
+    return {'enabled': True, 'reviewed': reviewed, 'status': 'done'}
+
+
 @app.route('/api/smart_mapping/embedding/config', methods=['GET', 'POST'])
 @login_required
 def sm_embedding_config():
@@ -15911,11 +17295,27 @@ def sm_embedding_test():
     config = _sm_normalize_embedding_config(raw)
     try:
         vectors = _sm_embedding_request(['扫地机清扫效果检查', '主刷和风道堵塞排查'], config)
+        ai_review = _sm_ai_review_config(config)
+        ai_result = {'enabled': ai_review['enabled'], 'tested': False}
+        if ai_review['enabled']:
+            # Use a deliberately conflicting dimension example so the test verifies
+            # that the configured model can return a structured fact-review result.
+            sample = [{
+                'faq': {'question': '设备尺寸是多少？', 'answer': '尺寸为 400×415×500 mm。'},
+                'match': {'type': '问题+答案均一致', 'kb_question': '设备尺寸是多少？', 'kb_answer': '尺寸为 350×456×456 mm。'},
+            }]
+            review = _sm_ai_review_batch(sample, ai_review, '问题+答案均一致')
+            ai_result = {
+                'enabled': True,
+                'tested': True,
+                'decision': (review.get(0) or {}).get('decision', 'uncertain'),
+            }
         return jsonify({
             'success': True,
             'message': 'Embedding API 连接成功',
             'model': config.get('model'),
             'dimensions': len(vectors[0]) if vectors else 0,
+            'ai_review': ai_result,
         })
     except Exception as exc:
         return jsonify({'success': False, 'message': str(exc)}), 502
@@ -16874,7 +18274,7 @@ def _kd_spawn_index_job(job_id):
 @login_required
 def kb_duplicate_index_status():
     library = str(request.args.get('library') or 'knowledge_base_v1').strip()
-    if library not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+    if library != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': '索引范围无效'}), 400
     job = KBDuplicateIndexJob.query.filter_by(
         username=_kd_task_username(),
@@ -16891,7 +18291,7 @@ def kb_duplicate_index_rebuild():
     payload = request.json or {}
     library = str(payload.get('library') or 'knowledge_base_v1').strip()
     mode = str(payload.get('mode') or 'incremental').strip()
-    if library not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+    if library != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': '索引范围无效'}), 400
     if mode not in ('incremental', 'full', 'failed'):
         return jsonify({'success': False, 'message': '索引模式无效'}), 400
@@ -16951,7 +18351,7 @@ def kb_duplicate_check_start():
     library = str(payload.get('library') or 'knowledge_base_v1').strip()
     question = str(payload.get('question') or '').strip()
     answer = str(payload.get('answer') or '').strip()
-    if library not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+    if library != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': '查重范围无效'}), 400
     if not question or not answer:
         return jsonify({'success': False, 'message': '拟新增问题和拟新增答案均为必填项'}), 400
@@ -17314,7 +18714,7 @@ def _sm_build_models_or_filter(models):
 def _sm_fetch_baseline_items(client, table, models):
     if not client:
         return []
-    if table not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+    if table != 'knowledge_base_v1':
         return []
     models = [str(x).strip() for x in (models or []) if str(x or '').strip()]
     if not models:
@@ -17353,7 +18753,7 @@ def sm_kb_load():
     data = request.json or {}
     table = data.get('table', 'knowledge_base_v1')
     models = data.get('models') or []
-    if table not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+    if table != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': 'Invalid table'}), 400
     if not isinstance(models, list) or not any(str(x or '').strip() for x in models):
         return jsonify({'success': False, 'message': 'models is required'}), 400
@@ -17537,7 +18937,7 @@ def sm_download_template():
     table = request.args.get('table', 'knowledge_base_v1')
     models_param = request.args.get('models', '')
     models = [m.strip() for m in re.split(r'[,，]', str(models_param)) if m and m.strip()]
-    if table not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+    if table != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': 'Invalid table'}), 400
     if not models:
         return jsonify({'success': False, 'message': 'models required'}), 400
@@ -17880,6 +19280,7 @@ def _sm_run_compare_job(job_id, username, table, models, faq_items, kb_items, th
         results = []
         done = 0
         last_db_ts = 0.0
+        review_config = _sm_ai_review_config(embedding_config)
         for faq_index, f in enumerate(faq_items or []):
             faq = f if isinstance(f, dict) else {}
             fq_raw = str(faq.get('question') or '').strip()
@@ -17936,7 +19337,7 @@ def _sm_run_compare_job(job_id, username, table, models, faq_items, kb_items, th
                     f'Embedding不可用，字符相似度降级；{_sm_reason_text(match_type, fq_raw, fa_raw, kb_q, kb_a)}',
                     80,
                 )
-            results.append({
+            result_row = {
                 'faq': {
                     'row_number': faq.get('row_number'),
                     'question': fq_raw,
@@ -17958,18 +19359,83 @@ def _sm_run_compare_job(job_id, username, table, models, faq_items, kb_items, th
                     'fallback_reason': fallback_reason if algorithm != 'embedding' else '',
                 },
                 'reason': reason,
-            })
+            }
+            if review_config['enabled'] and match_type in review_config['match_types']:
+                result_row['match'].update({
+                    'ai_review_enabled': True,
+                    'ai_review_status': 'pending',
+                    'ai_review_model': review_config['model'],
+                    'ai_review_blocking': True,
+                })
+            else:
+                result_row['match'].update({
+                    'ai_review_enabled': review_config['enabled'],
+                    'ai_review_status': 'not_applicable',
+                    'ai_review_model': review_config['model'] if review_config['enabled'] else '',
+                    'ai_review_blocking': False,
+                })
+            results.append(result_row)
             done += 1
             with _SM_LOCK:
                 job = _SM_JOBS.get(job_id) or {}
                 job['done'] = done
                 job['status'] = 'running'
+                job['results'] = list(results)
                 job['ts'] = time.time()
                 _SM_JOBS[job_id] = job
             now = time.time()
             if (now - last_db_ts) >= 0.8 or done == total:
-                _sm_db_update_job(job_id, done=done, status='running')
+                _sm_db_update_job(
+                    job_id,
+                    done=done,
+                    status='running',
+                    results_json=json.dumps(results, ensure_ascii=False),
+                )
                 last_db_ts = now
+
+        if review_config['enabled']:
+            review_total = sum(
+                1 for row in results
+                if isinstance(row, dict)
+                and isinstance(row.get('match'), dict)
+                and row['match'].get('type') in review_config['match_types']
+            )
+            review_progress = {'done': 0}
+            with _SM_LOCK:
+                if job_id in _SM_JOBS:
+                    _SM_JOBS[job_id]['message'] = f'正在进行 AI 事实复核：0/{review_total}'
+            _sm_db_update_job(job_id, message=f'正在进行 AI 事实复核：0/{review_total}')
+            def _publish_ai_review_progress(_row=None):
+                review_progress['done'] += 1
+                progress_message = f'正在进行 AI 事实复核：{review_progress["done"]}/{review_total}'
+                with _SM_LOCK:
+                    job = _SM_JOBS.get(job_id) or {}
+                    job['done'] = done
+                    job['status'] = 'running'
+                    job['results'] = list(results)
+                    job['message'] = progress_message
+                    job['ts'] = time.time()
+                    _SM_JOBS[job_id] = job
+                _sm_db_update_job(
+                    job_id,
+                    done=done,
+                    status='running',
+                    message=progress_message,
+                    results_json=json.dumps(results, ensure_ascii=False),
+                )
+
+            review_summary = _sm_apply_ai_reviews(
+                results,
+                embedding_config,
+                on_update=_publish_ai_review_progress,
+            )
+            job_message = (
+                f'{job_message}；AI 事实复核 {review_summary.get("reviewed", 0)} 条'
+                if review_summary.get('status') == 'done'
+                else f'{job_message}；AI 事实复核未执行'
+            )
+        else:
+            _sm_apply_ai_reviews(results, embedding_config)
 
         with _SM_LOCK:
             job = _SM_JOBS.get(job_id) or {}
@@ -18011,7 +19477,7 @@ def sm_compare_start():
     kb_items = data.get('kb_items') or []
     embedding_config = _sm_load_embedding_config()
     threshold = data.get('threshold', embedding_config.get('threshold', 0.75))
-    if table not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+    if table != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': 'Invalid table'}), 400
     if not isinstance(faq_items, list) or len(faq_items) == 0:
         return jsonify({'success': False, 'message': 'faq_items is required'}), 400
@@ -18072,18 +19538,17 @@ def sm_compare_status():
             'done': int(j.done or 0),
             'results': []
         }
-        if str(j.status) == 'done':
-            try:
-                out['results'] = json.loads(j.results_json or '[]') or []
-            except Exception:
-                out['results'] = []
+        try:
+            out['results'] = json.loads(j.results_json or '[]') or []
+        except Exception:
+            out['results'] = []
     return jsonify({
         'success': True,
         'status': out.get('status'),
         'message': out.get('message', ''),
         'total': out.get('total', 0),
         'done': out.get('done', 0),
-        'results': out.get('results', []) if out.get('status') == 'done' else []
+        'results': out.get('results', [])
     })
 
 
@@ -18148,7 +19613,7 @@ def sm_kb_search():
     q = (request.args.get('q') or '').strip()
     table = request.args.get('table', 'knowledge_base_v1')
     models_param = (request.args.get('models') or '').strip()
-    if table not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+    if table != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': 'Invalid table'}), 400
     if not q:
         return jsonify({'success': True, 'items': []})
@@ -18231,13 +19696,27 @@ def _sm_normalize_models(models):
     normalized = sorted(list(dict.fromkeys(normalized)))
     return normalized, invalid
 
+
+def _sm_ai_submission_block_reason(item):
+    item = item if isinstance(item, dict) else {}
+    match = item.get('match') if isinstance(item.get('match'), dict) else {}
+    ai_blocking = _sm_embedding_bool(match.get('ai_review_blocking'), False)
+    ai_manual_override = (
+        _sm_embedding_bool(match.get('ai_review_manual_override'), False)
+        or _sm_embedding_bool(item.get('ai_review_manual_override'), False)
+    )
+    if not ai_blocking or ai_manual_override:
+        return ''
+    status = str(match.get('ai_review_status') or 'pending').strip()
+    return f'AI事实复核未完成（{status or "待人工"}），请先人工确认或修改匹配类型后再提交'
+
 @app.route('/api/smart_mapping/submit', methods=['POST'])
 @login_required
 def sm_submit():
     data = request.json or {}
     table = data.get('table', 'knowledge_base_v1')
     items = data.get('items') or []
-    if table not in ('knowledge_base_v1', 'knowledge_base_v1_t1'):
+    if table != 'knowledge_base_v1':
         return jsonify({'success': False, 'message': 'Invalid table'}), 400
     if not isinstance(items, list) or len(items) == 0:
         return jsonify({'success': False, 'message': 'items is required'}), 400
@@ -18304,6 +19783,9 @@ def sm_submit():
 
             mode = 'create' if str(item.get('mode') or '').strip() == 'create' else 'update'
             match = item.get('match') if isinstance(item.get('match'), dict) else {}
+            ai_block_reason = _sm_ai_submission_block_reason(item)
+            if ai_block_reason:
+                raise ValueError(ai_block_reason)
             kb_id = str(match.get('kb_id') or '').strip()
             other_info = item.get('other_info') if isinstance(item.get('other_info'), dict) else {}
 
@@ -18726,34 +20208,32 @@ def _build_matrix_submit_snapshot_map(changes, base_map):
     snapshot_map = {}
     for wid in wiki_ids:
         base = dict(base_map.get(wid) or {})
-        before_set = set([_norm_pn(x) for x in _split_product_names(base.get('product_name')) if _norm_pn(x)])
-        after_set = set(before_set)
+        base_set = set([_norm_pn(x) for x in _split_product_names(base.get('product_name')) if _norm_pn(x)])
         group_changes = grouped.get(wid) or []
 
-        if not before_set and wid in current_products_map:
+        if wid in current_products_map:
             after_set = set(current_products_map.get(wid, set()))
-            before_set = set(after_set)
-            for change in group_changes:
-                pn = _norm_pn(change.get('product_name'))
-                if not pn:
-                    continue
-                old_v = bool(change.get('old_is_configured'))
-                new_v = bool(change.get('new_is_configured'))
-                if new_v and not old_v:
-                    before_set.discard(pn)
-                elif (not new_v) and old_v:
-                    before_set.add(pn)
         else:
+            after_set = set(base_set)
             for change in group_changes:
                 pn = _norm_pn(change.get('product_name'))
                 if not pn:
                     continue
-                old_v = bool(change.get('old_is_configured'))
                 new_v = bool(change.get('new_is_configured'))
-                if new_v and not old_v:
+                if new_v:
                     after_set.add(pn)
-                elif (not new_v) and old_v:
+                else:
                     after_set.discard(pn)
+
+        before_set = set(after_set)
+        for change in group_changes:
+            pn = _norm_pn(change.get('product_name'))
+            if not pn:
+                continue
+            if bool(change.get('old_is_configured')):
+                before_set.add(pn)
+            else:
+                before_set.discard(pn)
 
         before_row = dict(base)
         after_row = dict(base)
@@ -18982,12 +20462,7 @@ def get_matrix_data():
         def _compute_modified_ids(ids_subq, columns_list):
             edit_query = db.session.query(ProductMatrix.question_wiki_id).filter(
                 ProductMatrix.question_wiki_id.in_(ids_subq)
-            ).filter(
-                or_(
-                    ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                    ProductMatrix.manual_edit == True
-                )
-            )
+            ).filter(ProductMatrix.edit_source.in_(['cell', 'bulk']))
             wiki_ids_for_edits = [
                 str(r[0]).strip()
                 for r in edit_query.distinct().all()
@@ -19013,10 +20488,7 @@ def get_matrix_data():
             cols_norm_set = set([_normalize_name(x) for x in (columns_list or []) if _normalize_name(x)])
 
             qy = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(wiki_ids_for_edits)).filter(
-                or_(
-                    ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                    ProductMatrix.manual_edit == True
-                )
+                ProductMatrix.edit_source.in_(['cell', 'bulk'])
             )
             if columns_list:
                 qy = qy.filter(ProductMatrix.product_name.in_(columns_list))
@@ -19091,7 +20563,6 @@ def get_matrix_data():
              })
 
         source_products_map, source_ok = _fetch_kb_products_map('knowledge_base_v1', wiki_ids)
-        prev_products_map, prev_ok = _fetch_kb_products_map('knowledge_base_v1_t1', wiki_ids)
 
         # 3. Fetch Data for these IDs and Columns
         data_query = ProductMatrix.query.filter(
@@ -19130,7 +20601,6 @@ def get_matrix_data():
             if r.question_wiki_id not in data_map:
                 wid = str(r.question_wiki_id or "").strip()
                 source_products = sorted(list(source_products_map.get(wid, set()))) if source_ok else None
-                prev_products = sorted(list(prev_products_map.get(wid, set()))) if prev_ok else None
                 data_map[r.question_wiki_id] = {
                     'question_wiki_id': r.question_wiki_id,
                     'question': r.question_content,
@@ -19138,7 +20608,6 @@ def get_matrix_data():
                     'update_time': r.update_time,
                     'product_category': r.product_category,
                     'source_products': source_products,
-                    'prev_products': prev_products,
                     'products': {}
                 }
             
@@ -19208,8 +20677,7 @@ def get_matrix_mark_total():
         else:
             want_green = bool(marks.get('green', True))
             want_red = bool(marks.get('red', True))
-            want_yellow = bool(marks.get('yellow', True))
-            any_wanted = want_green or want_red or want_yellow
+            any_wanted = want_green or want_red
 
         if not any_wanted:
             return jsonify({'success': True, 'total': 0, 'base_total': 0})
@@ -19305,7 +20773,7 @@ def get_matrix_mark_total():
             if want_modified and want_unmodified:
                 return jsonify({'success': True, 'total': base_total, 'base_total': base_total})
         else:
-            if want_green and want_red and want_yellow:
+            if want_green and want_red:
                 return jsonify({'success': True, 'total': base_total, 'base_total': base_total})
 
         def _normalize_name(v):
@@ -19321,12 +20789,7 @@ def get_matrix_mark_total():
         if has_new_marks:
             edit_query = db.session.query(ProductMatrix.question_wiki_id).filter(
                 ProductMatrix.question_wiki_id.in_(base_ids_subq)
-            ).filter(
-                or_(
-                    ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                    ProductMatrix.manual_edit == True
-                )
-            )
+            ).filter(ProductMatrix.edit_source.in_(['cell', 'bulk']))
             wiki_ids_for_edits = [
                 str(r[0]).strip()
                 for r in edit_query.distinct().all()
@@ -19346,10 +20809,7 @@ def get_matrix_mark_total():
                     source_norm_map[x] = set([_normalize_name(v) for v in (source_products_map.get(x, set()) or set()) if _normalize_name(v)])
 
                 qy = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(wiki_ids_for_edits)).filter(
-                    or_(
-                        ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                        ProductMatrix.manual_edit == True
-                    )
+                    ProductMatrix.edit_source.in_(['cell', 'bulk'])
                 )
                 if col_list:
                     qy = qy.filter(ProductMatrix.product_name.in_(col_list))
@@ -19380,25 +20840,11 @@ def get_matrix_mark_total():
                 return jsonify({'success': True, 'total': max(0, base_total - modified_total), 'base_total': base_total})
             return jsonify({'success': True, 'total': 0, 'base_total': base_total})
         else:
-            wiki_ids_for_yellow = []
-            if want_yellow:
-                wiki_ids_for_yellow = [
-                    str(r[0]).strip()
-                    for r in db.session.query(base_ids_subq.c.question_wiki_id).all()
-                    if r and str(r[0]).strip()
-                ]
-                wiki_ids_for_yellow = list(dict.fromkeys(wiki_ids_for_yellow))
-
             wiki_ids_for_edits = []
             if want_green or want_red:
                 edit_query = db.session.query(ProductMatrix.question_wiki_id).filter(
                     ProductMatrix.question_wiki_id.in_(base_ids_subq)
-                ).filter(
-                    or_(
-                        ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                        ProductMatrix.manual_edit == True
-                    )
-                )
+                ).filter(ProductMatrix.edit_source.in_(['cell', 'bulk']))
                 wiki_ids_for_edits = [
                     str(r[0]).strip()
                     for r in edit_query.distinct().all()
@@ -19406,7 +20852,7 @@ def get_matrix_mark_total():
                 ]
                 wiki_ids_for_edits = list(dict.fromkeys(wiki_ids_for_edits))
 
-            ids_needed = sorted(list(dict.fromkeys(wiki_ids_for_yellow + wiki_ids_for_edits)))
+            ids_needed = sorted(list(dict.fromkeys(wiki_ids_for_edits)))
             if not ids_needed:
                 return jsonify({'success': True, 'total': 0, 'base_total': base_total})
 
@@ -19418,30 +20864,11 @@ def get_matrix_mark_total():
             for x in ids_needed:
                 source_norm_map[x] = set([_normalize_name(v) for v in (source_products_map.get(x, set()) or set()) if _normalize_name(v)])
 
-            prev_norm_map = {}
-            prev_ok = True
-            if want_yellow:
-                prev_products_map, prev_ok = _fetch_kb_products_map('knowledge_base_v1_t1', wiki_ids_for_yellow)
-                if prev_ok:
-                    for x in wiki_ids_for_yellow:
-                        prev_norm_map[x] = set([_normalize_name(v) for v in (prev_products_map.get(x, set()) or set()) if _normalize_name(v)])
-
             matched = set()
-
-            if want_yellow and prev_ok and cols_norm_set:
-                for x in wiki_ids_for_yellow:
-                    diff = source_norm_map.get(x, set()).symmetric_difference(prev_norm_map.get(x, set()))
-                    if not diff:
-                        continue
-                    if any((d in cols_norm_set) for d in diff):
-                        matched.add(x)
 
             if (want_green or want_red) and cols_norm_set:
                 qy = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(wiki_ids_for_edits)).filter(
-                    or_(
-                        ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                        ProductMatrix.manual_edit == True
-                    )
+                    ProductMatrix.edit_source.in_(['cell', 'bulk'])
                 )
                 if col_list:
                     qy = qy.filter(ProductMatrix.product_name.in_(col_list))
@@ -19646,12 +21073,7 @@ def export_matrix_data():
         def _compute_modified_ids(ids_subq, columns_list):
             edit_query = db.session.query(ProductMatrix.question_wiki_id).filter(
                 ProductMatrix.question_wiki_id.in_(ids_subq)
-            ).filter(
-                or_(
-                    ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                    ProductMatrix.manual_edit == True
-                )
-            )
+            ).filter(ProductMatrix.edit_source.in_(['cell', 'bulk']))
             wiki_ids_for_edits = [
                 str(r[0]).strip()
                 for r in edit_query.distinct().all()
@@ -19675,10 +21097,7 @@ def export_matrix_data():
 
             cols_norm_set = set([_normalize_name(x) for x in (columns_list or []) if _normalize_name(x)])
             qy = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(wiki_ids_for_edits)).filter(
-                or_(
-                    ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                    ProductMatrix.manual_edit == True
-                )
+                ProductMatrix.edit_source.in_(['cell', 'bulk'])
             )
             if columns_list:
                 qy = qy.filter(ProductMatrix.product_name.in_(columns_list))
@@ -19839,48 +21258,7 @@ def update_matrix_cell():
         item.last_synced_at = datetime.utcnow()
         db.session.commit()
 
-        warnings = []
-        if is_supabase_matrix_enabled():
-            try:
-                col = MatrixColumn.query.filter_by(product_name=product_name).first()
-                try:
-                    so = int(getattr(col, 'sort_order', 0) or 0) if col else 0
-                except Exception:
-                    so = 0
-                pm_payload = [{
-                    'question_wiki_id': str(wiki_id).strip(),
-                    'product_name': str(product_name).strip(),
-                    'is_configured': bool(item.is_configured),
-                    'manual_edit': bool(item.manual_edit),
-                    'edit_source': str(getattr(item, 'edit_source', '') or ''),
-                    'last_synced_at': _dt_to_iso(getattr(item, 'last_synced_at', None)),
-                    'question_content': getattr(item, 'question_content', None),
-                    'answer_content': getattr(item, 'answer_content', None),
-                    'update_time': getattr(item, 'update_time', None),
-                    'product_category': getattr(item, 'product_category', None)
-                }]
-
-                def _bg_sync_matrix_one():
-                    try:
-                        c = get_supabase_client()
-                        if c:
-                            resp_col = c.upsert('matrix_column', [{'product_name': str(product_name).strip(), 'sort_order': so}], on_conflict='product_name')
-                            if resp_col is None or getattr(resp_col, 'status_code', 500) >= 400:
-                                raise RuntimeError(getattr(resp_col, 'text', '') or 'matrix_column upsert failed')
-                            if pm_payload:
-                                resp_pm = c.upsert('product_matrix', pm_payload, on_conflict='question_wiki_id,product_name')
-                                if resp_pm is None or getattr(resp_pm, 'status_code', 500) >= 400:
-                                    raise RuntimeError(getattr(resp_pm, 'text', '') or 'product_matrix upsert failed')
-                    except Exception as e:
-                        raise RuntimeError(str(e))
-
-                _bg_sync_matrix_one()
-            except Exception as e:
-                warnings.append(f'远端矩阵同步失败: {str(e)}')
-
         out = {'success': True}
-        if warnings:
-            out['warnings'] = warnings
         return jsonify(out)
     except Exception as e:
         db.session.rollback()
@@ -19953,55 +21331,7 @@ def batch_update_matrix():
                 
         db.session.commit()
 
-        warnings = []
-        if is_supabase_matrix_enabled():
-            try:
-                col = MatrixColumn.query.filter_by(product_name=product_name).first()
-                try:
-                    so = int(getattr(col, 'sort_order', 0) or 0) if col else 0
-                except Exception:
-                    so = 0
-                rows = ProductMatrix.query.filter(
-                    ProductMatrix.question_wiki_id.in_(wiki_ids),
-                    ProductMatrix.product_name == product_name
-                ).all()
-                pm_payload = []
-                for r in rows:
-                    pm_payload.append({
-                        'question_wiki_id': str(getattr(r, 'question_wiki_id', '') or '').strip(),
-                        'product_name': str(getattr(r, 'product_name', '') or '').strip(),
-                        'is_configured': bool(getattr(r, 'is_configured', False)),
-                        'manual_edit': bool(getattr(r, 'manual_edit', False)),
-                        'edit_source': str(getattr(r, 'edit_source', '') or ''),
-                        'last_synced_at': _dt_to_iso(getattr(r, 'last_synced_at', None)),
-                        'question_content': getattr(r, 'question_content', None),
-                        'answer_content': getattr(r, 'answer_content', None),
-                        'update_time': getattr(r, 'update_time', None),
-                        'product_category': getattr(r, 'product_category', None)
-                    })
-                pm_payload = [x for x in pm_payload if x.get('question_wiki_id') and x.get('product_name')]
-
-                def _bg_sync_matrix_batch():
-                    try:
-                        c = get_supabase_client()
-                        if c:
-                            resp_col = c.upsert('matrix_column', [{'product_name': str(product_name).strip(), 'sort_order': so}], on_conflict='product_name')
-                            if resp_col is None or getattr(resp_col, 'status_code', 500) >= 400:
-                                raise RuntimeError(getattr(resp_col, 'text', '') or 'matrix_column upsert failed')
-                            if pm_payload:
-                                chunk_res = _supabase_upsert_chunks(c, 'product_matrix', pm_payload, on_conflict='question_wiki_id,product_name', chunk_size=500)
-                                if isinstance(chunk_res, dict) and chunk_res.get('ok') is False:
-                                    raise RuntimeError(json.dumps(chunk_res.get('errors') or [], ensure_ascii=False) or 'product_matrix batch upsert failed')
-                    except Exception as e:
-                        raise RuntimeError(str(e))
-
-                _bg_sync_matrix_batch()
-            except Exception as e:
-                warnings.append(f'远端矩阵同步失败: {str(e)}')
-
         out = {'success': True, 'updated': len(wiki_ids)}
-        if warnings:
-            out['warnings'] = warnings
         return jsonify(out)
         
     except Exception as e:
@@ -20026,10 +21356,7 @@ def get_matrix_mismatch_changes():
         
         if not wiki_ids:
             rows = db.session.query(ProductMatrix.question_wiki_id).filter(
-                or_(
-                    ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                    ProductMatrix.manual_edit == True
-                )
+                ProductMatrix.edit_source.in_(['cell', 'bulk'])
             ).distinct().all()
             wiki_ids = [str(r[0]).strip() for r in rows if r and str(r[0]).strip()]
         
@@ -20067,10 +21394,7 @@ def get_matrix_mismatch_changes():
             source_norm_map[wid] = set([_normalize_name(x) for x in (source_products_map.get(wid, set()) or set()) if _normalize_name(x)])
         
         q = ProductMatrix.query.filter(ProductMatrix.question_wiki_id.in_(wiki_ids)).filter(
-            or_(
-                ProductMatrix.edit_source.in_(['cell', 'bulk']),
-                ProductMatrix.manual_edit == True
-            )
+            ProductMatrix.edit_source.in_(['cell', 'bulk'])
         )
         matrix_rows = q.all()
         
@@ -20091,10 +21415,6 @@ def get_matrix_mismatch_changes():
                 continue
             
             es = str(getattr(r, 'edit_source', '') or '').strip()
-            if es not in ['cell', 'bulk']:
-                if bool(getattr(r, 'manual_edit', False)):
-                    es = 'cell'
-            
             if es not in ['cell', 'bulk']:
                 continue
             
@@ -20128,6 +21448,7 @@ def get_matrix_mismatch_changes():
 def submit_matrix_changes():
     data = request.json or {}
     operation_id = str(data.get('operation_id') or '').strip() or str(uuid.uuid4())
+    source_code = _normalize_source_code(data.get('source_code') or 'product_matrix', default='product_matrix')
     attempt = data.get('attempt')
     try:
         attempt = int(attempt) if attempt is not None else 1
@@ -20142,12 +21463,87 @@ def submit_matrix_changes():
     if errors:
         return jsonify({'success': False, 'message': 'Validation failed', 'errors': errors}), 400
 
+    blocked_batches = _active_clone_review_batches_for_changes(normalized)
+    if blocked_batches:
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_required',
+            'message': '克隆差异校验尚未完成，暂不能提交相关矩阵修改',
+            'review_batches': [batch.batch_id for batch in blocked_batches],
+        }), 409
+
+    stale_batches = _stale_ready_clone_review_batches_for_changes(normalized)
+    if stale_batches:
+        db.session.commit()
+        return jsonify({
+            'success': False,
+            'code': 'knowledge_revision_stale',
+            'message': '源知识内容已变化，请重新扫描后再提交',
+            'review_batches': [batch.batch_id for batch in stale_batches],
+        }), 409
+
+    # Run local release guards before the authoritative PostgreSQL transaction.
+    # Otherwise a blocked or stale clone batch could be committed remotely and
+    # only then receive a 409 response from this process.
+    unified_remote = None
+    if is_supabase_matrix_enabled():
+        remote_client = get_supabase_client()
+        if remote_client:
+            rpc_response = remote_client.rpc('public.submit_matrix_changes_unified', {
+                'p_operation_id': operation_id,
+                'p_actor': current_user.username,
+                'p_source_code': source_code,
+                'p_changes': normalized,
+            })
+            if rpc_response is None or getattr(rpc_response, 'status_code', 500) >= 400:
+                return jsonify({
+                    'success': False,
+                    'code': 'unified_write_failed',
+                    'message': getattr(rpc_response, 'text', '') or '统一提交事务失败',
+                    'operation_id': operation_id,
+                }), 409
+            try:
+                rpc_body = rpc_response.json()
+                if isinstance(rpc_body, list) and rpc_body:
+                    rpc_body = rpc_body[0]
+                if isinstance(rpc_body, dict) and rpc_body.get('success') is False:
+                    return jsonify(rpc_body), 409
+                unified_remote = rpc_body if isinstance(rpc_body, dict) else {'success': True}
+            except Exception:
+                unified_remote = {'success': True}
+
     _maybe_pull_matrix_and_logs_from_supabase(force=False)
     
     existing_op = MatrixSubmitOperation.query.filter_by(operation_id=operation_id).first()
     if existing_op and existing_op.status == 'success':
+        existing_changes = sorted((
+            str(row.question_wiki_id or '').strip(),
+            str(row.product_name or '').strip(),
+            bool(row.old_is_configured),
+            bool(row.new_is_configured),
+            str(row.edit_source or '').strip(),
+        ) for row in Button.query.filter_by(operation_id=operation_id).all())
+        requested_changes = sorted((
+            str(change['question_wiki_id']).strip(),
+            str(change['product_name']).strip(),
+            bool(change['old_is_configured']),
+            bool(change['new_is_configured']),
+            str(change['edit_source'] or '').strip(),
+        ) for change in normalized)
+        if existing_op.created_by != current_user.username or existing_changes != requested_changes:
+            return jsonify({
+                'success': False,
+                'code': 'operation_id_conflict',
+                'message': 'operation_id 已被其他提交请求使用',
+            }), 409
         written = Button.query.filter_by(operation_id=operation_id).count()
         return jsonify({'success': True, 'operation_id': operation_id, 'written': written})
+    if existing_op and existing_op.created_by != current_user.username:
+        return jsonify({
+            'success': False,
+            'code': 'operation_id_conflict',
+            'message': 'operation_id 已被其他提交请求使用',
+        }), 409
     
     try:
         if not existing_op:
@@ -20165,6 +21561,8 @@ def submit_matrix_changes():
         db.session.flush()
         
         conflict_errors = []
+        ready_review_changes = _ready_clone_review_changes()
+        association_audit = {}
         wiki_ids = []
         product_names = []
         for c in normalized:
@@ -20187,13 +21585,36 @@ def submit_matrix_changes():
         for idx, c in enumerate(normalized):
             wiki_id = str(c.get('question_wiki_id') or '').strip()
             product_name = str(c.get('product_name') or '').strip()
+            old_val = bool(c.get('old_is_configured'))
             new_val = bool(c.get('new_is_configured'))
             current_val = bool(current_map.get((wiki_id, product_name), False))
-            if current_val != new_val:
+            review_batch = ready_review_changes.get((wiki_id, product_name, old_val, new_val))
+            if review_batch and current_val == old_val:
+                review_items = [
+                    row for row in MatrixCloneReviewItem.query.filter_by(batch_id=review_batch.batch_id).all()
+                    if row.decision == 'link_existing'
+                    and str(row.selected_existing_wiki_id or '').strip() == wiki_id
+                    and str(row.target_model or '').strip() == product_name
+                ]
+                for review_item in review_items:
+                    association_audit.setdefault(wiki_id, []).append({
+                        'decision': 'link_existing',
+                        'source_wiki_id': str(review_item.question_wiki_id or '').strip(),
+                        'target_wiki_id': wiki_id,
+                        'target_model': product_name,
+                        'batch_id': review_batch.batch_id,
+                        'review_item_id': review_item.item_id,
+                        'original_clone_disposition': 'not_materialized',
+                        'relation_before': old_val,
+                        'relation_after': new_val,
+                    })
+                _apply_ready_clone_review_change(c, review_batch)
+            elif current_val != new_val:
                 conflict_errors.append(f'第 {idx + 1} 条: 冲突：当前库值({current_val}) 与待提交 after({new_val}) 不一致')
         
         if conflict_errors:
             raise ValueError('\n'.join(conflict_errors))
+        db.session.flush()
         
         now = datetime.utcnow()
         to_write = []
@@ -20221,12 +21642,30 @@ def submit_matrix_changes():
         
         db.session.add_all(to_write)
         db.session.flush()
+
+        submitted_keys = {
+            (str(c['question_wiki_id']).strip(), str(c['product_name']).strip())
+            for c in normalized
+        }
+        submitted_matrix_rows = ProductMatrix.query.filter(
+            ProductMatrix.question_wiki_id.in_(wiki_ids),
+            ProductMatrix.product_name.in_(product_names)
+        ).all()
+        submitted_matrix_rows = [
+            row for row in submitted_matrix_rows
+            if (str(row.question_wiki_id or '').strip(), str(row.product_name or '').strip()) in submitted_keys
+        ]
+        for row in submitted_matrix_rows:
+            row.manual_edit = True
+            row.edit_source = 'submitted'
+            row.last_synced_at = now
+        db.session.flush()
         
         supabase_info = {
             'button': {'enabled': bool(is_supabase_button_sync_enabled()), 'attempted': False},
             'modifications': {'attempted': False}
         }
-        if is_supabase_button_sync_enabled():
+        if is_supabase_button_sync_enabled() and not unified_remote:
             client = get_supabase_client()
             if client:
                 payload = []
@@ -20251,9 +21690,10 @@ def submit_matrix_changes():
                     raise RuntimeError(f"按钮提交日志写入失败 ({supabase_info['button']['status_code']}): {supabase_info['button']['text'] or 'unknown error'}")
         
         existing_op.status = 'success'
+        _mark_ready_clone_review_batches_submitted()
         db.session.commit()
 
-        if is_supabase_matrix_enabled():
+        if is_supabase_matrix_enabled() and not unified_remote:
             try:
                 client = get_supabase_client()
                 if client:
@@ -20295,11 +21735,40 @@ def submit_matrix_changes():
                         btn_payload.append(row)
                     if btn_payload:
                         _supabase_upsert_chunks(client, 'button', btn_payload, on_conflict='operation_id,question_wiki_id,product_name', chunk_size=500)
+                    matrix_payload = []
+                    for row in submitted_matrix_rows:
+                        matrix_payload.append({
+                            'question_wiki_id': str(row.question_wiki_id or '').strip(),
+                            'product_name': str(row.product_name or '').strip(),
+                            'is_configured': bool(row.is_configured),
+                            'manual_edit': bool(row.manual_edit),
+                            'edit_source': str(row.edit_source or ''),
+                            'last_synced_at': _dt_to_iso(row.last_synced_at),
+                            'question_content': row.question_content,
+                            'answer_content': row.answer_content,
+                            'update_time': row.update_time,
+                            'product_category': row.product_category,
+                        })
+                    if matrix_payload:
+                        _supabase_upsert_chunks(
+                            client,
+                            'product_matrix',
+                            matrix_payload,
+                            on_conflict='question_wiki_id,product_name',
+                            chunk_size=500,
+                        )
             except Exception:
                 pass
         
         warnings = []
         try:
+            if unified_remote:
+                supabase_info['button']['attempted'] = True
+                supabase_info['button']['ok'] = True
+                supabase_info['modifications']['attempted'] = True
+                supabase_info['modifications']['ok'] = True
+                supabase_info['unified_transaction'] = unified_remote
+                raise StopIteration
             client = get_supabase_client()
             if client:
                 wiki_ids = []
@@ -20345,12 +21814,15 @@ def submit_matrix_changes():
 
                     _attach_change_meta(rec, {
                         'source': '机型矩阵管理',
+                        'workflow': 'matrix_clone_review' if association_audit.get(wid) else 'matrix_submit',
+                        'action_kind': 'association' if association_audit.get(wid) else 'model_scope_edit',
                         'operation_id': operation_id,
                         'edit_source': edit_sources[0] if len(edit_sources) == 1 else ','.join(edit_sources),
                         'changed_products': changed_products,
                         'before': before_obj,
                         'after': after_obj,
-                        'changed_fields': changed_fields
+                        'changed_fields': changed_fields,
+                        'association_changes': association_audit.get(wid, []),
                     })
                     mod_records.append(rec)
                 
@@ -20366,6 +21838,8 @@ def submit_matrix_changes():
                     supabase_info['modifications']['ok'] = bool(mod_resp) and getattr(mod_resp, 'status_code', 500) in [200, 201]
                     if not supabase_info['modifications']['ok']:
                         warnings.append(f"修改记录写入失败 ({supabase_info['modifications']['status_code']}): {supabase_info['modifications']['text'] or 'unknown error'}")
+        except StopIteration:
+            pass
         except Exception as e:
             warnings.append(f"修改记录写入异常: {str(e)}")
         
@@ -20660,12 +22134,12 @@ def get_matrix_stats():
         if mode == 'model':
             # Count configured entries for this model
             # Try exact match first
-            count = ProductMatrix.query.filter_by(product_name=source).count()
+            count = ProductMatrix.query.filter_by(product_name=source, is_configured=True).count()
             
             # If 0, try removing spaces from source (or matching leniently)
             if count == 0 and ' ' in source:
                 clean_source = source.replace(' ', '')
-                count = ProductMatrix.query.filter_by(product_name=clean_source).count()
+                count = ProductMatrix.query.filter_by(product_name=clean_source, is_configured=True).count()
                 
             # Also try matching against DB if DB has spaces but source doesn't? 
             # (Less likely given user input usually comes from catalog which seems to be the one with spaces?)
@@ -20689,11 +22163,1998 @@ def get_matrix_stats():
                         ))) == n)\
                         .count()
             else:
-                count = db.session.query(ProductMatrix.question_wiki_id).filter(ProductMatrix.product_category == source).distinct().count()
+                count = db.session.query(ProductMatrix.question_wiki_id).filter(
+                    ProductMatrix.product_category == source,
+                    ProductMatrix.is_configured == True,
+                ).distinct().count()
             
         return jsonify({'success': True, 'count': count})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
+
+def _clone_review_json(value, default):
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, type(default)) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _clone_review_revision(question, answer):
+    content = json.dumps(
+        {'question': str(question or ''), 'answer': str(answer or '')},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+    return 'sha256:' + hashlib.sha256(content.encode('utf-8')).hexdigest()
+
+
+def _clone_review_rule_payload(row):
+    return {
+        'rule_id': row.rule_id,
+        'target_model': row.target_model,
+        'feature_id': row.feature_id,
+        'feature_name': row.feature_name,
+        'source_value': row.source_value,
+        'target_value': row.target_value,
+        'difference_type': row.difference_type,
+        'evidence_sources': _clone_review_json(row.evidence_sources_json, []),
+        'source_search_terms': _clone_review_json(row.source_search_terms_json, []),
+        'target_search_terms': _clone_review_json(row.target_search_terms_json, []),
+        'kb_intents': _clone_review_json(row.kb_intents_json, []),
+        'evidence_quote': row.evidence_quote or '',
+        'status': row.status,
+        'rule_version': row.rule_version,
+    }
+
+
+def _clone_review_item_has_detection_error(row):
+    return row.detection_status in {'pending_scan', 'scan_failed', 'stale'}
+
+
+def _normalize_clone_review_default_item(row):
+    legacy_consistent = row.risk_level == 'low'
+    legacy_unmatched = (
+        row.risk_level == 'unknown'
+        and not _clone_review_json(row.difference_rule_ids_json, [])
+        and not row.error_message
+    )
+    if row.detection_status != 'scanned' or not (legacy_consistent or legacy_unmatched):
+        return False
+    row.risk_level = 'default'
+    row.suggested_action = 'keep'
+    if row.decision == 'pending' and not row.decided_by:
+        row.decision = 'keep'
+        row.apply_status = 'not_required'
+        row.result_wiki_id = row.question_wiki_id
+    return True
+
+
+def _clone_review_item_is_default_pass(row):
+    return (
+        row.detection_status == 'scanned'
+        and row.risk_level == 'default'
+        and row.decision == 'keep'
+        and row.apply_status == 'not_required'
+        and not row.decided_by
+    )
+
+
+def _clone_review_item_requires_attention(row):
+    if row.detection_status == 'source_removed':
+        return False
+    if _clone_review_item_has_detection_error(row):
+        return True
+    if _clone_review_item_ai_pending(row):
+        return True
+    if row.decision in {'pending', 'defer'}:
+        return not (
+            row.risk_level == 'default'
+            and row.decision == 'pending'
+            and not row.decided_by
+        )
+    if row.apply_status not in {'applied', 'not_required'}:
+        return True
+    return False
+
+
+def _clone_review_item_ai_pending(row):
+    review = _clone_review_json(row.ai_impact_review_json, {})
+    return review.get('status') in {'queued', 'processing'}
+
+
+def _clone_review_risk_summary(items):
+    risk_items = [
+        item for item in (items or [])
+        if item.detection_status == 'scanned' and item.risk_level in {'high', 'medium'}
+    ]
+    pending_count = sum(_clone_review_item_requires_attention(item) for item in risk_items)
+    return {
+        'total': len(risk_items),
+        'pending': pending_count,
+        'processed': len(risk_items) - pending_count,
+    }
+
+
+def _clone_review_item_payload(row):
+    _normalize_clone_review_default_item(row)
+    ai_impact_review = _clone_review_json(row.ai_impact_review_json, {})
+    return {
+        'item_id': row.item_id,
+        'question_wiki_id': row.question_wiki_id,
+        'target_model': row.target_model,
+        'source_model': row.source_model,
+        'knowledge_revision': row.knowledge_revision,
+        'question': row.question or '',
+        'answer': row.answer or '',
+        'product_category': row.product_category or '',
+        'detection_status': row.detection_status,
+        'risk_level': row.risk_level,
+        'suggested_action': row.suggested_action,
+        'decision': row.decision,
+        'decision_reason': row.decision_reason or '',
+        'difference_rule_ids': _clone_review_json(row.difference_rule_ids_json, []),
+        'evidence_sources': _clone_review_json(row.evidence_sources_json, []),
+        'reuse_candidates': _clone_review_json(row.reuse_candidate_ids_json, []),
+        'ai_impact_review': ai_impact_review,
+        'ai_review_pending': ai_impact_review.get('status') in {'queued', 'processing'},
+        'selected_existing_wiki_id': row.selected_existing_wiki_id,
+        'apply_status': row.apply_status,
+        'result_wiki_id': row.result_wiki_id,
+        'error_message': row.error_message,
+        'default_pass': _clone_review_item_is_default_pass(row),
+        'manually_decided': bool(row.decided_by) and row.decision not in {'pending', 'defer'},
+        'requires_attention': _clone_review_item_requires_attention(row),
+    }
+
+
+def _clone_review_batch_requires_completion(batch, rules=None, items=None):
+    methods = _clone_review_json(batch.detection_methods_json, [])
+    rules = rules if rules is not None else MatrixCloneDifferenceRule.query.filter_by(batch_id=batch.batch_id).all()
+    items = items if items is not None else MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all()
+    for item_index, item in enumerate(items, start=1):
+        _normalize_clone_review_default_item(item)
+    if any(rule.status in {'needs_confirmation', 'pending_parse', 'source_conflict', 'parse_failed', 'stale'} for rule in rules):
+        return True
+    if any(
+        _clone_review_item_requires_attention(item)
+        for item in items
+    ):
+        return True
+    if methods == ['manual_difference_ai'] and not batch.manual_scope_confirmed_by:
+        return True
+    if 'parameter_check' in methods and batch.error_message:
+        return True
+    return False
+
+
+def _clone_review_expected_submit_changes(batch, items=None):
+    items = items if items is not None else MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all()
+    changes = {}
+    for item in items:
+        if item.detection_status == 'source_removed':
+            continue
+        base = {'product_name': item.target_model, 'edit_source': 'bulk'}
+        if item.decision == 'link_existing' and item.apply_status == 'applied':
+            change = {
+                **base,
+                'question_wiki_id': str(item.selected_existing_wiki_id or item.result_wiki_id or ''),
+                'old_is_configured': False,
+                'new_is_configured': True,
+            }
+        elif item.decision != 'remove_target':
+            change = {
+                **base,
+                'question_wiki_id': item.question_wiki_id,
+                'old_is_configured': False,
+                'new_is_configured': True,
+            }
+        else:
+            continue
+        wiki_id = str(change['question_wiki_id'] or '').strip()
+        if wiki_id:
+            changes[(wiki_id, str(change['product_name'] or '').strip())] = change
+    return list(changes.values())
+
+
+def _mark_clone_review_batch_source_stale(batch, items=None):
+    items = items if items is not None else MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all()
+    stale_items = []
+    for item in items:
+        if item.detection_status == 'source_removed':
+            continue
+        source_row = ProductMatrix.query.filter_by(
+            question_wiki_id=item.question_wiki_id,
+            product_name=item.source_model,
+        ).first()
+        current_revision = _clone_review_revision(
+            getattr(source_row, 'question_content', ''),
+            getattr(source_row, 'answer_content', ''),
+        )
+        if source_row is not None and current_revision == item.knowledge_revision:
+            continue
+        item.detection_status = 'stale'
+        item.apply_status = 'stale'
+        item.error_message = '源知识内容已变化，请重新扫描'
+        stale_items.append(item)
+    if stale_items:
+        batch.status = 'reviewing'
+        batch.completed_by = None
+        batch.completed_at = None
+        batch.error_message = '源知识内容已变化，请重新扫描后再完成或提交'
+    return stale_items
+
+
+def _ready_clone_review_changes():
+    mapped = {}
+    for batch in MatrixCloneReviewBatch.query.filter_by(status='ready_to_submit').all():
+        for change in _clone_review_expected_submit_changes(batch):
+            key = (
+                change['question_wiki_id'],
+                change['product_name'],
+                bool(change['old_is_configured']),
+                bool(change['new_is_configured']),
+            )
+            mapped[key] = batch
+    return mapped
+
+
+def _stale_ready_clone_review_batches_for_changes(changes):
+    submitted_keys = {
+        (
+            str(change.get('question_wiki_id') or ''),
+            str(change.get('product_name') or ''),
+            bool(change.get('old_is_configured')),
+            bool(change.get('new_is_configured')),
+        )
+        for change in changes
+    }
+    stale_batches = []
+    for batch in MatrixCloneReviewBatch.query.filter_by(status='ready_to_submit').all():
+        expected_keys = {
+            (
+                change['question_wiki_id'],
+                change['product_name'],
+                bool(change['old_is_configured']),
+                bool(change['new_is_configured']),
+            )
+            for change in _clone_review_expected_submit_changes(batch)
+        }
+        if expected_keys.intersection(submitted_keys) and _mark_clone_review_batch_source_stale(batch):
+            stale_batches.append(batch)
+    return stale_batches
+
+
+def _apply_ready_clone_review_change(change, batch):
+    wiki_id = str(change.get('question_wiki_id') or '')
+    product_name = str(change.get('product_name') or '')
+    row = ProductMatrix.query.filter_by(question_wiki_id=wiki_id, product_name=product_name).first()
+    current_value = bool(row.is_configured) if row else False
+    old_value = bool(change.get('old_is_configured'))
+    new_value = bool(change.get('new_is_configured'))
+    if current_value != old_value:
+        raise ValueError(f'冲突：当前库值({current_value}) 与复核草稿 before({old_value}) 不一致')
+    if row is None:
+        item = MatrixCloneReviewItem.query.filter(
+            MatrixCloneReviewItem.batch_id == batch.batch_id,
+            or_(
+                MatrixCloneReviewItem.question_wiki_id == wiki_id,
+                MatrixCloneReviewItem.selected_existing_wiki_id == wiki_id,
+            ),
+        ).first()
+        template = ProductMatrix.query.filter_by(question_wiki_id=wiki_id).first()
+        row = ProductMatrix(
+            question_wiki_id=wiki_id,
+            product_name=product_name,
+            question_content=(item.question if item and item.question_wiki_id == wiki_id else getattr(template, 'question_content', '')),
+            answer_content=(item.answer if item and item.question_wiki_id == wiki_id else getattr(template, 'answer_content', '')),
+            product_category=(item.product_category if item and item.question_wiki_id == wiki_id else getattr(template, 'product_category', '')),
+            update_time=getattr(template, 'update_time', None),
+            is_configured=new_value,
+            manual_edit=True,
+            edit_source='bulk',
+            last_synced_at=datetime.utcnow(),
+        )
+        db.session.add(row)
+    else:
+        row.is_configured = new_value
+        row.manual_edit = True
+        row.edit_source = 'bulk'
+        row.last_synced_at = datetime.utcnow()
+
+
+def _mark_ready_clone_review_batches_submitted():
+    submitted_count = 0
+    for batch in MatrixCloneReviewBatch.query.filter_by(status='ready_to_submit').all():
+        expected = _clone_review_expected_submit_changes(batch)
+        expected_tuples = {
+            (
+                change['question_wiki_id'],
+                change['product_name'],
+                bool(change['old_is_configured']),
+                bool(change['new_is_configured']),
+            )
+            for change in expected
+        }
+        if not expected_tuples:
+            continue
+        submitted_tuples = {
+            (
+                str(row.question_wiki_id or ''),
+                str(row.product_name or ''),
+                bool(row.old_is_configured),
+                bool(row.new_is_configured),
+            )
+            for row in Button.query.filter(
+                Button.question_wiki_id.in_({value[0] for value in expected_tuples}),
+                Button.product_name.in_({value[1] for value in expected_tuples}),
+                Button.submitted_at >= (batch.completed_at or batch.created_at),
+            ).all()
+        }
+        if expected_tuples.issubset(submitted_tuples):
+            batch.status = 'submitted'
+            batch.submitted_at = datetime.utcnow()
+            submitted_count += 1
+    return submitted_count
+
+
+def _normalize_clone_review_batch_status(batch):
+    if batch.status != 'ready_to_submit':
+        return False
+    rules = MatrixCloneDifferenceRule.query.filter_by(batch_id=batch.batch_id).all()
+    items = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all()
+    if not _clone_review_batch_requires_completion(batch, rules=rules, items=items):
+        return False
+    batch.status = 'reviewing'
+    batch.completed_by = None
+    batch.completed_at = None
+    return True
+
+
+def _clone_review_batch_can_delete(batch, username):
+    return bool(
+        batch
+        and batch.created_by == username
+        and batch.status not in {'created', 'generating', 'applying'}
+        and not _matrix_clone_scan_is_active(batch)
+    )
+
+
+def _clone_review_batch_payload(batch, include_items=True):
+    _normalize_clone_review_batch_status(batch)
+    rules = MatrixCloneDifferenceRule.query.filter_by(batch_id=batch.batch_id).order_by(
+        MatrixCloneDifferenceRule.created_at.asc()
+    ).all()
+    items = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).order_by(
+        MatrixCloneReviewItem.risk_level.asc(), MatrixCloneReviewItem.question_wiki_id.asc()
+    ).all() if include_items else []
+    stats = Counter(item.risk_level for item in items)
+    stats.update(f'decision_{item.decision}' for item in items)
+    payload = {
+        'success': True,
+        'batch_id': batch.batch_id,
+        'operation_id': batch.operation_id,
+        'source_mode': batch.source_mode,
+        'source_value': batch.source_value,
+        'target_models': _clone_review_json(batch.target_models_json, []),
+        'scope_mode': batch.scope_mode,
+        'strategy': batch.strategy,
+        'status': batch.status,
+        'detection_methods': _clone_review_json(batch.detection_methods_json, []),
+        'manual_difference_text': batch.manual_difference_text or '',
+        'difference_rule_version': batch.difference_rule_version,
+        'ai_parse_status': batch.ai_parse_status,
+        'manual_scope_confirmed_by': batch.manual_scope_confirmed_by,
+        'manual_scope_confirmed_at': _dt_to_iso(batch.manual_scope_confirmed_at),
+        'source_count': batch.source_count,
+        'item_count': batch.item_count,
+        'error_message': batch.error_message,
+        'created_by': batch.created_by,
+        'created_at': _dt_to_iso(batch.created_at),
+        'can_delete': _clone_review_batch_can_delete(
+            batch,
+            current_user.username if current_user.is_authenticated else '',
+        ),
+        'rules': [_clone_review_rule_payload(rule) for rule in rules],
+        'stats': dict(stats),
+        'risk_summary': _clone_review_risk_summary(items),
+        'items': [_clone_review_item_payload(item) for item in items],
+        'expected_submit_changes': _clone_review_expected_submit_changes(batch, items=items) if include_items else [],
+        'progress': _matrix_clone_review_progress_payload(batch, items=items if include_items else None),
+        'scan_active': _matrix_clone_scan_is_active(batch),
+    }
+    scope_snapshot = _clone_review_json(batch.scope_snapshot_json, {})
+    if isinstance(scope_snapshot, dict):
+        payload['exclude_tag_names'] = _normalize_matrix_clone_exclude_tag_names(
+            scope_snapshot.get('exclude_tag_names')
+        )
+        payload['excluded_count'] = int(scope_snapshot.get('excluded_count') or 0)
+    if isinstance(scope_snapshot, dict) and scope_snapshot.get('parameter_refresh'):
+        payload['parameter_refresh'] = scope_snapshot['parameter_refresh']
+    methods = _clone_review_json(batch.detection_methods_json, [])
+    if 'parameter_check' in methods and include_items:
+        parameter_rules, parameter_error = _clone_review_parameter_difference_rules(
+            batch.source_value,
+            (_clone_review_json(batch.target_models_json, []) or [''])[0],
+        )
+        parameter_rules = _clone_review_parameter_rules_with_ids(parameter_rules)
+        payload['parameter_rules'] = parameter_rules
+        payload['parameter_rules_error'] = parameter_error
+    if {'parameter_check', 'manual_difference_ai'}.issubset(methods):
+        manual_rules = [
+            _clone_review_rule_payload(rule)
+            for rule in rules
+            if 'user_input' in _clone_review_json(rule.evidence_sources_json, [])
+        ]
+        target_model = (_clone_review_json(batch.target_models_json, []) or [''])[0]
+        audit_rows, audit_error = _clone_review_parameter_catalog_audit(
+            manual_rules, batch.source_value, target_model,
+        )
+        payload['parameter_catalog_audit'] = {
+            'source': 'ParamAggregator 8511',
+            'status': 'unavailable' if audit_error else 'completed',
+            'error_message': audit_error,
+            'summary': dict(Counter(row['result'] for row in audit_rows)),
+            'items': audit_rows,
+        }
+    return payload
+
+
+def _append_clone_review_backup_row(sheet, values, *, header=False):
+    sheet.append(values)
+    for cell in sheet[sheet.max_row]:
+        if isinstance(cell.value, str):
+            # Preserve user content beginning with "=" as text, not an Excel formula.
+            cell.data_type = 's'
+        cell.alignment = Alignment(wrap_text=True, vertical='top')
+        if header:
+            cell.font = Font(bold=True)
+
+
+def _clone_review_backup_workbook(batch, items, rules):
+    workbook = Workbook()
+    batch_sheet = workbook.active
+    batch_sheet.title = '批次信息'
+    _append_clone_review_backup_row(batch_sheet, ['字段', '值'], header=True)
+    batch_fields = [
+        ('exported_at', datetime.now().astimezone().isoformat()),
+        ('exported_by', current_user.username if current_user.is_authenticated else ''),
+        ('batch_id', batch.batch_id),
+        ('operation_id', batch.operation_id),
+        ('source_mode', batch.source_mode),
+        ('source_value', batch.source_value),
+        ('target_models_json', batch.target_models_json or '[]'),
+        ('scope_mode', batch.scope_mode),
+        ('scope_snapshot_json', batch.scope_snapshot_json or '{}'),
+        ('strategy', batch.strategy),
+        ('status', batch.status),
+        ('detection_methods_json', batch.detection_methods_json or '[]'),
+        ('manual_difference_text', batch.manual_difference_text or ''),
+        ('difference_rules_json', batch.difference_rules_json or '[]'),
+        ('difference_rule_version', batch.difference_rule_version),
+        ('ai_parse_status', batch.ai_parse_status),
+        ('manual_scope_confirmed_by', batch.manual_scope_confirmed_by or ''),
+        ('manual_scope_confirmed_at', _dt_to_iso(batch.manual_scope_confirmed_at) or ''),
+        ('source_count', batch.source_count),
+        ('item_count', batch.item_count),
+        ('created_by', batch.created_by or ''),
+        ('created_at', _dt_to_iso(batch.created_at) or ''),
+        ('completed_by', batch.completed_by or ''),
+        ('completed_at', _dt_to_iso(batch.completed_at) or ''),
+        ('submitted_at', _dt_to_iso(batch.submitted_at) or ''),
+        ('error_message', batch.error_message or ''),
+    ]
+    for field, value in batch_fields:
+        _append_clone_review_backup_row(batch_sheet, [field, value])
+    batch_sheet.column_dimensions['A'].width = 34
+    batch_sheet.column_dimensions['B'].width = 100
+    batch_sheet.freeze_panes = 'A2'
+
+    item_sheet = workbook.create_sheet('需人工处理知识')
+    item_headers = [
+        'item_id', 'batch_id', 'question_wiki_id', 'target_model', 'source_model',
+        'knowledge_revision', 'question', 'answer', 'product_category', 'detection_status',
+        'risk_level', 'suggested_action', 'decision', 'decision_reason',
+        'difference_rule_ids_json', 'evidence_sources_json', 'reuse_candidate_ids_json',
+        'ai_impact_review_json', 'selected_existing_wiki_id', 'apply_status',
+        'result_wiki_id', 'decided_by', 'decided_at', 'applied_at', 'error_message',
+        'default_pass', 'requires_attention',
+    ]
+    _append_clone_review_backup_row(item_sheet, item_headers, header=True)
+    for item in items:
+        _append_clone_review_backup_row(item_sheet, [
+            item.item_id, item.batch_id, item.question_wiki_id, item.target_model,
+            item.source_model, item.knowledge_revision or '', item.question or '', item.answer or '',
+            item.product_category or '', item.detection_status, item.risk_level,
+            item.suggested_action, item.decision, item.decision_reason or '',
+            item.difference_rule_ids_json or '[]', item.evidence_sources_json or '[]',
+            item.reuse_candidate_ids_json or '[]', item.ai_impact_review_json or '{}',
+            item.selected_existing_wiki_id or '', item.apply_status, item.result_wiki_id or '',
+            item.decided_by or '', _dt_to_iso(item.decided_at) or '',
+            _dt_to_iso(item.applied_at) or '', item.error_message or '',
+            _clone_review_item_is_default_pass(item), _clone_review_item_requires_attention(item),
+        ])
+    item_sheet.freeze_panes = 'A2'
+    item_sheet.auto_filter.ref = item_sheet.dimensions
+    for column in ('A', 'B', 'F', 'O', 'P', 'Q', 'R'):
+        item_sheet.column_dimensions[column].width = 38
+    for column in ('G', 'H'):
+        item_sheet.column_dimensions[column].width = 70
+    for column in ('C', 'D', 'E', 'I', 'J', 'K', 'L', 'M', 'N', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'AA'):
+        item_sheet.column_dimensions[column].width = 20
+
+    rule_sheet = workbook.create_sheet('差异规则')
+    rule_headers = [
+        'rule_id', 'batch_id', 'target_model', 'feature_id', 'feature_name',
+        'source_value', 'target_value', 'difference_type', 'evidence_sources_json',
+        'source_search_terms_json', 'target_search_terms_json', 'kb_intents_json',
+        'evidence_quote', 'status', 'rule_version', 'created_at',
+    ]
+    _append_clone_review_backup_row(rule_sheet, rule_headers, header=True)
+    for rule in rules:
+        _append_clone_review_backup_row(rule_sheet, [
+            rule.rule_id, rule.batch_id, rule.target_model, rule.feature_id,
+            rule.feature_name or '', rule.source_value or '', rule.target_value or '',
+            rule.difference_type, rule.evidence_sources_json or '[]',
+            rule.source_search_terms_json or '[]', rule.target_search_terms_json or '[]',
+            rule.kb_intents_json or '[]', rule.evidence_quote or '', rule.status,
+            rule.rule_version, _dt_to_iso(rule.created_at) or '',
+        ])
+    rule_sheet.freeze_panes = 'A2'
+    rule_sheet.auto_filter.ref = rule_sheet.dimensions
+    for column in ('A', 'B', 'I', 'J', 'K', 'L'):
+        rule_sheet.column_dimensions[column].width = 38
+    for column in ('C', 'D', 'E', 'F', 'G', 'H', 'M', 'N', 'O', 'P'):
+        rule_sheet.column_dimensions[column].width = 22
+
+    return workbook
+
+
+def _clone_review_ai_rules(manual_text, target_model):
+    deterministic = parse_manual_difference_text(manual_text, target_model=target_model)
+    # Deterministic parsing is the stable baseline. AI only supplements fields it cannot parse.
+    ai_switch = str(os.environ.get('MATRIX_CLONE_REVIEW_AI_SYNC', '1') or '').strip().lower()
+    if ai_switch in {'0', 'false', 'no', 'off'}:
+        return deterministic, ('completed_deterministic' if deterministic else 'needs_confirmation')
+    config = load_ai_config() or {}
+    if not all(str(config.get(key) or '').strip() for key in ('api_key', 'base_url', 'model')):
+        return deterministic, ('completed_deterministic' if deterministic else 'needs_confirmation')
+    system_prompt = (
+        '你是知识库机型差异规则辅助解析器。确定性解析结果是基准，不能改写、反转或覆盖它；'
+        '你只补充基准未识别的字段。只提取用户原文明确写出的旧型号(source)和目标型号(target)事实，'
+        'source_value 与 target_value 必须逐字出现在原文中，不得根据常识、样本或推测补值。'
+        '按一个功能字段输出一条规则，绝不能把同一句中的不同单位交叉配对；两边数值相同则不输出规则。'
+        'model order may be target first or source first; use the model labels, never the text order. '
+        '返回严格 JSON 对象，字段 rules 为数组；每项包含 feature_id、feature_name、source_value、'
+        'target_value、difference_type、source_search_terms、target_search_terms、kb_intents、'
+        'confidence、evidence_quote。evidence_quote 必须是原文连续片段。'
+    )
+    known_features = [
+        {
+            'feature_id': rule.get('feature_id'),
+            'source_value': rule.get('source_value'),
+            'target_value': rule.get('target_value'),
+        }
+        for rule in deterministic
+    ]
+    user_prompt = (
+        f'目标型号：{target_model}\n'
+        f'确定性基准规则（只读，不得覆盖）：{json.dumps(known_features, ensure_ascii=False)}\n'
+        f'用户原文：{manual_text}'
+    )
+    try:
+        raw = _ai_call_llm(config, system_prompt, user_prompt, temperature=0.0)
+        ai_rules = validate_ai_difference_rules(raw, source_text=manual_text, target_model=target_model)
+        known_feature_ids = {str(rule.get('feature_id') or '') for rule in deterministic}
+        ai_rules = [
+            rule for rule in ai_rules
+            if str(rule.get('feature_id') or '') not in known_feature_ids
+        ]
+        merged = merge_difference_rules(deterministic, ai_rules)
+        return merged, ('completed_ai' if ai_rules else ('completed_ai_no_change' if deterministic else 'parse_failed'))
+    except Exception:
+        return deterministic, ('completed_ai_fallback' if deterministic else 'parse_failed')
+
+
+def _clone_review_parameter_category(source_model, target_model):
+    """Resolve the one catalog category shared by both clone models."""
+    source_name = normalize_model_name(source_model)
+    target_name = normalize_model_name(target_model)
+    matches = []
+    for category_name, models in (parse_product_catalog() or {}).items():
+        normalized_models = {
+            normalize_model_name(model)
+            for model in (models or [])
+            if str(model or '').strip()
+        }
+        if source_name in normalized_models and target_name in normalized_models:
+            matches.append(str(category_name))
+    if len(matches) != 1:
+        raise ValueError('源型号与目标型号未归入同一唯一产品品类，无法同步参数对比')
+    return matches[0]
+
+
+def _refresh_clone_parameter_comparison(category_name='扫地机', actor=None):
+    """Sync the parameter catalog and compare it with the current KB before clone review."""
+    actor = str(actor or '').strip()
+    if not actor:
+        actor = current_user.username if current_user.is_authenticated else 'system'
+    snapshot = fetch_catalog_snapshot(category_name)
+    connection = connect_main_database()
+    try:
+        store_snapshot(connection, snapshot, actor)
+        binding_summary = refresh_model_bindings(
+            connection,
+            category_name=category_name,
+            catalog_models=[
+                str(model).strip()
+                for model in (parse_product_catalog().get(category_name) or [])
+                if str(model).strip()
+            ],
+            actor=actor,
+        )
+        comparison = run_current_knowledge_parameter_comparison(
+            connection,
+            category_name=category_name,
+            actor=actor,
+        )
+    finally:
+        connection.close()
+    return {
+        'category_name': category_name,
+        'snapshot_id': str(snapshot.get('snapshot_id') or ''),
+        'source_version': str(snapshot.get('source_version') or ''),
+        'content_hash': str(snapshot.get('content_hash') or ''),
+        'comparison_run_id': str(comparison.get('run_id') or ''),
+        'scan_run_id': str((comparison.get('scan_result') or {}).get('run_id') or ''),
+        'result_counts': comparison.get('result_counts') or {},
+        'binding_summary': binding_summary,
+        'refreshed_at': datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _clone_review_parameter_rules(wiki_ids, target_model, comparison_run_id=None):
+    if not wiki_ids:
+        return [], None
+    connection = None
+    try:
+        connection = connect_main_database()
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT source_name, model_id
+                FROM parameter_model_alias_binding
+                WHERE status = 'confirmed'
+                """
+            )
+            bindings = [dict(row) for row in cursor.fetchall()]
+            normalized_target = normalize_model_name(target_model)
+            model_ids = list(dict.fromkeys(
+                str(row.get('model_id') or '') for row in bindings
+                if normalize_model_name(row.get('source_name')) == normalized_target and str(row.get('model_id') or '')
+            ))
+            if len(model_ids) != 1:
+                return [], '目标型号尚未完成唯一参数映射'
+            run_filter = 'AND run.run_id = %s' if comparison_run_id else ''
+            params = [model_ids[0], wiki_ids]
+            if comparison_run_id:
+                params.append(str(comparison_run_id))
+            cursor.execute(
+                f"""
+                SELECT DISTINCT ON (finding.question_wiki_id, finding.feature_id)
+                       finding.finding_id, finding.question_wiki_id, finding.feature_id,
+                       finding.asserted_value, finding.canonical_value, finding.result_status,
+                       finding.severity, finding.reason, snapshot.content_json AS snapshot_content_json
+                FROM parameter_check_finding AS finding
+                JOIN parameter_check_run AS run ON run.run_id = finding.run_id
+                LEFT JOIN parameter_snapshot AS snapshot ON snapshot.snapshot_id = run.snapshot_id
+                WHERE run.status = 'completed'
+                  AND finding.model_id = %s
+                  AND finding.question_wiki_id = ANY(%s)
+                  {run_filter}
+                ORDER BY finding.question_wiki_id, finding.feature_id, finding.created_at DESC
+                """,
+                tuple(params),
+            )
+            findings = [dict(row) for row in cursor.fetchall()]
+        rules = []
+        for finding in findings:
+            status = str(finding.get('result_status') or '')
+            snapshot = finding.get('snapshot_content_json') or {}
+            feature = next(
+                (
+                    item for item in snapshot.get('features') or []
+                    if str(item.get('id') or '') == str(finding.get('feature_id') or '')
+                ),
+                {},
+            )
+            feature_name = str(feature.get('name') or finding.get('feature_id') or '')
+            feature_description = str(feature.get('description') or '').strip()
+            source_terms = [feature_name, str(finding.get('asserted_value') or '')]
+            target_terms = [feature_name, str(finding.get('canonical_value') or '')]
+            if feature_description:
+                source_terms.append(feature_description)
+                target_terms.append(feature_description)
+            rules.append({
+                'target_model': target_model,
+                'question_wiki_id': str(finding.get('question_wiki_id') or ''),
+                'feature_id': str(finding.get('feature_id') or ''),
+                'feature_name': feature_name,
+                # The catalog description is explanatory context, never an independent fact.
+                'feature_description': feature_description,
+                'source_value': str(finding.get('asserted_value') or ''),
+                'target_value': str(finding.get('canonical_value') or ''),
+                'difference_type': 'same' if status == 'consistent' else ('value_changed' if status == 'conflict' else 'comparison_unavailable'),
+                'source_search_terms': list(dict.fromkeys(term for term in source_terms if term)),
+                'target_search_terms': list(dict.fromkeys(term for term in target_terms if term)),
+                'kb_intents': [feature_name],
+                'confidence': 1.0,
+                'evidence_sources': ['parameter_check'],
+                'evidence_quote': str(finding.get('reason') or ''),
+                'status': 'valid' if status in {'consistent', 'conflict'} else 'needs_confirmation',
+                'finding_id': str(finding.get('finding_id') or ''),
+                'result_status': status,
+            })
+        return rules, None
+    except Exception as exc:
+        return [], str(exc)
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+_CLONE_REVIEW_GENERIC_INTENT_TOKENS = {
+    '什么', '多少', '是否', '怎么', '如何', '可以', '支持', '能否', '的是', '是多',
+}
+
+
+def _clone_review_intent_tokens(value):
+    return {
+        token for token in _kb_reference_search_tokens(value)
+        if token not in _CLONE_REVIEW_GENERIC_INTENT_TOKENS and not token.isdigit()
+    }
+
+
+def _clone_review_rule_value(value):
+    return re.sub(r'\s+', '', str(value or '')).lower()
+
+
+_CLONE_REVIEW_GENERIC_POLARITY_VALUES = {
+    '支持', '不支持', '暂不支持', '有', '无', '没有', '是', '否', '具备', '不具备',
+    '配备', '未配备', '不配备', '包含', '不包含', '可用', '不可用', '适用', '不适用',
+    'true', 'false', '√', '×', '✕',
+}
+
+
+def _clone_review_boolean_state(value):
+    normalized = _clone_review_rule_value(value)
+    if not normalized:
+        return None
+    if normalized in {'无', '否', 'false', '×', '✕'}:
+        return False
+    if normalized in {'有', '是', 'true', '√'}:
+        return True
+    if any(marker in normalized for marker in (
+        '不支持', '不具备', '未配备', '不配备', '没有', '不包含', '不可用', '不适用',
+    )):
+        return False
+    if any(normalized.startswith(marker) for marker in ('支持', '具备', '配备', '包含', '可用', '适用')):
+        return True
+    return None
+
+
+def _clone_review_value_is_direct_evidence(value):
+    normalized = _clone_review_rule_value(value)
+    return bool(normalized and normalized not in _CLONE_REVIEW_GENERIC_POLARITY_VALUES)
+
+
+_CLONE_REVIEW_NUMERIC_UNITS = {
+    'pa': ('pressure', 1.0), '帕': ('pressure', 1.0),
+    'kpa': ('pressure', 1000.0),
+    'mm': ('length', 1.0), '毫米': ('length', 1.0),
+    'cm': ('length', 10.0), '厘米': ('length', 10.0),
+    'ml': ('capacity', 1.0), '毫升': ('capacity', 1.0),
+    'l': ('capacity', 1000.0), '升': ('capacity', 1000.0),
+    'mah': ('battery_capacity', 1.0), '毫安时': ('battery_capacity', 1.0), '毫安': ('battery_capacity', 1.0),
+    'n': ('force', 1.0), '牛': ('force', 1.0),
+    '℃': ('temperature', 1.0), '°c': ('temperature', 1.0),
+    '孔': ('count_hole', 1.0), '种': ('count_kind', 1.0),
+}
+_CLONE_REVIEW_NUMERIC_UNIT_PATTERN = '|'.join(
+    re.escape(unit) for unit in sorted(_CLONE_REVIEW_NUMERIC_UNITS, key=len, reverse=True)
+)
+_CLONE_REVIEW_NUMERIC_ATOM_PATTERN = re.compile(
+    rf'(?P<number>\d+(?:\.\d+)?)\s*(?P<unit>{_CLONE_REVIEW_NUMERIC_UNIT_PATTERN})',
+    re.IGNORECASE,
+)
+_CLONE_REVIEW_NUMERIC_SUM_PATTERN = re.compile(
+    rf'(?P<left>\d+(?:\.\d+)?)\s*(?P<left_unit>{_CLONE_REVIEW_NUMERIC_UNIT_PATTERN})?'
+    rf'\s*(?:\+|＋|加)\s*(?P<right>\d+(?:\.\d+)?)\s*'
+    rf'(?P<right_unit>{_CLONE_REVIEW_NUMERIC_UNIT_PATTERN})',
+    re.IGNORECASE,
+)
+_CLONE_REVIEW_ADDITIVE_DIMENSIONS = {'length', 'capacity', 'count_hole', 'count_kind'}
+
+
+def _clone_review_numeric_values(value):
+    text = str(value or '')
+    values = []
+    for match in _CLONE_REVIEW_NUMERIC_ATOM_PATTERN.finditer(text):
+        unit = match.group('unit').lower()
+        dimension, scale = _CLONE_REVIEW_NUMERIC_UNITS[unit]
+        values.append({
+            'dimension': dimension,
+            'value': float(match.group('number')) * scale,
+            'expression': match.group(0).strip(),
+            'kind': 'atomic',
+        })
+    for match in _CLONE_REVIEW_NUMERIC_SUM_PATTERN.finditer(text):
+        right_unit = match.group('right_unit').lower()
+        left_unit = str(match.group('left_unit') or right_unit).lower()
+        left_dimension, left_scale = _CLONE_REVIEW_NUMERIC_UNITS[left_unit]
+        right_dimension, right_scale = _CLONE_REVIEW_NUMERIC_UNITS[right_unit]
+        if left_dimension != right_dimension or left_dimension not in _CLONE_REVIEW_ADDITIVE_DIMENSIONS:
+            continue
+        values.append({
+            'dimension': left_dimension,
+            'value': float(match.group('left')) * left_scale + float(match.group('right')) * right_scale,
+            'expression': match.group(0).strip(),
+            'kind': 'sum',
+        })
+    return values
+
+
+def _clone_review_equivalent_numeric_expression(target_value, candidate_content):
+    targets = _clone_review_numeric_values(target_value)
+    if not targets:
+        return None
+    for target in targets:
+        for candidate in _clone_review_numeric_values(candidate_content):
+            if target['dimension'] != candidate['dimension']:
+                continue
+            if math.isclose(target['value'], candidate['value'], rel_tol=1e-9, abs_tol=1e-6):
+                if _clone_review_rule_value(target_value) == _clone_review_rule_value(candidate['expression']):
+                    continue
+                return candidate
+    return None
+
+
+def _clone_review_feature_terms(rule):
+    terms = difference_feature_terms(
+        rule.get('feature_id'),
+        rule.get('feature_name'),
+        rule.get('feature_description'),
+    )
+    return {
+        _clone_review_rule_value(term)
+        for term in terms
+        if re.search(r'[\u4e00-\u9fff]', str(term or ''))
+    }
+
+
+_CLONE_REVIEW_QUESTION_SIMILARITY_THRESHOLD = 0.55
+_CLONE_REVIEW_ANSWER_SIMILARITY_THRESHOLD = 0.45
+
+
+def _clone_review_index_similar_questions(wiki_id):
+    """Read indexed similar questions when available; matrix rows keep only the main question."""
+    if not wiki_id:
+        return []
+    try:
+        row = KBDuplicateRetrievalIndex.query.filter_by(
+            library_type='knowledge_base_v1',
+            question_wiki_id=str(wiki_id),
+        ).first()
+    except Exception:
+        return []
+    return _kd_json_load(row.similar_questions_json, []) if row else []
+
+
+def _clone_review_intent_text(wiki_id, question):
+    values = [str(question or '').strip(), *_clone_review_index_similar_questions(wiki_id)]
+    return '\n'.join(dict.fromkeys(value for value in values if value))
+
+
+def _clone_review_candidate_priority(evidence_matches, hard_conflicts=None):
+    hard_conflicts = list(dict.fromkeys(str(value) for value in (hard_conflicts or []) if value))
+    if hard_conflicts:
+        return 'blocked'
+    count = len([key for key, matched in (evidence_matches or {}).items() if matched])
+    return {3: 'P1', 2: 'P2', 1: 'P3'}.get(count, 'none')
+
+
+_CLONE_REVIEW_CATALOG_FEATURE_ALIASES = {
+    'suction_power': ('最大吸力',),
+    'object_recognition_count': ('避障方式',),
+}
+
+
+def _clone_review_catalog_snapshot(target_model):
+    connection = None
+    try:
+        connection = connect_main_database()
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT snapshot.content_json, binding.model_id
+                FROM parameter_model_alias_binding AS binding
+                JOIN parameter_snapshot AS snapshot
+                  ON snapshot.snapshot_id = binding.source_snapshot_id
+                WHERE binding.status = 'confirmed'
+                  AND REPLACE(LOWER(binding.source_name), ' ', '') = %s
+                  AND snapshot.sync_status = 'ready'
+                ORDER BY snapshot.synced_at DESC
+                LIMIT 1
+                """,
+                (normalize_model_name(target_model),),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return {}, {}, None
+        snapshot = row.get('content_json') or {}
+        feature_names = {
+            str(feature.get('id') or ''): str(feature.get('name') or '')
+            for feature in snapshot.get('features') or []
+        }
+        values = {
+            feature_names.get(str(value.get('feature_id') or ''), ''): str(value.get('value_text') or '')
+            for value in snapshot.get('feature_values') or []
+            if str(value.get('model_id') or '') == str(row.get('model_id') or '')
+            and str(value.get('quality_status') or '') == 'confirmed'
+        }
+        return values, feature_names, None
+    except Exception as exc:
+        return {}, {}, str(exc)
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _clone_review_catalog_model_data(model_name):
+    """Read confirmed values and feature metadata for one mapped catalog model."""
+    connection = None
+    try:
+        connection = connect_main_database()
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT snapshot.content_json, binding.model_id
+                FROM parameter_model_alias_binding AS binding
+                JOIN parameter_snapshot AS snapshot
+                  ON snapshot.snapshot_id = binding.source_snapshot_id
+                WHERE binding.status = 'confirmed'
+                  AND REPLACE(LOWER(binding.source_name), ' ', '') = %s
+                  AND snapshot.sync_status = 'ready'
+                ORDER BY snapshot.synced_at DESC
+                LIMIT 1
+                """,
+                (normalize_model_name(model_name),),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return {}, {}, '型号尚未完成唯一参数映射'
+        snapshot = row.get('content_json') or {}
+        features = {
+            str(feature.get('name') or ''): {
+                'feature_id': str(feature.get('id') or ''),
+                'description': re.sub(
+                    r'\s+', ' ', re.sub(r'[*_`#]+', '', str(feature.get('description') or ''))
+                ).strip(),
+            }
+            for feature in snapshot.get('features') or []
+            if str(feature.get('name') or '').strip()
+        }
+        feature_names = {
+            str(feature.get('id') or ''): str(feature.get('name') or '')
+            for feature in snapshot.get('features') or []
+        }
+        values = {
+            feature_names.get(str(value.get('feature_id') or ''), ''): str(value.get('value_text') or '')
+            for value in snapshot.get('feature_values') or []
+            if str(value.get('model_id') or '') == str(row.get('model_id') or '')
+            and str(value.get('quality_status') or '') == 'confirmed'
+            and feature_names.get(str(value.get('feature_id') or ''), '')
+        }
+        return values, features, None
+    except Exception as exc:
+        return {}, {}, str(exc)
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _clone_review_meaningful_catalog_value(value):
+    normalized = _clone_review_rule_value(value)
+    return bool(normalized and normalized not in {
+        '-', '--', '暂无数据', '无数据', '未知', '待确认', '未确认', '不详', 'null', 'none',
+    })
+
+
+def _clone_review_parameter_rule_id(rule):
+    payload = '|'.join(str(rule.get(key) or '').strip().lower() for key in (
+        'source_model', 'target_model', 'feature_id', 'feature_name', 'source_value', 'target_value',
+    ))
+    return 'parameter:' + hashlib.sha256(payload.encode('utf-8')).hexdigest()[:24]
+
+
+def _clone_review_parameter_rules_with_ids(rules):
+    return [
+        {**rule, 'rule_id': str(rule.get('rule_id') or _clone_review_parameter_rule_id(rule))}
+        for rule in (rules or [])
+    ]
+
+
+def _clone_review_parameter_difference_rules(source_model, target_model):
+    """Create read-only clone rules from confirmed source and target catalog values."""
+    source_values, source_features, source_error = _clone_review_catalog_model_data(source_model)
+    target_values, target_features, target_error = _clone_review_catalog_model_data(target_model)
+    if source_error or target_error:
+        return [], source_error or target_error
+    rules = []
+    for feature_name in sorted(set(source_values) & set(target_values)):
+        source_value = str(source_values.get(feature_name) or '').strip()
+        target_value = str(target_values.get(feature_name) or '').strip()
+        if (
+            not _clone_review_meaningful_catalog_value(source_value)
+            or not _clone_review_meaningful_catalog_value(target_value)
+            or _clone_review_catalog_value_matches(
+                feature_name, source_value, target_value, allow_containment=False,
+            )
+        ):
+            continue
+        metadata = target_features.get(feature_name) or source_features.get(feature_name) or {}
+        feature_description = str(metadata.get('description') or '').strip()
+        search_terms = [feature_name, source_value, target_value]
+        if feature_description:
+            search_terms.append(feature_description)
+        rule = {
+            'target_model': target_model,
+            'source_model': source_model,
+            'feature_id': str(metadata.get('feature_id') or feature_name),
+            'feature_name': feature_name,
+            # Explanatory context only. A description does not independently create risk.
+            'feature_description': feature_description,
+            'source_value': source_value,
+            'target_value': target_value,
+            'difference_type': 'value_changed',
+            'source_search_terms': list(dict.fromkeys(term for term in search_terms if term)),
+            'target_search_terms': list(dict.fromkeys(term for term in search_terms if term)),
+            'kb_intents': [feature_name],
+            'confidence': 1.0,
+            'evidence_sources': ['parameter_check'],
+            'evidence_quote': f'8511 已确认参数：{source_model} {source_value}，{target_model} {target_value}',
+            'status': 'valid',
+        }
+        rule['rule_id'] = _clone_review_parameter_rule_id(rule)
+        rules.append(rule)
+    return rules, None
+
+
+def _clone_review_catalog_normalized_value(feature_name, value):
+    normalization = next((
+        rule['normalization']
+        for rule in NUMERIC_CLAIM_RULES
+        if rule['feature_name'] == feature_name
+    ), None)
+    return _unique_normalized_numeric_value(str(value or ''), normalization) if normalization else None
+
+
+def _clone_review_catalog_value_matches(feature_name, manual_value, catalog_value, *, allow_containment=True):
+    manual_text = _clone_review_rule_value(manual_value)
+    catalog_text = _clone_review_rule_value(catalog_value)
+    if manual_text == catalog_text:
+        return True
+    manual_boolean = _clone_review_boolean_state(manual_text)
+    catalog_boolean = _clone_review_boolean_state(catalog_text)
+    if manual_boolean is not None or catalog_boolean is not None:
+        if manual_boolean is None or catalog_boolean is None or manual_boolean != catalog_boolean:
+            return False
+    if feature_name == '热水拖地':
+        manual_temperature = re.search(r'\d+(?:\.\d+)?(?=℃|°c)', manual_text)
+        catalog_temperature = re.search(r'\d+(?:\.\d+)?(?=℃|°c)', catalog_text)
+        if manual_temperature and catalog_temperature:
+            return manual_temperature.group(0) == catalog_temperature.group(0)
+        if '常温' in manual_text and ('不支持' in catalog_text or '常温' in catalog_text):
+            return True
+    if feature_name == '避障方式':
+        count_pattern = r'(\d+(?:\.\d+)?)\+?(?=种)'
+        manual_count = re.search(count_pattern, manual_text)
+        catalog_count = re.search(count_pattern, catalog_text)
+        if manual_count and catalog_count:
+            return manual_count.group(1) == catalog_count.group(1)
+    manual_normalized = _clone_review_catalog_normalized_value(feature_name, manual_value)
+    catalog_normalized = _clone_review_catalog_normalized_value(feature_name, catalog_value)
+    if manual_normalized and catalog_normalized:
+        return manual_normalized == catalog_normalized
+    return allow_containment and manual_text in catalog_text
+
+
+def _clone_review_catalog_comparison(feature_name, manual_value, catalog_value, numeric_features):
+    if not catalog_value:
+        return 'missing_parameter'
+    if _clone_review_catalog_value_matches(feature_name, manual_value, catalog_value):
+        return 'consistent'
+    if feature_name in numeric_features and _clone_review_catalog_normalized_value(feature_name, catalog_value) is None:
+        return 'comparison_unavailable'
+    return 'catalog_suspected'
+
+
+def _clone_review_parameter_catalog_audit(manual_rules, source_model, target_model):
+    source_values, source_feature_names, source_error = _clone_review_catalog_snapshot(source_model)
+    target_values, target_feature_names, target_error = _clone_review_catalog_snapshot(target_model)
+    if source_error or target_error:
+        return [], source_error or target_error
+    feature_names = {**source_feature_names, **target_feature_names}
+    feature_ids_by_name = {name: feature_id for feature_id, name in feature_names.items()}
+    numeric_features = {rule['feature_name'] for rule in NUMERIC_CLAIM_RULES}
+    rows = []
+    for rule in manual_rules:
+        feature_id = str(rule.get('feature_id') or '')
+        feature_name = str(rule.get('feature_name') or feature_id)
+        catalog_names = [feature_name, *_CLONE_REVIEW_CATALOG_FEATURE_ALIASES.get(feature_id, ())]
+        catalog_name = next((name for name in catalog_names if source_values.get(name) or target_values.get(name)), '')
+        source_catalog_value = source_values.get(catalog_name, '')
+        target_catalog_value = target_values.get(catalog_name, '')
+        source_result = _clone_review_catalog_comparison(
+            catalog_name, rule.get('source_value'), source_catalog_value, numeric_features,
+        )
+        target_result = _clone_review_catalog_comparison(
+            catalog_name, rule.get('target_value'), target_catalog_value, numeric_features,
+        )
+        if 'catalog_suspected' in {source_result, target_result}:
+            result = 'catalog_suspected'
+        elif 'comparison_unavailable' in {source_result, target_result}:
+            result = 'comparison_unavailable'
+        elif 'missing_parameter' in {source_result, target_result}:
+            result = 'missing_parameter'
+        else:
+            result = 'consistent'
+        rows.append({
+            'feature_id': feature_id,
+            'feature_name': feature_name,
+            'source_model': source_model,
+            'source_manual_value': str(rule.get('source_value') or ''),
+            'source_catalog_value': source_catalog_value or None,
+            'source_result': source_result,
+            'target_model': target_model,
+            'target_manual_value': str(rule.get('target_value') or ''),
+            'target_catalog_value': target_catalog_value or None,
+            'target_result': target_result,
+            'catalog_feature_id': feature_ids_by_name.get(catalog_name),
+            'catalog_feature_name': catalog_name or None,
+            'result': result,
+        })
+    return rows, None
+
+
+def _clone_review_rule_matches_context(content, rule):
+    terms = [
+        rule.get('feature_name'),
+        *difference_feature_terms(
+            rule.get('feature_id'),
+            rule.get('feature_name'),
+            rule.get('feature_description'),
+        ),
+        *(rule.get('source_search_terms') or []),
+        *(rule.get('kb_intents') or []),
+    ]
+    source_value = _clone_review_rule_value(rule.get('source_value'))
+    for term in terms:
+        normalized = _clone_review_rule_value(term)
+        if (
+            not normalized
+            or normalized == source_value
+            or not _clone_review_value_is_direct_evidence(normalized)
+        ):
+            continue
+        if len(normalized) >= 2 and normalized in content:
+            return True
+    return False
+
+
+def _clone_review_ai_impact_reviews(items, contextual_rules_by_item):
+    """Return validated, evidence-backed AI impact decisions for contextual matches only."""
+    if not items:
+        return {}, None
+    config = load_ai_config() or {}
+    if not all(str(config.get(key) or '').strip() for key in ('api_key', 'base_url', 'model')):
+        return {}, 'AI 语义复核未配置'
+    review_inputs = []
+    for item in items:
+        review_inputs.append({
+            'item_id': item.item_id,
+            'question': str(item.question or ''),
+            'answer': str(item.answer or ''),
+            'differences': [{
+                'feature_name': str(rule.get('feature_name') or rule.get('feature_id') or ''),
+                'source_value': str(rule.get('source_value') or ''),
+                'target_value': str(rule.get('target_value') or ''),
+            } for rule in contextual_rules_by_item.get(item.item_id, [])],
+        })
+    system_prompt = (
+        '你是机型知识迁移的语义影响复核器。仅根据每条知识原文和给定的型号差异判断：'
+        '把源型号替换为目标型号后，该知识的问题适用性、操作步骤或回答结论是否会因这些差异而变化。'
+        '不要使用外部知识，不要猜测产品事实。返回严格 JSON 对象，字段 reviews 为数组；每项包含 '
+        'item_id、relation、evidence、reason。relation 只能是 affected、unrelated、uncertain。'
+        'evidence 必须是该条知识问题或答案中的连续逐字片段；若无法引用，relation 必须是 uncertain。'
+        'affected 表示差异会改变知识结论；unrelated 表示知识讨论的主题与给定差异无因果关系；'
+        '信息不足或存在合理歧义时使用 uncertain。'
+    )
+    user_prompt = '待复核知识：' + json.dumps(review_inputs, ensure_ascii=False)
+    try:
+        raw = _ai_call_llm(config, system_prompt, user_prompt, temperature=0.0)
+        parsed = _clone_review_json(raw, {})
+        candidates = parsed.get('reviews') if isinstance(parsed, dict) else []
+        if not isinstance(candidates, list):
+            return {}, 'AI 语义复核返回格式无效'
+    except Exception as exc:
+        return {}, f'AI 语义复核失败：{str(exc)[:300]}'
+
+    items_by_id = {item.item_id: item for item in items}
+    reviews = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        item_id = str(candidate.get('item_id') or '')
+        item = items_by_id.get(item_id)
+        relation = str(candidate.get('relation') or '').strip().lower()
+        evidence = str(candidate.get('evidence') or '').strip()
+        reason = str(candidate.get('reason') or '').strip()[:1000]
+        original = f'{item.question}\n{item.answer}' if item else ''
+        if not item or relation not in {'affected', 'unrelated', 'uncertain'} or not evidence or evidence not in original:
+            continue
+        reviews[item_id] = {
+            'status': 'completed',
+            'relation': relation,
+            'evidence': evidence,
+            'reason': reason,
+        }
+    return reviews, None
+
+
+def _clone_review_ai_snapshot(item):
+    return SimpleNamespace(
+        item_id=str(item.item_id),
+        question=str(item.question or ''),
+        answer=str(item.answer or ''),
+    )
+
+
+def _apply_clone_review_ai_impact_results(item_ids, impact_reviews, impact_review_error):
+    for item_id in item_ids:
+        item = db.session.get(MatrixCloneReviewItem, str(item_id))
+        if not item:
+            continue
+        review = impact_reviews.get(item.item_id)
+        if review:
+            review = dict(review)
+            if item.risk_level == 'high' and review.get('relation') == 'unrelated':
+                review['risk_effect'] = 'kept_high_due_to_direct_evidence'
+            item.ai_impact_review_json = json.dumps(review, ensure_ascii=False)
+            if item.risk_level == 'medium' and review.get('relation') == 'unrelated':
+                item.risk_level = 'default'
+                item.suggested_action = 'keep'
+                if item.decision == 'pending' and not item.decided_by:
+                    item.decision = 'keep'
+                    item.apply_status = 'not_required'
+                    item.result_wiki_id = item.question_wiki_id
+        else:
+            item.ai_impact_review_json = json.dumps({
+                'status': 'unavailable',
+                'relation': 'uncertain',
+                'reason': impact_review_error or 'AI 未返回可验证的语义复核结论，可按基础规则人工处理',
+            }, ensure_ascii=False)
+    db.session.commit()
+
+
+def _clone_review_has_source_conflict(rules):
+    parameter_rules = [rule for rule in rules if 'parameter_check' in (rule.get('evidence_sources') or [])]
+    manual_rules = [rule for rule in rules if 'user_input' in (rule.get('evidence_sources') or [])]
+    for parameter_rule in parameter_rules:
+        for manual_rule in manual_rules:
+            same_feature = (
+                str(parameter_rule.get('feature_id') or '') == str(manual_rule.get('feature_id') or '')
+                or str(parameter_rule.get('feature_name') or '') == str(manual_rule.get('feature_name') or '')
+            )
+            same_source_value = (
+                _clone_review_rule_value(parameter_rule.get('source_value'))
+                == _clone_review_rule_value(manual_rule.get('source_value'))
+            )
+            if not (same_feature or same_source_value):
+                continue
+            feature_name = str(manual_rule.get('feature_name') or parameter_rule.get('feature_name') or '')
+            if not _clone_review_catalog_value_matches(
+                feature_name,
+                manual_rule.get('target_value'),
+                parameter_rule.get('target_value'),
+            ):
+                return True
+    return False
+
+
+def _clone_review_cached_similarity_scores(item, rows):
+    """Reuse ready duplicate-check embeddings without issuing a new external request."""
+    wiki_ids = list(dict.fromkeys([
+        str(item.question_wiki_id or ''),
+        *(str(row.question_wiki_id or '') for row in rows),
+    ]))
+    indexes = {}
+    try:
+        for start in range(0, len(wiki_ids), 400):
+            batch = wiki_ids[start:start + 400]
+            for index_row in KBDuplicateRetrievalIndex.query.filter(
+                KBDuplicateRetrievalIndex.library_type == 'knowledge_base_v1',
+                KBDuplicateRetrievalIndex.question_wiki_id.in_(batch),
+                KBDuplicateRetrievalIndex.index_status == 'ready',
+            ).all():
+                indexes[index_row.question_wiki_id] = index_row
+        source_index = indexes.get(str(item.question_wiki_id or ''))
+        if not source_index:
+            return {}
+        config = _sm_load_embedding_config()
+        cache_keys = [source_index.intent_cache_key]
+        cache_keys.extend(_kd_json_load(source_index.content_cache_keys_json, []))
+        for index_row in indexes.values():
+            cache_keys.append(index_row.intent_cache_key)
+            cache_keys.extend(_kd_json_load(index_row.content_cache_keys_json, []))
+        vectors = _sm_load_cached_embeddings(cache_keys, config)
+    except Exception:
+        db.session.rollback()
+        return {}
+
+    source_intent = vectors.get(source_index.intent_cache_key)
+    source_content_keys = _kd_json_load(source_index.content_cache_keys_json, [])
+    source_answer = vectors.get(source_content_keys[0]) if source_content_keys else None
+    scores = {}
+    for wiki_id, index_row in indexes.items():
+        if wiki_id == str(item.question_wiki_id or ''):
+            continue
+        content_keys = _kd_json_load(index_row.content_cache_keys_json, [])
+        candidate_answer = vectors.get(content_keys[0]) if content_keys else None
+        scores[wiki_id] = {
+            'question_similarity': _sm_vector_cosine(source_intent, vectors.get(index_row.intent_cache_key)),
+            'answer_similarity': _sm_vector_cosine(source_answer, candidate_answer),
+            'algorithm': 'embedding_cache',
+        }
+    return scores
+
+
+def _clone_review_feature_value_evidence(rules, row):
+    question = str(row.question_content or '')
+    answer = str(row.answer_content or '')
+    raw_content = f'{question}\n{answer}'
+    content = _clone_review_rule_value(raw_content)
+    matched_rules = []
+    hard_conflicts = []
+    for rule in rules:
+        target_value = _clone_review_rule_value(rule.get('target_value'))
+        if not target_value:
+            continue
+        feature_terms = _clone_review_feature_terms(rule)
+        if feature_terms and not any(term in content for term in feature_terms):
+            continue
+        if target_value in content:
+            matched_rules.append({
+                'rule': rule,
+                'match_type': 'exact',
+                'expression': str(rule.get('target_value') or ''),
+            })
+            continue
+        equivalent = _clone_review_equivalent_numeric_expression(rule.get('target_value'), raw_content)
+        if equivalent:
+            matched_rules.append({
+                'rule': rule,
+                'match_type': 'numeric_equivalent',
+                'expression': equivalent['expression'],
+            })
+            continue
+
+        target_numbers = _clone_review_numeric_values(rule.get('target_value'))
+        candidate_numbers = _clone_review_numeric_values(raw_content)
+        conflicting_values = [
+            value['expression'] for value in candidate_numbers
+            if any(value['dimension'] == target['dimension'] for target in target_numbers)
+        ]
+        source_value = _clone_review_rule_value(rule.get('source_value'))
+        if conflicting_values:
+            hard_conflicts.append(
+                f"{rule.get('feature_name') or rule.get('feature_id')}目标值不一致："
+                f"期望 {rule.get('target_value')}，候选为 {'、'.join(dict.fromkeys(conflicting_values))}"
+            )
+        elif source_value and source_value != target_value and source_value in content:
+            hard_conflicts.append(
+                f"{rule.get('feature_name') or rule.get('feature_id')}仍为源值 {rule.get('source_value')}"
+            )
+    return matched_rules, list(dict.fromkeys(hard_conflicts))
+
+
+def _clone_review_candidate_evidence(item, rules, row, cached_similarity=None):
+    wiki_id = str(row.question_wiki_id or '')
+    source_intent = _clone_review_intent_text(item.question_wiki_id, item.question)
+    candidate_intent = _clone_review_intent_text(wiki_id, row.question_content)
+    question_score = _ai_cosine_sim(source_intent, candidate_intent)
+    answer_score = _ai_cosine_sim(item.answer, row.answer_content)
+    algorithm = 'ngram_fallback'
+    if cached_similarity:
+        if cached_similarity.get('question_similarity') is not None:
+            question_score = float(cached_similarity['question_similarity'])
+        if cached_similarity.get('answer_similarity') is not None:
+            answer_score = float(cached_similarity['answer_similarity'])
+        algorithm = str(cached_similarity.get('algorithm') or algorithm)
+
+    matched_rules, hard_conflicts = _clone_review_feature_value_evidence(rules, row)
+    candidate_content = _clone_review_rule_value(f'{row.question_content or ""}\n{row.answer_content or ""}')
+    feature_context_present = any(
+        term in candidate_content
+        for rule in rules
+        for term in _clone_review_feature_terms(rule)
+    )
+    evidence_matches = {
+        'question': question_score >= _CLONE_REVIEW_QUESTION_SIMILARITY_THRESHOLD,
+        'answer': answer_score >= _CLONE_REVIEW_ANSWER_SIMILARITY_THRESHOLD,
+        # A numeric hit without the candidate's feature wording is not evidence
+        # that the candidate answers the same knowledge intent.
+        'feature_value': bool(matched_rules) and any(
+            _clone_review_feature_terms(match['rule']) and any(
+                term in _clone_review_rule_value(f'{row.question_content or ""}\n{row.answer_content or ""}')
+                for term in _clone_review_feature_terms(match['rule'])
+            )
+            for match in matched_rules
+        ),
+    }
+    priority = _clone_review_candidate_priority(evidence_matches, hard_conflicts)
+    return {
+        'priority': priority,
+        'evidence_matches': evidence_matches,
+        'question_similarity': round(question_score, 4),
+        'answer_similarity': round(answer_score, 4),
+        'similarity_algorithm': algorithm,
+        'matched_rules': matched_rules,
+        'hard_conflicts': hard_conflicts,
+        'feature_context_present': feature_context_present,
+        'source_similar_question_count': max(0, len(source_intent.splitlines()) - 1),
+        'candidate_similar_question_count': max(0, len(candidate_intent.splitlines()) - 1),
+    }
+
+
+def _clone_review_reuse_candidates(item, rules):
+    candidates = []
+    if not rules:
+        return candidates
+    rows = ProductMatrix.query.filter(
+        ProductMatrix.question_wiki_id != item.question_wiki_id,
+        ProductMatrix.is_configured.is_(True),
+    ).order_by(ProductMatrix.question_wiki_id.asc()).all()
+    cached_scores = _clone_review_cached_similarity_scores(item, rows)
+    seen = set()
+    for row in rows:
+        wiki_id = str(row.question_wiki_id or '')
+        if not wiki_id or wiki_id in seen:
+            continue
+        if item.product_category and row.product_category and item.product_category != row.product_category:
+            continue
+        evidence = _clone_review_candidate_evidence(item, rules, row, cached_scores.get(wiki_id))
+        # P3 can be question-only or answer-only, but every reuse candidate
+        # still needs an explicit feature anchor in its original content.
+        if evidence['priority'] in {'none', 'blocked'} or not evidence['feature_context_present']:
+            continue
+        seen.add(wiki_id)
+        rules_for_candidate = [match['rule'] for match in evidence['matched_rules']]
+        validation = 'exact_reusable' if evidence['priority'] == 'P1' else 'semantic_numeric_equivalent'
+        matched_labels = [
+            label for key, label in (
+                ('question', '问题/相似问题'),
+                ('answer', '答案'),
+                ('feature_value', '功能语义/目标值'),
+            ) if evidence['evidence_matches'].get(key)
+        ]
+        algorithm_label = 'Embedding 缓存' if evidence['similarity_algorithm'] == 'embedding_cache' else '本地字符相似度'
+        equivalent_expressions = list(dict.fromkeys(
+            str(match.get('expression') or '')
+            for match in evidence['matched_rules']
+            if match.get('match_type') == 'numeric_equivalent'
+        ))
+        expression_suffix = f"；等价表达：{'、'.join(equivalent_expressions)}" if equivalent_expressions else ''
+        match_reason = (
+            f"{evidence['priority']} · 已命中{'、'.join(matched_labels)}；"
+            f"问题 {evidence['question_similarity'] * 100:.1f}%，答案 {evidence['answer_similarity'] * 100:.1f}%（{algorithm_label}）"
+            f"{expression_suffix}"
+        )
+        candidates.append({
+            'wiki_id': wiki_id,
+            'question': str(row.question_content or '')[:180],
+            'answer_excerpt': str(row.answer_content or '')[:260],
+            'product_category': str(row.product_category or ''),
+            'matched_values': list(dict.fromkeys(
+                str(rule.get('target_value') or '') for rule in rules_for_candidate
+            )),
+            'matched_features': list(dict.fromkeys(
+                str(rule.get('feature_id') or rule.get('feature_name') or '') for rule in rules_for_candidate
+            )),
+            'knowledge_revision': _clone_review_revision(row.question_content, row.answer_content),
+            'validation': validation,
+            'priority': evidence['priority'],
+            'evidence_matches': evidence['evidence_matches'],
+            'question_similarity': evidence['question_similarity'],
+            'answer_similarity': evidence['answer_similarity'],
+            'similarity_algorithm': evidence['similarity_algorithm'],
+            'source_similar_question_count': evidence['source_similar_question_count'],
+            'candidate_similar_question_count': evidence['candidate_similar_question_count'],
+            'match_reason': match_reason,
+        })
+    priority_order = {'P1': 0, 'P2': 1, 'P3': 2}
+    candidates.sort(key=lambda candidate: (
+        priority_order.get(candidate.get('priority'), 9),
+        -float(candidate.get('question_similarity') or 0),
+        -float(candidate.get('answer_similarity') or 0),
+        candidate.get('wiki_id') or '',
+    ))
+    return candidates[:8]
+
+
+def _scan_clone_review_batch(batch, commit_every=0, pending_only=False, item_ids=None):
+    query = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id)
+    if pending_only:
+        query = query.filter_by(detection_status='pending_scan')
+    if item_ids is not None:
+        query = query.filter(MatrixCloneReviewItem.item_id.in_(list(item_ids)))
+    items = query.order_by(MatrixCloneReviewItem.question_wiki_id.asc()).all()
+    methods = _clone_review_json(batch.detection_methods_json, [])
+    stored_rules = MatrixCloneDifferenceRule.query.filter_by(batch_id=batch.batch_id).all()
+    rules_by_id = {rule.rule_id: rule for rule in stored_rules}
+    parameter_rules = []
+    parameter_error = None
+    if 'parameter_check' in methods:
+        parameter_rules, parameter_error = _clone_review_parameter_difference_rules(
+            batch.source_value,
+            (_clone_review_json(batch.target_models_json, []) or [''])[0],
+        )
+        parameter_rules = _clone_review_parameter_rules_with_ids(parameter_rules)
+
+    source_conflict_found = False
+    ai_rules_by_item = {}
+    pending_ai_items = []
+    pending_ai_started_at = None
+    ai_futures = []
+    ai_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='clone-review-ai')
+
+    def submit_ai_micro_batch(force=False):
+        nonlocal pending_ai_items, pending_ai_started_at
+        if not pending_ai_items:
+            return
+        waited_long_enough = pending_ai_started_at is not None and time.monotonic() - pending_ai_started_at >= 2.0
+        if not force and len(pending_ai_items) < 5 and not waited_long_enough:
+            return
+        batch_items = pending_ai_items[:5]
+        pending_ai_items = pending_ai_items[5:]
+        pending_ai_started_at = time.monotonic() if pending_ai_items else None
+        item_ids = [item.item_id for item in batch_items]
+        for queued_item in batch_items:
+            queued_item.ai_impact_review_json = json.dumps({
+                'status': 'processing',
+                'relation': 'uncertain',
+                'reason': 'AI 正在结合基础规则复核知识语义',
+            }, ensure_ascii=False)
+        db.session.commit()
+        snapshots = [_clone_review_ai_snapshot(queued_item) for queued_item in batch_items]
+        rules = {item_id: ai_rules_by_item[item_id] for item_id in item_ids}
+        future = ai_executor.submit(_clone_review_ai_impact_reviews, snapshots, rules)
+        ai_futures.append((future, item_ids))
+
+    def apply_finished_ai_micro_batches(wait=False):
+        remaining = []
+        for future, item_ids in ai_futures:
+            if not wait and not future.done():
+                remaining.append((future, item_ids))
+                continue
+            try:
+                impact_reviews, impact_review_error = future.result()
+            except Exception as exc:
+                impact_reviews, impact_review_error = {}, f'AI 语义复核失败：{str(exc)[:300]}'
+            _apply_clone_review_ai_impact_results(item_ids, impact_reviews, impact_review_error)
+        ai_futures[:] = remaining
+
+    for item_index, item in enumerate(items, start=1):
+        apply_finished_ai_micro_batches()
+        submit_ai_micro_batch()
+        content = f'{item.question}\n{item.answer}'.replace(' ', '').lower()
+        exact_rule_rows = []
+        contextual_rule_rows = []
+        target_aligned_rule_rows = []
+        for rule in stored_rules:
+            source_value = str(rule.source_value or '').replace(' ', '').lower()
+            if _clone_review_value_is_direct_evidence(source_value) and source_value in content:
+                exact_rule_rows.append(rule)
+                continue
+            target_value = str(rule.target_value or '').replace(' ', '').lower()
+            if _clone_review_value_is_direct_evidence(target_value) and target_value in content:
+                target_aligned_rule_rows.append(rule)
+                continue
+            payload = _clone_review_rule_payload(rule)
+            if _clone_review_rule_matches_context(content, payload):
+                contextual_rule_rows.append(rule)
+        item_parameter_exact_rules = []
+        item_parameter_contextual_rules = []
+        for rule in parameter_rules:
+            source_value = str(rule.get('source_value') or '').replace(' ', '').lower()
+            if _clone_review_value_is_direct_evidence(source_value) and source_value in content:
+                item_parameter_exact_rules.append(rule)
+            elif _clone_review_rule_matches_context(content, rule):
+                item_parameter_contextual_rules.append(rule)
+        exact_rule_data = [_clone_review_rule_payload(rule) for rule in exact_rule_rows]
+        contextual_rule_data = [_clone_review_rule_payload(rule) for rule in contextual_rule_rows]
+        target_aligned_rule_data = [_clone_review_rule_payload(rule) for rule in target_aligned_rule_rows]
+        matched_rule_data = (
+            exact_rule_data + contextual_rule_data + target_aligned_rule_data
+            + item_parameter_exact_rules + item_parameter_contextual_rules
+        )
+        evidence_sources = list(dict.fromkeys(
+            source
+            for rule in matched_rule_data
+            for source in (rule.get('evidence_sources') or [])
+        ))
+        direct_conflicting = [
+            rule for rule in exact_rule_data + item_parameter_exact_rules
+            if rule.get('difference_type') in {'value_changed', 'source_conflict'}
+        ]
+        probable_conflicting = [
+            rule for rule in contextual_rule_data + item_parameter_contextual_rules
+            if rule.get('difference_type') in {'value_changed', 'source_conflict'}
+        ]
+        consistent = [
+            rule for rule in item_parameter_exact_rules + item_parameter_contextual_rules
+            if rule.get('difference_type') == 'same'
+        ]
+        consistent.extend(target_aligned_rule_data)
+        source_conflict = _clone_review_has_source_conflict(matched_rule_data)
+        source_conflict_found = source_conflict_found or source_conflict
+        candidates = [] if source_conflict else _clone_review_reuse_candidates(
+            item,
+            direct_conflicting + probable_conflicting,
+        )
+        matched_rule_rows = exact_rule_rows + contextual_rule_rows + target_aligned_rule_rows
+        matched_parameter_rules = item_parameter_exact_rules + item_parameter_contextual_rules
+        item.difference_rule_ids_json = json.dumps(
+            [rule.rule_id for rule in matched_rule_rows]
+            + [rule['rule_id'] for rule in matched_parameter_rules],
+            ensure_ascii=False,
+        )
+        item.evidence_sources_json = json.dumps(evidence_sources, ensure_ascii=False)
+        item.reuse_candidate_ids_json = json.dumps(candidates, ensure_ascii=False)
+        item.ai_impact_review_json = '{}'
+        item.error_message = None
+        if source_conflict or any(rule.get('status') == 'source_conflict' for rule in matched_rule_data):
+            item.detection_status = 'scan_failed'
+            item.risk_level = 'default'
+            item.suggested_action = 'defer'
+        elif direct_conflicting:
+            item.detection_status = 'scanned'
+            item.risk_level = 'high'
+            item.suggested_action = 'link_existing' if candidates else 'defer'
+        elif probable_conflicting:
+            item.detection_status = 'scanned'
+            item.risk_level = 'medium'
+            item.suggested_action = 'link_existing' if candidates else 'defer'
+        elif consistent:
+            item.detection_status = 'scanned'
+            item.risk_level = 'default'
+            item.suggested_action = 'keep'
+        elif parameter_error and methods == ['parameter_check']:
+            item.detection_status = 'scan_failed'
+            item.risk_level = 'default'
+            item.suggested_action = 'defer'
+            item.error_message = parameter_error[:500]
+        else:
+            item.detection_status = 'scanned'
+            item.risk_level = 'default'
+            item.suggested_action = 'keep'
+        # A reviewer may decide an already persisted item while this scan is
+        # running. Refresh the decision fields before applying scan defaults so
+        # a stale worker object can never overwrite that human decision.
+        db.session.refresh(item, attribute_names=['decision', 'decided_by', 'apply_status', 'result_wiki_id'])
+        if item.detection_status == 'scanned' and item.risk_level == 'default':
+            if item.decision == 'pending' and not item.decided_by:
+                item.decision = 'keep'
+                item.apply_status = 'not_required'
+                item.result_wiki_id = item.question_wiki_id
+        elif item.decision == 'keep' and not item.decided_by:
+            item.decision = 'pending'
+            item.apply_status = 'not_applied'
+            item.result_wiki_id = None
+        if item.detection_status == 'scanned' and item.risk_level in {'high', 'medium'}:
+            ai_rules_by_item[item.item_id] = direct_conflicting + probable_conflicting
+            item.ai_impact_review_json = json.dumps({
+                'status': 'queued',
+                'relation': 'uncertain',
+                'reason': '基础规则已完成，等待 AI 语义复核',
+            }, ensure_ascii=False)
+            if not pending_ai_items:
+                pending_ai_started_at = time.monotonic()
+            pending_ai_items.append(item)
+            submit_ai_micro_batch()
+        _set_matrix_clone_progress(
+            batch.operation_id,
+            phase='检查差异',
+            completed=item_index,
+            total=len(items),
+            detail=f'已检查 {item_index}/{len(items)} 条知识',
+        )
+        if commit_every:
+            batch.item_count = len(items)
+            db.session.commit()
+    while pending_ai_items:
+        submit_ai_micro_batch(force=True)
+    apply_finished_ai_micro_batches(wait=True)
+    ai_executor.shutdown(wait=True)
+    batch.status = 'reviewing'
+    errors = []
+    if parameter_error:
+        errors.append(parameter_error)
+    if source_conflict_found:
+        errors.append('参数校对与用户差异说明存在来源冲突')
+    batch.error_message = '；'.join(errors)[:1000] if errors else None
+    db.session.flush()
+
+
+def _matrix_clone_review_async_enabled(review):
+    explicit = review.get('async_processing') if isinstance(review, dict) else None
+    if explicit is not None:
+        return bool(explicit)
+    return not bool(app.config.get('TESTING'))
+
+
+def _matrix_clone_review_progress_payload(batch, items=None):
+    items = items if items is not None else MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all()
+    generated_count = len(items)
+    scanned_count = sum(item.detection_status == 'scanned' for item in items)
+    scope_snapshot = _clone_review_json(batch.scope_snapshot_json, {})
+    generation_total = int((scope_snapshot or {}).get('generation_total') or batch.source_count or 0)
+    current = _get_matrix_clone_progress(batch.operation_id)
+    return {
+        'status': (current or {}).get('status') or (
+            'interrupted' if batch.status == 'scanning' and not _matrix_clone_scan_is_active(batch)
+            else ('failed' if batch.status == 'partial_failed' else 'running')
+        ),
+        'phase': (current or {}).get('phase') or batch.status,
+        'completed': int((current or {}).get('completed') or (scanned_count if batch.status == 'scanning' else generated_count)),
+        'total': int((current or {}).get('total') or generation_total),
+        'detail': (current or {}).get('detail') or '',
+        'error_message': (current or {}).get('error_message') or batch.error_message or '',
+        'elapsed_seconds': int((current or {}).get('elapsed_seconds') or 0),
+        # Match the standalone progress endpoint. This is a Unix timestamp
+        # while the worker is alive; after restart the persisted creation time
+        # remains available as a conservative fallback.
+        'updated_at': (current or {}).get('updated_at') or _dt_to_iso(batch.created_at),
+        'generated_count': generated_count,
+        'generation_total': generation_total,
+        'scanned_count': scanned_count,
+        'scan_total': generated_count,
+        'generation_complete': batch.status not in {'created', 'generating'},
+        'scan_complete': batch.status not in {'created', 'generating', 'scanning'},
+        'scan_active': _matrix_clone_scan_is_active(batch),
+    }
+
+
+def _run_incremental_clone_review_batch(batch_id, scope, auto_scan=True, actor='system', chunk_size=25):
+    """Generate and scan a review batch in short committed transactions."""
+    with app.app_context():
+        batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+        if not batch:
+            return
+        try:
+            methods = _clone_review_json(batch.detection_methods_json, [])
+            targets = _clone_review_json(batch.target_models_json, [])
+            target_model = str((targets or [''])[0])
+            _set_matrix_clone_progress(
+                batch.operation_id, phase='读取源数据', completed=0, total=0,
+                detail='正在读取可复制的源知识',
+            )
+            _maybe_pull_matrix_and_logs_from_supabase(force=False)
+            resolved_scope = _resolve_matrix_clone_source_scope(batch.source_mode, batch.source_value, scope)
+            scope_mode = resolved_scope['scope_mode']
+            source_items = resolved_scope['source_items']
+            if not source_items:
+                raise ValueError('差异校验未找到可复制的源知识')
+
+            target_entries = ProductMatrix.query.filter_by(product_name=target_model).all()
+            target_map = {item.question_wiki_id: item for item in target_entries}
+            pending_sources = [
+                source_item for wiki_id, source_item in source_items.items()
+                if not bool(getattr(target_map.get(wiki_id), 'is_configured', False))
+            ]
+            scope_snapshot = dict(scope)
+            scope_snapshot['exclude_tag_names'] = resolved_scope['exclude_tag_names']
+            scope_snapshot['excluded_count'] = resolved_scope['excluded_count']
+            scope_snapshot['generation_total'] = len(pending_sources)
+            batch.scope_mode = scope_mode
+            batch.scope_snapshot_json = json.dumps(scope_snapshot, ensure_ascii=False)
+            batch.source_count = len(source_items)
+            batch.status = 'generating'
+
+            if not MatrixColumn.query.filter_by(product_name=target_model).first():
+                current_max_order = db.session.query(func.max(MatrixColumn.sort_order)).scalar() or 0
+                db.session.add(MatrixColumn(product_name=target_model, sort_order=current_max_order + 1))
+            db.session.commit()
+
+            total = len(pending_sources)
+            for index, source_item in enumerate(pending_sources, start=1):
+                db.session.add(MatrixCloneReviewItem(
+                    item_id=str(uuid.uuid4()),
+                    batch_id=batch.batch_id,
+                    question_wiki_id=str(source_item.question_wiki_id),
+                    target_model=target_model,
+                    source_model=batch.source_value,
+                    knowledge_revision=_clone_review_revision(source_item.question_content, source_item.answer_content),
+                    question=str(source_item.question_content or ''),
+                    answer=str(source_item.answer_content or ''),
+                    product_category=str(source_item.product_category or ''),
+                    detection_status='pending_scan',
+                    risk_level='unknown',
+                    suggested_action='defer',
+                    decision='pending',
+                    apply_status='not_applied',
+                ))
+                if index % chunk_size == 0 or index == total:
+                    db.session.flush()
+                    batch.item_count = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).count()
+                    db.session.commit()
+                    _set_matrix_clone_progress(
+                        batch.operation_id, phase='生成复核草稿', completed=index, total=total,
+                        detail=f'已生成 {index}/{total} 条复核草稿，可开始人工复核',
+                    )
+
+            batch = db.session.get(MatrixCloneReviewBatch, batch.batch_id)
+            batch.item_count = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).count()
+            parameter_refresh = None
+            if 'parameter_check' in methods:
+                _set_matrix_clone_progress(
+                    batch.operation_id, phase='同步参数', completed=0, total=batch.item_count,
+                    detail='草稿已生成，正在从参数服务拉取最新快照',
+                )
+                parameter_category = _clone_review_parameter_category(batch.source_value, target_model)
+                parameter_refresh = _refresh_clone_parameter_comparison(parameter_category, actor=actor)
+                scope_snapshot['parameter_refresh'] = parameter_refresh
+                batch.scope_snapshot_json = json.dumps(scope_snapshot, ensure_ascii=False)
+                db.session.commit()
+            manual_rules = []
+            ai_parse_status = 'not_required'
+            if 'manual_difference_ai' in methods:
+                _set_matrix_clone_progress(
+                    batch.operation_id, phase='解析差异规则', completed=0, total=batch.item_count,
+                    detail='草稿已生成，正在将新旧型号差异转为可复核规则',
+                )
+                manual_rules, ai_parse_status = _clone_review_ai_rules(batch.manual_difference_text, target_model)
+            merged_rules = merge_difference_rules(manual_rules)
+            batch.difference_rules_json = json.dumps(merged_rules, ensure_ascii=False)
+            batch.ai_parse_status = ai_parse_status
+            _persist_clone_review_rules(batch, merged_rules)
+            db.session.commit()
+            if auto_scan and batch.item_count:
+                batch.status = 'scanning'
+                db.session.commit()
+                _set_matrix_clone_progress(
+                    batch.operation_id, phase='检查差异', completed=0, total=batch.item_count,
+                    detail='正在扫描已生成的复核草稿',
+                )
+                if not _claim_matrix_clone_scan(batch.batch_id):
+                    raise RuntimeError('复核批次扫描已在进行中')
+                try:
+                    _scan_clone_review_batch(batch, commit_every=chunk_size)
+                finally:
+                    _release_matrix_clone_scan(batch.batch_id)
+            elif batch.item_count == 0:
+                batch.status = 'ready_to_submit'
+                batch.completed_by = batch.created_by
+                batch.completed_at = datetime.utcnow()
+                if _clone_review_batch_requires_completion(batch):
+                    batch.status = 'reviewing'
+                    batch.completed_by = None
+                    batch.completed_at = None
+            else:
+                batch.status = 'reviewing'
+            db.session.commit()
+            _set_matrix_clone_progress(
+                batch.operation_id, status='succeeded', phase='生成完成',
+                completed=batch.item_count, total=batch.item_count,
+                detail='草稿已全部生成，可继续人工复核',
+            )
+        except Exception as exc:
+            db.session.rollback()
+            batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+            if batch:
+                batch.status = 'partial_failed'
+                batch.error_message = str(exc)[:1000]
+                db.session.commit()
+                _set_matrix_clone_progress(
+                    batch.operation_id, status='failed', phase='处理失败',
+                    detail='已生成的草稿仍保留，可查看或复核', error_message=str(exc),
+                )
+            traceback.print_exc()
+        finally:
+            db.session.remove()
+
+
+def _start_incremental_clone_review_batch(batch_id, scope, auto_scan=True, actor='system'):
+    thread = threading.Thread(
+        target=_run_incremental_clone_review_batch,
+        args=(batch_id, dict(scope), bool(auto_scan), str(actor or 'system')),
+        daemon=True,
+        name=f'clone-review-{str(batch_id)[:8]}',
+    )
+    thread.start()
+
+
+def _persist_clone_review_rules(batch, rules):
+    persisted = []
+    for rule in rules:
+        row = MatrixCloneDifferenceRule(
+            rule_id=str(uuid.uuid4()),
+            batch_id=batch.batch_id,
+            target_model=str(rule.get('target_model') or ''),
+            feature_id=str(rule.get('feature_id') or ''),
+            feature_name=str(rule.get('feature_name') or ''),
+            source_value=str(rule.get('source_value') or ''),
+            target_value=str(rule.get('target_value') or ''),
+            difference_type=str(rule.get('difference_type') or 'comparison_unavailable'),
+            evidence_sources_json=json.dumps(rule.get('evidence_sources') or [], ensure_ascii=False),
+            source_search_terms_json=json.dumps(rule.get('source_search_terms') or [], ensure_ascii=False),
+            target_search_terms_json=json.dumps(rule.get('target_search_terms') or [], ensure_ascii=False),
+            kb_intents_json=json.dumps(rule.get('kb_intents') or [], ensure_ascii=False),
+            evidence_quote=str(rule.get('evidence_quote') or ''),
+            status=str(rule.get('status') or 'needs_confirmation'),
+            rule_version=batch.difference_rule_version,
+        )
+        db.session.add(row)
+        persisted.append(row)
+    return persisted
+
+
+def _active_clone_review_batches_for_changes(changes):
+    keys = {
+        (str(change.get('question_wiki_id') or ''), str(change.get('product_name') or ''))
+        for change in changes
+    }
+    if not keys:
+        return []
+    active_batches = MatrixCloneReviewBatch.query.filter(
+        MatrixCloneReviewBatch.status.notin_(['ready_to_submit', 'submitted', 'cancelled'])
+    ).all()
+    blocked = []
+    for batch in active_batches:
+        items = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all()
+        if any((item.question_wiki_id, item.target_model) in keys for item in items):
+            blocked.append(batch)
+            continue
+        # During incremental generation, not every planned item has a row yet.
+        # Resolve the persisted source scope so a direct matrix submit cannot
+        # bypass the batch just by targeting a not-yet-generated knowledge id.
+        if batch.status not in {'created', 'generating'}:
+            continue
+        targets = set(_clone_review_json(batch.target_models_json, []))
+        candidate_ids = {wiki_id for wiki_id, product_name in keys if product_name in targets}
+        if not candidate_ids:
+            continue
+        try:
+            scope_snapshot = _clone_review_json(batch.scope_snapshot_json, {})
+            resolved_scope = _resolve_matrix_clone_source_scope(
+                batch.source_mode, batch.source_value,
+                scope_snapshot if isinstance(scope_snapshot, dict) else {},
+            )
+            source_items = resolved_scope['source_items']
+            if candidate_ids.intersection({str(wiki_id) for wiki_id in source_items}):
+                blocked.append(batch)
+        except Exception:
+            # A source-range lookup failure must not weaken the incomplete
+            # batch gate. The request can retry after the batch is resolved.
+            if any(product_name in targets for _, product_name in keys):
+                blocked.append(batch)
+    return blocked
+
 
 @app.route('/api/matrix/clone_config/preview', methods=['POST'])
 @login_required
@@ -20716,21 +24177,50 @@ def preview_matrix_clone_config():
 
     try:
         _maybe_pull_matrix_and_logs_from_supabase(force=False)
-        scope_mode, scope_ids = _resolve_matrix_clone_scope_ids(scope, allow_empty_selected=True)
-        source_items, _ = _resolve_matrix_clone_source_items(mode, source, scope_ids)
+        resolved_scope = _resolve_matrix_clone_source_scope(
+            mode, source, scope, allow_empty_selected=True,
+        )
+        scope_mode = resolved_scope['scope_mode']
+        scope_ids = resolved_scope['scope_ids']
+        source_items = resolved_scope['source_items']
         scope_ids_count = len(scope_ids) if scope_ids is not None else None
         return jsonify({
             'success': True,
             'count': len(source_items),
             'source_count': len(source_items),
             'scope_mode': scope_mode,
-            'scope_ids_count': scope_ids_count
+            'scope_ids_count': scope_ids_count,
+            'exclude_tag_names': resolved_scope['exclude_tag_names'],
+            'excluded_count': resolved_scope['excluded_count'],
         })
     except ValueError as e:
         return jsonify({'success': False, 'count': 0, 'message': str(e)}), 400
     except Exception as e:
         traceback.print_exc()
         return jsonify({'success': False, 'count': 0, 'message': str(e)}), 500
+
+@app.route('/api/matrix/clone_config/progress/<operation_id>', methods=['GET'])
+@login_required
+def get_matrix_clone_progress(operation_id):
+    progress = _get_matrix_clone_progress(operation_id)
+    if not progress:
+        batch = MatrixCloneReviewBatch.query.filter_by(operation_id=str(operation_id or '').strip()).first()
+        if batch:
+            if batch.created_by != current_user.username:
+                return jsonify({'success': False, 'message': '无权访问该操作进度'}), 403
+            progress = _matrix_clone_review_progress_payload(batch)
+            progress['operation_id'] = batch.operation_id
+    if not progress:
+        return jsonify({
+            'success': True,
+            'operation_id': str(operation_id or '').strip(),
+            'status': 'unknown',
+            'phase': '等待服务响应',
+            'completed': 0,
+            'total': 0,
+            'elapsed_seconds': 0,
+        })
+    return jsonify({'success': True, **progress})
 
 @app.route('/api/matrix/clone_config', methods=['POST'])
 @login_required
@@ -20741,20 +24231,206 @@ def clone_matrix_config():
     targets = data.get('targets', []) # List of target models
     strategy = data.get('strategy', 'append') # append, force_sync
     scope = data.get('scope') if isinstance(data.get('scope'), dict) else {}
-    
-    if not mode or not source or not targets:
-        return jsonify({'success': False, 'message': 'Missing required parameters'}), 400
-        
+    review = data.get('review') if isinstance(data.get('review'), dict) else {}
+    review_enabled = bool(review.get('enabled'))
+    operation_id = str(data.get('operation_id') or '').strip()
+
+    if not isinstance(mode, str) or not mode.strip() or not isinstance(source, str) or not source.strip():
+        return jsonify({'success': False, 'message': 'Mode and source must be non-empty strings'}), 400
+    mode = mode.strip().lower()
+    source = source.strip()
+    if mode not in {'model', 'category'}:
+        return jsonify({'success': False, 'message': 'Mode must be model or category'}), 400
     if not isinstance(targets, list):
         return jsonify({'success': False, 'message': 'Targets must be a list'}), 400
-        
+    if not targets or any(not isinstance(target, str) or not target.strip() for target in targets):
+        return jsonify({'success': False, 'message': 'Targets must contain non-empty strings'}), 400
+    targets = [target.strip() for target in targets]
+    if len(set(targets)) != len(targets):
+        return jsonify({'success': False, 'message': 'Targets must not contain duplicates'}), 400
+    if mode == 'model' and source in targets:
+        return jsonify({'success': False, 'message': 'Source and target model must be different'}), 400
+    catalog_models = {
+        str(model).strip()
+        for models in (parse_product_catalog() or {}).values()
+        if isinstance(models, list)
+        for model in models
+        if isinstance(model, str) and model.strip()
+    }
+    invalid_targets = [target for target in targets if target not in catalog_models]
+    if invalid_targets:
+        return jsonify({
+            'success': False,
+            'code': 'target_model_not_in_catalog',
+            'message': '目标机型不在型号库中',
+            'invalid_targets': invalid_targets,
+        }), 422
+
+    try:
+        _, canonical_exclude_tag_names = _resolve_matrix_clone_excluded_wiki_ids(scope)
+    except ValueError as exc:
+        return jsonify({
+            'success': False,
+            'code': 'clone_exclude_tags_invalid',
+            'message': str(exc),
+        }), 400
+    scope = dict(scope)
+    if canonical_exclude_tag_names:
+        scope['exclude_tag_names'] = canonical_exclude_tag_names
+    else:
+        scope.pop('exclude_tag_names', None)
+
+    detection_methods = normalize_detection_methods(review.get('detection_methods')) if review_enabled else []
+    manual_difference_text = str(review.get('manual_difference_text') or '').strip()
+    if review_enabled:
+        if not operation_id:
+            return jsonify({'success': False, 'code': 'operation_id_required', 'message': '差异校验克隆必须提供 operation_id'}), 422
+        existing_batch = MatrixCloneReviewBatch.query.filter_by(operation_id=operation_id).first()
+        if existing_batch:
+            existing_scope = _clone_review_json(existing_batch.scope_snapshot_json, {})
+            if isinstance(existing_scope, dict):
+                for derived_key in ('parameter_refresh', 'generation_total', 'excluded_count'):
+                    existing_scope.pop(derived_key, None)
+            same_request = (
+                existing_batch.created_by == current_user.username
+                and existing_batch.source_mode == mode
+                and existing_batch.source_value == source
+                and _clone_review_json(existing_batch.target_models_json, []) == targets
+                and existing_batch.strategy == strategy
+                and existing_scope == scope
+                and _clone_review_json(existing_batch.detection_methods_json, []) == detection_methods
+                and existing_batch.manual_difference_text == (manual_difference_text if 'manual_difference_ai' in detection_methods else '')
+            )
+            if not same_request:
+                return jsonify({
+                    'success': False,
+                    'code': 'operation_id_conflict',
+                    'message': 'operation_id 已被其他克隆请求使用',
+                }), 409
+            payload = _clone_review_batch_payload(existing_batch, include_items=False)
+            payload.update({
+                'updated_count': existing_batch.item_count,
+                'pending_count': existing_batch.item_count,
+                'review_batch_id': existing_batch.batch_id,
+                'review_status': existing_batch.status,
+                'detection_methods': _clone_review_json(existing_batch.detection_methods_json, []),
+            })
+            return jsonify(payload)
+        if not detection_methods:
+            return jsonify({'success': False, 'code': 'detection_method_required', 'message': '请至少选择一种差异识别方式'}), 422
+        if 'manual_difference_ai' in detection_methods and not manual_difference_text:
+            return jsonify({'success': False, 'code': 'manual_difference_required', 'message': '请输入新旧型号差异'}), 422
+        if mode != 'model' or len(targets) != 1:
+            return jsonify({'success': False, 'code': 'clone_review_scope_not_supported', 'message': '第一期差异校验仅支持单个源机型和单个目标机型'}), 422
+        if strategy != 'append':
+            return jsonify({'success': False, 'code': 'clone_review_append_required', 'message': '差异校验批次仅支持仅追加策略'}), 422
+
+    parameter_refresh_attempted = False
+    if review_enabled and _matrix_clone_review_async_enabled(review):
+        try:
+            review_scope_snapshot = dict(scope)
+            actor = current_user.username
+            review_batch = MatrixCloneReviewBatch(
+                batch_id=str(uuid.uuid4()),
+                operation_id=operation_id,
+                source_mode=mode,
+                source_value=source,
+                target_models_json=json.dumps(targets, ensure_ascii=False),
+                scope_mode=str(scope.get('mode') or 'all'),
+                scope_snapshot_json=json.dumps(review_scope_snapshot, ensure_ascii=False),
+                strategy=strategy,
+                status='generating',
+                detection_methods_json=json.dumps(detection_methods, ensure_ascii=False),
+                manual_difference_text=manual_difference_text if 'manual_difference_ai' in detection_methods else '',
+                difference_rules_json='[]',
+                difference_rule_version=1,
+                ai_parse_status='pending_parse' if 'manual_difference_ai' in detection_methods else 'not_required',
+                source_count=0,
+                item_count=0,
+                created_by=actor,
+            )
+            db.session.add(review_batch)
+            db.session.commit()
+            _set_matrix_clone_progress(
+                operation_id, phase='读取源数据', completed=0, total=0,
+                detail='已创建复核批次，正在读取可复制的源知识',
+            )
+            _start_incremental_clone_review_batch(
+                review_batch.batch_id, scope, auto_scan=bool(review.get('auto_scan', True)), actor=actor,
+            )
+            return jsonify({
+                'success': True,
+                'accepted': True,
+                'operation_id': operation_id,
+                'review_batch_id': review_batch.batch_id,
+                'review_status': review_batch.status,
+                'status': review_batch.status,
+                'updated_count': 0,
+                'pending_count': 0,
+                'source_count': 0,
+                'scope_mode': review_batch.scope_mode,
+                'detection_methods': detection_methods,
+                'difference_rule_count': 0,
+                'progress': _matrix_clone_review_progress_payload(review_batch, items=[]),
+            }), 202
+        except ValueError as exc:
+            db.session.rollback()
+            _set_matrix_clone_progress(
+                operation_id, status='failed', phase='处理失败', detail='未创建复核批次',
+                error_message=str(exc),
+            )
+            return jsonify({'success': False, 'message': str(exc)}), 400
+        except Exception as exc:
+            db.session.rollback()
+            _set_matrix_clone_progress(
+                operation_id, status='failed', phase='处理失败', detail='未创建复核批次',
+                error_message=str(exc),
+            )
+            traceback.print_exc()
+            return jsonify({'success': False, 'message': str(exc)}), 500
     try:
         _maybe_pull_matrix_and_logs_from_supabase(force=False)
-        scope_mode, scope_ids = _resolve_matrix_clone_scope_ids(scope)
+        parameter_refresh = None
+        if 'parameter_check' in detection_methods:
+            parameter_refresh_attempted = True
+            _set_matrix_clone_progress(
+                operation_id,
+                phase='同步参数',
+                completed=0,
+                total=0,
+                detail='正在从参数服务拉取最新快照，并重新校验当前知识库内容',
+            )
+            parameter_category = _clone_review_parameter_category(source, targets[0])
+            parameter_refresh = _refresh_clone_parameter_comparison(parameter_category)
+        resolved_scope = _resolve_matrix_clone_source_scope(mode, source, scope)
+        scope_mode = resolved_scope['scope_mode']
         pending_changes = []
-        source_items, source_products_to_remove = _resolve_matrix_clone_source_items(mode, source, scope_ids)
-        
-        if not source_items:
+        source_items = resolved_scope['source_items']
+        source_products_to_remove = resolved_scope['source_products_to_remove']
+        if review_enabled and not source_items:
+            return jsonify({
+                'success': False,
+                'code': 'clone_review_source_empty',
+                'message': '差异校验未找到可复制的源知识，未创建复核批次',
+            }), 422
+        progress_total = len(source_items) * len(targets)
+        _set_matrix_clone_progress(
+            operation_id,
+            phase='复制知识',
+            completed=0,
+            total=progress_total,
+            detail=f'已找到 {len(source_items)} 条源数据，准备处理 {len(targets)} 个目标机型',
+        )
+
+        if not source_items and not review_enabled:
+            _set_matrix_clone_progress(
+                operation_id,
+                status='succeeded',
+                phase='已完成',
+                completed=0,
+                total=0,
+                detail='没有匹配到可处理的源数据',
+            )
             return jsonify({
                 'success': True,
                 'updated_count': 0,
@@ -20763,28 +24439,50 @@ def clone_matrix_config():
                 'pending_count': 0,
                 'source_count': 0,
                 'scope_mode': scope_mode,
+                'exclude_tag_names': resolved_scope['exclude_tag_names'],
+                'excluded_count': resolved_scope['excluded_count'],
                 'message': 'No source data found'
             })
 
         total_updated = 0
         total_removed = 0
-        
+
         # 2. Process Targets
         existing_columns = {c.product_name for c in MatrixColumn.query.all()}
         current_max_order = db.session.query(func.max(MatrixColumn.sort_order)).scalar() or 0
-        
+
         for target_product in targets:
             # Ensure MatrixColumn exists
             if target_product not in existing_columns:
                 current_max_order += 1
                 db.session.add(MatrixColumn(product_name=target_product, sort_order=current_max_order))
                 existing_columns.add(target_product)
-            
+
             # Get existing entries for target to minimize queries
             target_entries = ProductMatrix.query.filter_by(product_name=target_product).all()
             target_map = {item.question_wiki_id: item for item in target_entries}
-            
-            for wiki_id, source_item in source_items.items():
+
+            for processed_index, (wiki_id, source_item) in enumerate(source_items.items(), start=1):
+                if review_enabled:
+                    target_item = target_map.get(wiki_id)
+                    old_cfg = bool(getattr(target_item, 'is_configured', False))
+                    if not old_cfg:
+                        total_updated += 1
+                        pending_changes.append({
+                            'question_wiki_id': wiki_id,
+                            'product_name': target_product,
+                            'old_is_configured': False,
+                            'new_is_configured': True,
+                            'edit_source': 'bulk'
+                        })
+                    _set_matrix_clone_progress(
+                        operation_id,
+                        phase='生成复核草稿',
+                        completed=((targets.index(target_product)) * len(source_items)) + processed_index,
+                        total=progress_total,
+                        detail=f'正在为 {target_product} 生成未生效草稿',
+                    )
+                    continue
                 if wiki_id in target_map:
                     # Exists
                     if strategy == 'force_sync':
@@ -20858,6 +24556,14 @@ def clone_matrix_config():
                         'edit_source': 'bulk'
                     })
 
+                _set_matrix_clone_progress(
+                    operation_id,
+                    phase='复制知识',
+                    completed=((targets.index(target_product)) * len(source_items)) + processed_index,
+                    total=progress_total,
+                    detail=f'正在处理 {target_product}',
+                )
+
         if strategy == 'force_sync':
             remove_products = set(source_products_to_remove) - set([str(t) for t in targets])
             if remove_products:
@@ -20880,22 +24586,789 @@ def clone_matrix_config():
                     ProductMatrix.product_name.in_(list(remove_products))
                 ).delete(synchronize_session=False)
         
+        review_batch = None
+        if review_enabled:
+            target_model = str(targets[0])
+            manual_rules = []
+            ai_parse_status = 'not_required'
+            if 'manual_difference_ai' in detection_methods:
+                manual_rules, ai_parse_status = _clone_review_ai_rules(manual_difference_text, target_model)
+            merged_rules = merge_difference_rules(manual_rules)
+            review_scope_snapshot = dict(scope)
+            review_scope_snapshot['excluded_count'] = resolved_scope['excluded_count']
+            if parameter_refresh:
+                review_scope_snapshot['parameter_refresh'] = parameter_refresh
+            review_batch = MatrixCloneReviewBatch(
+                batch_id=str(uuid.uuid4()),
+                operation_id=operation_id,
+                source_mode=mode,
+                source_value=str(source),
+                target_models_json=json.dumps([target_model], ensure_ascii=False),
+                scope_mode=scope_mode,
+                scope_snapshot_json=json.dumps(review_scope_snapshot, ensure_ascii=False),
+                strategy=strategy,
+                status='created',
+                detection_methods_json=json.dumps(detection_methods, ensure_ascii=False),
+                manual_difference_text=manual_difference_text if 'manual_difference_ai' in detection_methods else '',
+                difference_rules_json=json.dumps(merged_rules, ensure_ascii=False),
+                difference_rule_version=1,
+                ai_parse_status=ai_parse_status,
+                source_count=len(source_items),
+                item_count=len(pending_changes),
+                created_by=current_user.username,
+            )
+            db.session.add(review_batch)
+            _persist_clone_review_rules(review_batch, merged_rules)
+            for change in pending_changes:
+                if not bool(change.get('new_is_configured')) or str(change.get('product_name') or '') != target_model:
+                    continue
+                source_item = source_items.get(str(change.get('question_wiki_id') or ''))
+                if source_item is None:
+                    continue
+                db.session.add(MatrixCloneReviewItem(
+                    item_id=str(uuid.uuid4()),
+                    batch_id=review_batch.batch_id,
+                    question_wiki_id=str(source_item.question_wiki_id),
+                    target_model=target_model,
+                    source_model=str(source),
+                    knowledge_revision=_clone_review_revision(source_item.question_content, source_item.answer_content),
+                    question=str(source_item.question_content or ''),
+                    answer=str(source_item.answer_content or ''),
+                    product_category=str(source_item.product_category or ''),
+                    detection_status='pending_scan',
+                    risk_level='unknown',
+                    suggested_action='defer',
+                    decision='pending',
+                    apply_status='not_applied',
+                ))
+            db.session.flush()
+            review_batch.item_count = MatrixCloneReviewItem.query.filter_by(batch_id=review_batch.batch_id).count()
+            if bool(review.get('auto_scan', True)) and review_batch.item_count:
+                _set_matrix_clone_progress(
+                    operation_id,
+                    phase='检查差异',
+                    completed=0,
+                    total=review_batch.item_count,
+                    detail='正在扫描克隆后的知识差异',
+                )
+                review_batch.status = 'scanning'
+                _scan_clone_review_batch(review_batch)
+            elif review_batch.item_count == 0:
+                review_batch.status = 'ready_to_submit'
+                review_batch.completed_by = current_user.username
+                review_batch.completed_at = datetime.utcnow()
+                if _clone_review_batch_requires_completion(review_batch):
+                    review_batch.status = 'reviewing'
+                    review_batch.completed_by = None
+                    review_batch.completed_at = None
+
         db.session.commit()
-        return jsonify({
+        _set_matrix_clone_progress(
+            operation_id,
+            status='succeeded',
+            phase='已完成',
+            completed=(review_batch.item_count if review_batch and bool(review.get('auto_scan', True)) else progress_total),
+            total=(review_batch.item_count if review_batch and bool(review.get('auto_scan', True)) else progress_total),
+            detail='处理完成',
+        )
+        response_payload = {
             'success': True,
             'updated_count': total_updated,
             'removed_count': total_removed,
             'pending_changes': pending_changes,
             'pending_count': len(pending_changes),
             'source_count': len(source_items),
-            'scope_mode': scope_mode
-        })
+            'scope_mode': scope_mode,
+            'exclude_tag_names': resolved_scope['exclude_tag_names'],
+            'excluded_count': resolved_scope['excluded_count'],
+        }
+        if review_batch:
+            response_payload.update({
+                'review_batch_id': review_batch.batch_id,
+                'review_status': review_batch.status,
+                'detection_methods': detection_methods,
+                'difference_rule_count': MatrixCloneDifferenceRule.query.filter_by(batch_id=review_batch.batch_id).count(),
+            })
+            if parameter_refresh:
+                response_payload['parameter_refresh'] = parameter_refresh
+        return jsonify(response_payload)
     except ValueError as e:
+        _set_matrix_clone_progress(
+            operation_id,
+            status='failed',
+            phase='参数校对失败' if 'parameter_check' in detection_methods else '处理失败',
+            detail='未创建克隆批次',
+            error_message=str(e),
+        )
         return jsonify({'success': False, 'message': str(e)}), 400
+    except requests.RequestException as e:
+        # A parameter-checked clone must never continue with stale or partial data.
+        if not parameter_refresh_attempted:
+            db.session.rollback()
+            traceback.print_exc()
+            return jsonify({'success': False, 'message': str(e)}), 500
+        _set_matrix_clone_progress(
+            operation_id,
+            status='failed',
+            phase='参数校对失败',
+            detail='未创建克隆批次',
+            error_message=f'最新参数同步失败：{str(e)[:420]}',
+        )
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'code': 'parameter_refresh_unavailable',
+            'message': '最新参数同步失败，未创建克隆批次',
+            'detail': str(e),
+        }), 503
     except Exception as e:
         db.session.rollback()
+        _set_matrix_clone_progress(operation_id, status='failed', phase='处理失败', detail='操作未完成', error_message=str(e))
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/matrix/clone-review/<batch_id>', methods=['GET'])
+@login_required
+def get_matrix_clone_review(batch_id):
+    batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '差异校验批次不存在'}), 404
+    return jsonify(_clone_review_batch_payload(batch))
+
+
+@app.route('/api/matrix/clone-review/<batch_id>/export.xlsx', methods=['GET'])
+@login_required
+def export_matrix_clone_review_backup(batch_id):
+    batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '差异校验批次不存在'}), 404
+    items = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).order_by(
+        MatrixCloneReviewItem.question_wiki_id.asc(), MatrixCloneReviewItem.target_model.asc()
+    ).all()
+    rules = MatrixCloneDifferenceRule.query.filter_by(batch_id=batch.batch_id).order_by(
+        MatrixCloneDifferenceRule.created_at.asc(), MatrixCloneDifferenceRule.rule_id.asc()
+    ).all()
+    workbook = _clone_review_backup_workbook(batch, items, rules)
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=canonical_download_name(f'clone_review_backup_{batch.batch_id[:8]}'),
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
+@app.route('/api/matrix/clone-review-batches', methods=['GET'])
+@login_required
+def list_matrix_clone_review_batches():
+    raw_statuses = str(request.args.get('status') or '').strip()
+    statuses = [value.strip() for value in raw_statuses.split(',') if value.strip()]
+    query = MatrixCloneReviewBatch.query
+    if statuses:
+        query = query.filter(MatrixCloneReviewBatch.status.in_(statuses))
+    batches = query.order_by(MatrixCloneReviewBatch.created_at.desc()).limit(50).all()
+    rows = []
+    for batch in batches:
+        _normalize_clone_review_batch_status(batch)
+        rows.append({
+            'batch_id': batch.batch_id,
+            'source_value': batch.source_value,
+            'target_models': _clone_review_json(batch.target_models_json, []),
+            'status': batch.status,
+            'detection_methods': _clone_review_json(batch.detection_methods_json, []),
+            'item_count': int(batch.item_count or 0),
+            'created_by': batch.created_by,
+            'created_at': _dt_to_iso(batch.created_at),
+            'completed_at': _dt_to_iso(batch.completed_at),
+            'submitted_at': _dt_to_iso(batch.submitted_at),
+            'can_delete': _clone_review_batch_can_delete(batch, current_user.username),
+        })
+    db.session.commit()
+    return jsonify({'success': True, 'batches': rows})
+
+
+@app.route('/api/matrix/clone-review/<batch_id>', methods=['DELETE'])
+@login_required
+def delete_matrix_clone_review(batch_id):
+    batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '差异校验批次不存在'}), 404
+    if batch.created_by != current_user.username:
+        return jsonify({'success': False, 'message': '只能删除自己创建的复核批次'}), 403
+    if not _clone_review_batch_can_delete(batch, current_user.username):
+        return jsonify({'success': False, 'message': '正在处理的批次不能删除'}), 409
+    if not _claim_matrix_clone_scan(batch.batch_id):
+        return jsonify({'success': False, 'message': '批次刚刚开始继续校验，请稍后再试'}), 409
+    try:
+        items = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all()
+        removed_changes = _clone_review_expected_submit_changes(batch, items=items)
+        submitted_data_preserved = bool(batch.submitted_at or batch.status == 'submitted')
+        MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).delete(synchronize_session=False)
+        MatrixCloneDifferenceRule.query.filter_by(batch_id=batch.batch_id).delete(synchronize_session=False)
+        db.session.delete(batch)
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'batch_id': str(batch_id),
+            'removed_changes': removed_changes,
+            'submitted_data_preserved': submitted_data_preserved,
+        })
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(exc)}), 500
+    finally:
+        _release_matrix_clone_scan(batch_id)
+
+
+@app.route('/api/matrix/clone-review/<batch_id>/scan', methods=['POST'])
+@login_required
+def scan_matrix_clone_review(batch_id):
+    batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '差异校验批次不存在'}), 404
+    if batch.status in {'applying', 'ready_to_submit', 'submitted', 'cancelled'}:
+        return jsonify({'success': False, 'message': '当前批次状态不允许重新扫描'}), 409
+    if batch.status in {'created', 'generating'}:
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_generation_incomplete',
+            'message': '复核草稿尚未全部生成，暂不能重新扫描',
+        }), 409
+    payload = request.get_json(silent=True) or {}
+    pending_only = bool(payload.get('pending_only') or payload.get('resume_only'))
+    if not pending_only and MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id, apply_status='applied').first():
+        return jsonify({'success': False, 'message': '已有条目执行成功，不能直接重新扫描'}), 409
+    pending_count = MatrixCloneReviewItem.query.filter_by(
+        batch_id=batch.batch_id,
+        detection_status='pending_scan',
+    ).count()
+    if pending_only and pending_count == 0:
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_no_pending_scan',
+            'message': '当前批次没有等待校验的条目',
+        }), 422
+    if _matrix_clone_scan_is_active(batch):
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_scan_in_progress',
+            'message': '当前批次正在校验，请等待本轮完成',
+        }), 409
+    if not _claim_matrix_clone_scan(batch.batch_id):
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_scan_in_progress',
+            'message': '当前批次正在校验，请等待本轮完成',
+        }), 409
+    try:
+        batch.status = 'scanning'
+        _scan_clone_review_batch(batch, commit_every=25, pending_only=pending_only)
+        db.session.commit()
+        return jsonify(_clone_review_batch_payload(batch))
+    except Exception as exc:
+        db.session.rollback()
+        batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+        batch.status = 'partial_failed'
+        batch.error_message = str(exc)[:1000]
+        db.session.commit()
+        return jsonify({'success': False, 'message': str(exc)}), 500
+    finally:
+        _release_matrix_clone_scan(batch.batch_id)
+
+
+@app.route('/api/matrix/clone-review/items/<item_id>/refresh', methods=['POST'])
+@login_required
+def refresh_matrix_clone_review_item(item_id):
+    item = db.session.get(MatrixCloneReviewItem, str(item_id))
+    if not item:
+        return jsonify({'success': False, 'message': '差异校验条目不存在'}), 404
+    batch = db.session.get(MatrixCloneReviewBatch, item.batch_id)
+    if not batch or batch.status in {'applying', 'ready_to_submit', 'submitted', 'cancelled'}:
+        return jsonify({'success': False, 'message': '当前批次状态不允许刷新条目'}), 409
+    if item.apply_status == 'applied':
+        return jsonify({'success': False, 'message': '该条目已经执行，不能刷新'}), 409
+    if _matrix_clone_scan_is_active(batch) or not _claim_matrix_clone_scan(batch.batch_id):
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_scan_in_progress',
+            'message': '当前批次正在校验，请等待本轮完成',
+        }), 409
+
+    source_row = ProductMatrix.query.filter_by(
+        question_wiki_id=item.question_wiki_id,
+        product_name=item.source_model,
+    ).first()
+    if not source_row:
+        # The source relation may have been removed by a later knowledge sync.
+        # Keep the audit row, but exclude it from this batch instead of asking
+        # the reviewer to refresh a source that no longer exists.
+        item.detection_status = 'source_removed'
+        item.risk_level = 'default'
+        item.suggested_action = 'keep'
+        item.decision = 'keep'
+        item.apply_status = 'not_required'
+        item.result_wiki_id = None
+        item.error_message = '源知识已从当前矩阵移除，本批次已排除'
+        batch.status = 'reviewing'
+        if batch.error_message == '源知识内容已变化，请重新扫描后再完成或提交':
+            batch.error_message = None
+        db.session.commit()
+        _release_matrix_clone_scan(batch.batch_id)
+        return jsonify({
+            'success': True,
+            'excluded': True,
+            'message': '源知识已从当前矩阵移除，本批次已排除该条目',
+            'item': _clone_review_item_payload(item),
+            'batch': _clone_review_batch_payload(batch),
+        })
+
+    try:
+        item.question = source_row.question_content or ''
+        item.answer = source_row.answer_content or ''
+        item.product_category = source_row.product_category or ''
+        item.knowledge_revision = _clone_review_revision(item.question, item.answer)
+        item.detection_status = 'pending_scan'
+        item.risk_level = 'unknown'
+        item.suggested_action = 'defer'
+        item.decision = 'pending'
+        item.decision_reason = ''
+        item.selected_existing_wiki_id = None
+        item.apply_status = 'not_applied'
+        item.result_wiki_id = None
+        item.decided_by = None
+        item.decided_at = None
+        item.applied_at = None
+        item.difference_rule_ids_json = '[]'
+        item.evidence_sources_json = '[]'
+        item.reuse_candidate_ids_json = '[]'
+        item.ai_impact_review_json = '{}'
+        item.error_message = None
+        batch.status = 'scanning'
+        batch.error_message = None
+        db.session.flush()
+        _scan_clone_review_batch(batch, item_ids={item.item_id})
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'item': _clone_review_item_payload(item),
+            'batch': _clone_review_batch_payload(batch),
+        })
+    except Exception as exc:
+        db.session.rollback()
+        batch = db.session.get(MatrixCloneReviewBatch, item.batch_id)
+        if batch:
+            batch.status = 'partial_failed'
+            batch.error_message = str(exc)[:1000]
+            db.session.commit()
+        return jsonify({'success': False, 'message': str(exc)}), 500
+    finally:
+        _release_matrix_clone_scan(item.batch_id)
+
+
+@app.route('/api/matrix/clone-review/<batch_id>/refresh-stale', methods=['POST'])
+@login_required
+def refresh_stale_matrix_clone_review_items(batch_id):
+    batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '差异校验批次不存在'}), 404
+    if batch.status in {'applying', 'ready_to_submit', 'submitted', 'cancelled'}:
+        return jsonify({'success': False, 'message': '当前批次状态不允许更新过期校验'}), 409
+    if _matrix_clone_scan_is_active(batch) or not _claim_matrix_clone_scan(batch.batch_id):
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_scan_in_progress',
+            'message': '当前批次正在校验，请等待本轮完成',
+        }), 409
+
+    stale_items = MatrixCloneReviewItem.query.filter_by(
+        batch_id=batch.batch_id,
+        detection_status='stale',
+    ).all()
+    if not stale_items:
+        _release_matrix_clone_scan(batch.batch_id)
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_no_stale_item',
+            'message': '当前批次没有过期校验条目',
+        }), 422
+
+    refreshed_ids = set()
+    excluded_count = 0
+    try:
+        for item in stale_items:
+            source_row = ProductMatrix.query.filter_by(
+                question_wiki_id=item.question_wiki_id,
+                product_name=item.source_model,
+            ).first()
+            if source_row is None:
+                item.detection_status = 'source_removed'
+                item.risk_level = 'default'
+                item.suggested_action = 'keep'
+                item.decision = 'keep'
+                item.apply_status = 'not_required'
+                item.result_wiki_id = None
+                item.error_message = '源知识已从当前矩阵移除，本批次已排除'
+                excluded_count += 1
+                continue
+            item.question = source_row.question_content or ''
+            item.answer = source_row.answer_content or ''
+            item.product_category = source_row.product_category or ''
+            item.knowledge_revision = _clone_review_revision(item.question, item.answer)
+            item.detection_status = 'pending_scan'
+            item.risk_level = 'unknown'
+            item.suggested_action = 'defer'
+            item.decision = 'pending'
+            item.decision_reason = ''
+            item.selected_existing_wiki_id = None
+            item.apply_status = 'not_applied'
+            item.result_wiki_id = None
+            item.decided_by = None
+            item.decided_at = None
+            item.applied_at = None
+            item.difference_rule_ids_json = '[]'
+            item.evidence_sources_json = '[]'
+            item.reuse_candidate_ids_json = '[]'
+            item.ai_impact_review_json = '{}'
+            item.error_message = None
+            refreshed_ids.add(item.item_id)
+
+        batch.error_message = None
+        batch.status = 'scanning' if refreshed_ids else 'reviewing'
+        db.session.flush()
+        if refreshed_ids:
+            _scan_clone_review_batch(batch, commit_every=25, item_ids=refreshed_ids)
+        db.session.commit()
+        payload = _clone_review_batch_payload(batch)
+        payload.update({
+            'refreshed_count': len(refreshed_ids),
+            'excluded_count': excluded_count,
+        })
+        return jsonify(payload)
+    except Exception as exc:
+        db.session.rollback()
+        batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+        if batch:
+            batch.status = 'partial_failed'
+            batch.error_message = str(exc)[:1000]
+            db.session.commit()
+        return jsonify({'success': False, 'message': str(exc)}), 500
+    finally:
+        _release_matrix_clone_scan(batch_id)
+
+
+@app.route('/api/matrix/clone-review/items/<item_id>/decision', methods=['POST'])
+@login_required
+def save_matrix_clone_review_decision(item_id):
+    item = db.session.get(MatrixCloneReviewItem, str(item_id))
+    if not item:
+        return jsonify({'success': False, 'message': '差异校验条目不存在'}), 404
+    batch = db.session.get(MatrixCloneReviewBatch, item.batch_id)
+    if not batch or batch.status in {'ready_to_submit', 'submitted', 'cancelled'}:
+        return jsonify({'success': False, 'message': '当前批次状态不允许修改决定'}), 409
+    if item.detection_status not in {'scanned', 'scan_failed'}:
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_item_not_ready',
+            'message': '该草稿仍在等待差异校验，校验完成后才能人工处理',
+        }), 409
+    if _clone_review_item_ai_pending(item):
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_ai_pending',
+            'message': 'AI 语义复核尚未完成，请等待最终风险结果后再决定',
+        }), 409
+    payload = request.get_json(silent=True) or {}
+    decision = str(payload.get('decision') or '').strip()
+    if decision not in {'keep', 'link_existing', 'remove_target', 'defer'}:
+        return jsonify({'success': False, 'message': '第一期仅支持保留、关联已有、移除和待确认'}), 422
+    current = ProductMatrix.query.filter_by(
+        question_wiki_id=item.question_wiki_id,
+        product_name=item.source_model,
+    ).first()
+    current_revision = _clone_review_revision(
+        getattr(current, 'question_content', ''),
+        getattr(current, 'answer_content', ''),
+    )
+    if current_revision != item.knowledge_revision:
+        item.detection_status = 'stale'
+        item.apply_status = 'stale'
+        db.session.commit()
+        return jsonify({'success': False, 'code': 'knowledge_revision_stale', 'message': '知识内容已变化，请重新扫描后再决定'}), 409
+    selected_wiki_id = str(payload.get('selected_existing_wiki_id') or '').strip()
+    if decision == 'link_existing':
+        candidates = _clone_review_json(item.reuse_candidate_ids_json, [])
+        allowed_ids = {str(candidate.get('wiki_id') or '') for candidate in candidates if isinstance(candidate, dict)}
+        if not selected_wiki_id or selected_wiki_id not in allowed_ids:
+            return jsonify({'success': False, 'message': '请选择已经过校验的全库知识候选'}), 422
+    item.decision = decision
+    item.decision_reason = str(payload.get('decision_reason') or '').strip()[:2000]
+    item.selected_existing_wiki_id = selected_wiki_id or None
+    item.decided_by = current_user.username
+    item.decided_at = datetime.utcnow()
+    item.apply_status = 'not_required' if decision == 'keep' else 'not_applied'
+    if decision == 'defer':
+        item.apply_status = 'not_applied'
+    for rule_id in _clone_review_json(item.difference_rule_ids_json, []):
+        rule = db.session.get(MatrixCloneDifferenceRule, str(rule_id))
+        if rule and rule.status == 'needs_confirmation':
+            rule.status = 'valid'
+    db.session.commit()
+    return jsonify({'success': True, 'item': _clone_review_item_payload(item)})
+
+
+@app.route('/api/matrix/clone-review/items/<item_id>/manual-candidate', methods=['POST'])
+@login_required
+def add_matrix_clone_review_manual_candidate(item_id):
+    item = db.session.get(MatrixCloneReviewItem, str(item_id))
+    if not item:
+        return jsonify({'success': False, 'message': '差异校验条目不存在'}), 404
+    batch = db.session.get(MatrixCloneReviewBatch, item.batch_id)
+    if not batch or batch.status in {'ready_to_submit', 'submitted', 'cancelled'}:
+        return jsonify({'success': False, 'message': '当前批次状态不允许修改候选'}), 409
+    if item.detection_status not in {'scanned', 'scan_failed'}:
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_item_not_ready',
+            'message': '该草稿仍在等待差异校验，校验完成后才能人工处理',
+        }), 409
+
+    payload = request.get_json(silent=True) or {}
+    wiki_id = str(payload.get('wiki_id') or '').strip()
+    if not wiki_id:
+        return jsonify({'success': False, 'message': '请输入要关联的知识 ID'}), 422
+    if wiki_id == str(item.question_wiki_id or ''):
+        return jsonify({'success': False, 'message': '该 ID 是当前知识，无需作为已有知识关联'}), 422
+
+    configured_rows = ProductMatrix.query.filter_by(
+        question_wiki_id=wiki_id,
+        is_configured=True,
+    ).all()
+    if not configured_rows:
+        return jsonify({'success': False, 'message': '未找到该 ID 的已启用知识关联'}), 422
+    candidate_template = next((
+        row for row in configured_rows
+        if not item.product_category or row.product_category == item.product_category
+    ), None)
+    if not candidate_template:
+        return jsonify({'success': False, 'message': '该 ID 与当前知识品类不一致，不能关联'}), 422
+
+    candidates = _clone_review_json(item.reuse_candidate_ids_json, [])
+    candidate = next((
+        row for row in candidates
+        if isinstance(row, dict) and str(row.get('wiki_id') or '') == wiki_id
+    ), None)
+    if candidate is None:
+        candidate = {
+            'wiki_id': wiki_id,
+            'question': str(candidate_template.question_content or '')[:180],
+            'answer_excerpt': str(candidate_template.answer_content or '')[:260],
+            'product_category': str(candidate_template.product_category or ''),
+            'knowledge_revision': _clone_review_revision(
+                candidate_template.question_content,
+                candidate_template.answer_content,
+            ),
+            'validation': 'manual_verified',
+            'priority': '手动',
+            'evidence_matches': {'question': False, 'answer': False, 'feature_value': False},
+            'match_reason': '已按知识 ID 人工指定，请结合完整内容确认适用范围。',
+            'manual_verified': True,
+        }
+        candidates.append(candidate)
+        item.reuse_candidate_ids_json = json.dumps(candidates, ensure_ascii=False)
+        db.session.commit()
+    return jsonify({
+        'success': True,
+        'candidate': candidate,
+        'item': _clone_review_item_payload(item),
+    })
+
+
+def _apply_clone_review_item(item):
+    source_row = ProductMatrix.query.filter_by(
+        question_wiki_id=item.question_wiki_id,
+        product_name=item.source_model,
+    ).first()
+    if not source_row:
+        raise ValueError('源机型知识关联不存在')
+    if _clone_review_revision(source_row.question_content, source_row.answer_content) != item.knowledge_revision:
+        item.detection_status = 'stale'
+        item.apply_status = 'stale'
+        raise ValueError('知识内容已变化，请重新扫描')
+    if item.decision == 'keep':
+        item.apply_status = 'not_required'
+        item.result_wiki_id = item.question_wiki_id
+        return
+    if item.decision == 'remove_target':
+        item.result_wiki_id = None
+    elif item.decision == 'link_existing':
+        candidate_wiki_id = str(item.selected_existing_wiki_id or '')
+        candidates = _clone_review_json(item.reuse_candidate_ids_json, [])
+        selected_candidate = next((
+            candidate for candidate in candidates
+            if isinstance(candidate, dict) and str(candidate.get('wiki_id') or '') == candidate_wiki_id
+        ), None)
+        if not selected_candidate:
+            raise ValueError('已有知识候选已失效，请重新扫描')
+        candidate_template = ProductMatrix.query.filter_by(question_wiki_id=candidate_wiki_id).first()
+        if not candidate_template:
+            raise ValueError('已有知识候选不存在')
+        if item.product_category and candidate_template.product_category != item.product_category:
+            raise ValueError('已有知识候选品类已变化，请重新扫描')
+        expected_revision = str(selected_candidate.get('knowledge_revision') or '')
+        current_revision = _clone_review_revision(candidate_template.question_content, candidate_template.answer_content)
+        if not expected_revision or current_revision != expected_revision:
+            raise ValueError('已有知识候选内容已变化，请重新扫描')
+        item.result_wiki_id = candidate_wiki_id
+    else:
+        raise ValueError('该决定不能执行')
+    item.apply_status = 'applied'
+    item.applied_at = datetime.utcnow()
+    item.error_message = None
+
+
+@app.route('/api/matrix/clone-review/<batch_id>/apply', methods=['POST'])
+@login_required
+def apply_matrix_clone_review(batch_id):
+    batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '差异校验批次不存在'}), 404
+    if batch.status in {'ready_to_submit', 'submitted', 'cancelled'}:
+        return jsonify({'success': False, 'message': '当前批次状态不允许执行决定'}), 409
+    if batch.status in {'created', 'generating'}:
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_generation_incomplete',
+            'message': '复核草稿尚未生成可处理条目，暂不能执行决定',
+        }), 409
+    payload = request.get_json(silent=True) or {}
+    requested_ids = payload.get('item_ids')
+    query = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id)
+    if isinstance(requested_ids, list) and requested_ids:
+        query = query.filter(MatrixCloneReviewItem.item_id.in_([str(value) for value in requested_ids]))
+    items = query.all()
+    executable = [
+        item for item in items
+        if item.detection_status in {'scanned', 'scan_failed'}
+        and item.decision in {'keep', 'link_existing', 'remove_target'}
+        and item.apply_status in {'not_applied', 'failed', 'not_required'}
+        and not _clone_review_item_ai_pending(item)
+    ]
+    if not executable:
+        return jsonify({'success': False, 'message': '没有可执行的人工决定'}), 422
+    applied_count = 0
+    failed = []
+    batch.status = 'applying'
+    for item in executable:
+        item.apply_status = 'applying'
+        try:
+            with db.session.begin_nested():
+                _apply_clone_review_item(item)
+            applied_count += 1
+        except Exception as exc:
+            item.apply_status = 'failed' if item.apply_status != 'stale' else 'stale'
+            item.error_message = str(exc)[:1000]
+            failed.append({'item_id': item.item_id, 'message': str(exc)})
+    batch.status = 'partial_failed' if failed else 'reviewing'
+    db.session.commit()
+    return jsonify({
+        'success': not failed,
+        'batch_id': batch.batch_id,
+        'status': batch.status,
+        'applied_count': applied_count,
+        'failed': failed,
+    }), (207 if failed else 200)
+
+
+@app.route('/api/matrix/clone-review/<batch_id>/complete', methods=['POST'])
+@login_required
+def complete_matrix_clone_review(batch_id):
+    batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '差异校验批次不存在'}), 404
+    if batch.status == 'submitted':
+        return jsonify(_clone_review_batch_payload(batch))
+    if batch.status in {'created', 'generating', 'scanning'}:
+        return jsonify({
+            'success': False,
+            'code': 'clone_review_generation_incomplete',
+            'message': '复核草稿尚未全部生成和扫描完成，暂不能完成批次',
+        }), 409
+    payload = request.get_json(silent=True) or {}
+    methods = _clone_review_json(batch.detection_methods_json, [])
+    if methods == ['manual_difference_ai']:
+        if not bool(payload.get('manual_scope_confirmed')):
+            return jsonify({'success': False, 'code': 'manual_scope_confirmation_required', 'message': '请确认本次输入已覆盖当前已知差异'}), 422
+        batch.manual_scope_confirmed_by = current_user.username
+        batch.manual_scope_confirmed_at = datetime.utcnow()
+    rules = MatrixCloneDifferenceRule.query.filter_by(batch_id=batch.batch_id).all()
+    needs_rule_confirmation = [rule for rule in rules if rule.status == 'needs_confirmation']
+    if needs_rule_confirmation and bool(payload.get('rules_confirmed')):
+        for rule in needs_rule_confirmation:
+            rule.status = 'valid'
+    items = MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all()
+    if _mark_clone_review_batch_source_stale(batch, items):
+        db.session.commit()
+        return jsonify({
+            'success': False,
+            'code': 'knowledge_revision_stale',
+            'message': '源知识内容已变化，请重新扫描后再完成',
+        }), 409
+    errors = []
+    for item in items:
+        _normalize_clone_review_default_item(item)
+        if (
+            item.detection_status == 'scanned'
+            and item.risk_level == 'default'
+            and item.decision == 'pending'
+            and not item.decided_by
+        ):
+            item.decision = 'keep'
+            item.apply_status = 'not_required'
+            item.result_wiki_id = item.question_wiki_id
+    detection_error_count = sum(_clone_review_item_has_detection_error(item) for item in items)
+    pending_ai_count = sum(_clone_review_item_ai_pending(item) for item in items)
+    pending_decision_count = sum(item.decision in {'pending', 'defer'} for item in items)
+    pending_apply_count = sum(
+        item.decision not in {'pending', 'defer'}
+        and item.apply_status not in {'applied', 'not_required'}
+        for item in items
+    )
+    if pending_decision_count:
+        errors.append(f'还有 {pending_decision_count} 条高、中风险或人工暂缓知识未形成最终决定')
+    if detection_error_count:
+        errors.append(f'还有 {detection_error_count} 条知识存在检测异常，请重新扫描或补充资料')
+    if pending_ai_count:
+        errors.append(f'还有 {pending_ai_count} 条高、中风险知识正在等待 AI 语义复核')
+    if pending_apply_count:
+        errors.append(f'还有 {pending_apply_count} 条已确认决定尚未执行成功')
+    if any(rule.status in {'pending_parse', 'source_conflict', 'parse_failed', 'stale'} for rule in rules):
+        errors.append('差异规则仍存在冲突、失败或过期状态')
+    if 'manual_difference_ai' in methods and batch.ai_parse_status in {'parse_failed', 'needs_confirmation'}:
+        errors.append('用户差异说明尚未成功形成可确认规则')
+    if 'parameter_check' in methods and batch.error_message:
+        errors.append(f'参数校对未完成：{batch.error_message}')
+    hard_rule_errors = any(rule.status in {'pending_parse', 'source_conflict', 'parse_failed', 'stale'} for rule in rules)
+    if needs_rule_confirmation and not bool(payload.get('rules_confirmed')) and not errors and not hard_rule_errors:
+        return jsonify({
+            'success': False,
+            'code': 'difference_rule_confirmation_required',
+            'message': f'请人工确认 {len(needs_rule_confirmation)} 条未命中知识的差异规则',
+        }), 422
+    if _clone_review_batch_requires_completion(batch, rules=rules, items=items):
+        if not errors:
+            errors.append('仍有差异规则、知识决定或执行结果未完成')
+    if errors:
+        db.session.commit()
+        return jsonify({'success': False, 'code': 'clone_review_incomplete', 'message': '差异校验尚未完成', 'errors': errors[:50]}), 409
+    batch.status = 'ready_to_submit'
+    batch.completed_by = current_user.username
+    batch.completed_at = datetime.utcnow()
+    batch.error_message = None
+    db.session.commit()
+    return jsonify(_clone_review_batch_payload(batch))
+
 
 @app.route('/api/matrix/copy_column', methods=['POST'])
 @login_required

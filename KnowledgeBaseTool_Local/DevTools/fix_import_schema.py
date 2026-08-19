@@ -100,7 +100,7 @@ required_fields = [
 deprecated_fields = ['answer_info', 'urls']
 
 # 需要更新的表
-tables = ['knowledge_base_v1', 'knowledge_base_v1_t1']
+tables = ['knowledge_base_v1']
 
 try:
     print("🔍 检查表结构...\n")

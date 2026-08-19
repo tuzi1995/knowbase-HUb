@@ -337,7 +337,7 @@
           <div class="workbench-badge">K-matrix</div>
           <div class="workbench-title-group">
             <h2 id="currentModuleTitle">知识库管理</h2>
-            <p id="currentModuleDesc">维护 V1 / V1T-1 知识库内容，支持搜索、编辑、导出与同步。</p>
+            <p id="currentModuleDesc">维护 V1 知识库内容，支持搜索、编辑、导出与下游同步。</p>
           </div>
           <div class="workbench-status-row">
             <span class="workbench-status-pill">当前分组：<b id="currentModuleGroup">核心数据</b></span>
@@ -398,6 +398,7 @@
                 <div class="workbench-nav-group-title">工具与映射</div>
                 <button onclick="switchTab('dataSettingsView')" class="tab-modern workbench-nav-btn" id="tab-dataSettingsView">数据设置</button>
                 <button onclick="switchTab('smartMappingView')" class="tab-modern workbench-nav-btn" id="tab-smartMappingView">智能映射</button>
+                <button onclick="switchTab('newProductEntryView')" class="tab-modern workbench-nav-btn" id="tab-newProductEntryView">新品录入</button>
               </div>
 
               <div class="workbench-nav-group" data-nav-group="日志与归档">
@@ -435,15 +436,8 @@
           <div class="kb-section">
             <div class="gov-summary-panel" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
                 <div>
-                    <div style="font-weight: 600; color: #1E3A8A; margin-bottom: 4px;">维护 V1 / V1T-1 知识库内容</div>
-                    <div class="text-muted" style="font-size: 13px;">当前数据源: 
-                        <label class="radio-label" style="display:inline-flex; margin-left: 8px;">
-                            <input type="radio" name="kbTable" value="knowledge_base_v1" checked onchange="handleKBTableChange()"> 此刻库
-                        </label>
-                        <label class="radio-label" style="display:inline-flex; margin-left: 8px;">
-                            <input type="radio" name="kbTable" value="knowledge_base_v1_t1" onchange="handleKBTableChange()"> 前刻库
-                        </label>
-                    </div>
+                    <div style="font-weight: 600; color: #1E3A8A; margin-bottom: 4px;">维护 V1 知识库内容</div>
+                    <div class="text-muted" style="font-size: 13px;">当前数据源：V1</div>
                 </div>
                 
                 <div class="action-bar" style="margin: 0; padding: 0; border: none; background: transparent;">
@@ -612,17 +606,6 @@
 
       <div id="kbCompareView" class="d-none">
           <div class="kb-section kb-compare-section">
-            <div class="gov-summary-panel kb-compare-hero">
-                <div>
-                    <div class="kb-compare-title">知识对比</div>
-                    <div class="text-muted kb-compare-desc">按 ID 批量导入知识库记录，完成匹配校验、字段差异与合并草稿。</div>
-                </div>
-                <div class="action-bar kb-compare-actions">
-                    <button onclick="clearKBCompareWorkspace()" class="action-btn btn-secondary-outline">清空</button>
-                    <button onclick="switchTab('kbView')" class="action-btn btn-secondary-outline">返回知识库</button>
-                </div>
-            </div>
-
             <div class="kb-compare-layout" id="kbCompareLayout">
                 <section class="kb-compare-import-panel" id="kbCompareImportPanel">
                     <div class="kb-compare-panel-head">
@@ -631,11 +614,8 @@
                             <p id="kbCompareImportMeta">支持换行、逗号、空格、CSV 文本。也可以从知识库管理勾选后跳转带入。</p>
                         </div>
                         <div class="kb-compare-import-tools">
-                            <div class="kb-compare-source-switch" aria-label="对比数据源">
-                                <label><input type="radio" name="kbCompareTable" value="knowledge_base_v1" checked> 此刻库</label>
-                                <label><input type="radio" name="kbCompareTable" value="knowledge_base_v1_t1"> 前刻库</label>
-                            </div>
                             <button type="button" id="kbCompareImportToggleBtn" onclick="toggleKBCompareImportCollapsed()" class="action-btn btn-sm">收起</button>
+                            <button type="button" onclick="clearKBCompareWorkspace()" class="action-btn btn-sm">清空</button>
                         </div>
                     </div>
 
@@ -696,10 +676,7 @@
       <div id="kbDuplicateCheckView" class="d-none">
           <div class="kb-section kd-section">
             <div class="kd-toolbar">
-                <div class="kd-library-switch" role="group" aria-label="查重范围">
-                    <label><input type="radio" name="kdLibrary" value="knowledge_base_v1" checked> 此刻库</label>
-                    <label><input type="radio" name="kdLibrary" value="knowledge_base_v1_t1"> 前刻库</label>
-                </div>
+                <div class="kd-library-switch" aria-label="查重范围">V1</div>
                 <div class="kd-toolbar-actions">
                     <button type="button" class="action-btn btn-secondary-outline" onclick="kdSaveDraft(true)"><i class="fas fa-save"></i><span>保存草稿</span></button>
                     <button type="button" class="action-btn btn-secondary-outline" onclick="kdClearWorkspace()"><i class="fas fa-eraser"></i><span>清空</span></button>
@@ -924,24 +901,6 @@
                     </div>
                 </article>
 
-                <article class="data-setting-card data-setting-card-danger">
-                    <div class="data-setting-card-head">
-                        <div class="data-setting-icon">🔄</div>
-                        <div>
-                            <h4>同步此刻到前刻</h4>
-                            <p>将 V1 全量覆盖到 V1T-1，用于保留上一时刻知识库快照。</p>
-                        </div>
-                    </div>
-                    <div class="data-setting-tags">
-                        <span>高风险操作</span>
-                        <span>全量覆盖</span>
-                    </div>
-                    <div class="data-setting-actions">
-                        <button id="syncBtn" onclick="syncKB()" class="danger-btn btn-danger-solid">执行同步</button>
-                        <span id="syncStatus" class="data-setting-status"></span>
-                    </div>
-                </article>
-
                 <article class="data-setting-card">
                     <div class="data-setting-card-head">
                         <div class="data-setting-icon">🔗</div>
@@ -1056,6 +1015,41 @@
                       <input id="smEmbeddingApiKey" type="password" class="form-control" autocomplete="new-password" placeholder="已配置时无需重复填写">
                   </label>
               </div>
+              <section class="sm-ai-review-config" aria-labelledby="smAiReviewTitle">
+                  <div class="sm-ai-review-config-head">
+                      <div>
+                          <h4 id="smAiReviewTitle">AI 事实复核</h4>
+                          <p>对 Embedding 判定为一致的候选复核尺寸、数字、单位、型号、范围、条件、步骤和结论；冲突转为无匹配，无法判断则待人工。</p>
+                      </div>
+                      <label class="sm-config-switch"><input id="smAiReviewEnabled" type="checkbox"><span>启用</span></label>
+                  </div>
+                  <div class="sm-ai-review-fields">
+                      <label class="sm-embedding-field sm-embedding-field-wide">
+                          <span>复核 Base URL（留空复用现有 AI 配置）</span>
+                          <input id="smAiReviewBaseUrl" type="text" class="form-control" autocomplete="off" placeholder="https://api.example.com/v1">
+                      </label>
+                      <label class="sm-embedding-field">
+                          <span>复核模型（留空复用现有 AI 配置）</span>
+                          <input id="smAiReviewModel" type="text" class="form-control" autocomplete="off" placeholder="模型名称">
+                      </label>
+                      <label class="sm-embedding-field sm-embedding-field-small">
+                          <span>每批条数</span>
+                          <input id="smAiReviewBatchSize" type="number" min="1" max="20" class="form-control" inputmode="numeric" value="8">
+                      </label>
+                      <label class="sm-embedding-field sm-embedding-field-key">
+                          <span>独立 AI API Key（可留空复用）</span>
+                          <input id="smAiReviewApiKey" type="password" class="form-control" autocomplete="new-password" placeholder="已配置时无需重复填写">
+                      </label>
+                  </div>
+                  <fieldset class="sm-ai-review-types">
+                      <legend>复核结果类型</legend>
+                      <label><input type="checkbox" name="smAiReviewMatchType" value="问题+答案均一致" checked><span>问题+答案均一致</span></label>
+                      <label><input type="checkbox" name="smAiReviewMatchType" value="仅问题一致" checked><span>仅问题一致</span></label>
+                      <label><input type="checkbox" name="smAiReviewMatchType" value="仅答案一致" checked><span>仅答案一致</span></label>
+                  </fieldset>
+                  <label class="sm-config-switch sm-ai-fail-closed"><input id="smAiReviewFailClosed" type="checkbox" checked><span>AI 失败或不确定时阻断提交，转人工</span></label>
+                  <div id="smAiReviewConfigStatus" class="sm-ai-review-config-status" role="status" aria-live="polite"></div>
+              </section>
               <div id="smEmbeddingConfigStatus" class="embedding-config-status" role="status" aria-live="polite">正在加载配置...</div>
               <div class="embedding-config-actions">
                   <button type="button" onclick="smCloseEmbeddingConfigDialog()" class="action-btn btn-secondary-outline">取消</button>
@@ -1069,32 +1063,18 @@
         <div class="kb-section parameter-check-section">
           <div class="parameter-check-command-row">
             <div>
-              <h3>参数校对结果</h3>
-              <p>按参数功能发起全量扫描，后台会自动分段执行并持续写入候选。复核池汇总全部 AI 候选，人工可在扫描未结束时修正初判；工作台不会自动修改知识正文或参数清单。</p>
+              <h3>智能参数与知识库校对</h3>
+              <p>以智能参数汇总中已确认的参数为基准，逐型号比对当前知识库的参数声明，直接标识一致、冲突和待补参数。校对不会自动修改知识库或参数清单。</p>
             </div>
             <div class="parameter-check-command-actions">
               <label class="parameter-check-run-select" for="parameterCheckRunSelect">
-                <span>查看运行</span>
+                <span>校对批次</span>
                 <select id="parameterCheckRunSelect" class="input-modern" onchange="changeParameterCheckRun(this.value)" aria-label="选择校对运行">
                   <option value="">正在加载运行记录</option>
                 </select>
               </label>
-              <label id="parameterCheckAiViewField" class="parameter-check-run-select" for="parameterCheckAiView">
-                <span>AI 视图</span>
-                <select id="parameterCheckAiView" class="input-modern" onchange="changeParameterCheckAiView(this.value)" aria-label="选择 AI 记录视图">
-                  <option value="queue">全量复核池</option>
-                  <option value="candidates">本次扫描候选</option>
-                  <option value="audit">扫描审计</option>
-                </select>
-              </label>
-              <label class="parameter-check-run-select parameter-check-scan-select" for="parameterCheckScanFeatureId">
-                <span>扫描功能</span>
-                <select id="parameterCheckScanFeatureId" class="input-modern" aria-label="选择要全量扫描的参数功能">
-                  <option value="">正在读取可扫描功能</option>
-                </select>
-              </label>
-              <button type="button" id="parameterCheckAiFeatureScanBtn" class="action-btn btn-secondary-outline parameter-check-refresh-btn" onclick="runParameterCheckAiFeatureScan()" title="按所选参数功能发起全量扫描，后台会自动分段处理">
-                <i class="fas fa-magic" aria-hidden="true"></i><span>扫描该功能</span>
+              <button type="button" id="parameterCheckRunCurrentBtn" class="primary-btn parameter-check-refresh-btn" onclick="runParameterCheckCurrentKnowledgeComparison()" title="重新提取当前知识库中的参数声明，并与智能参数汇总进行比较">
+                <i class="fas fa-check-double" aria-hidden="true"></i><span>校对当前知识库</span>
               </button>
               <button type="button" class="action-btn btn-secondary-outline parameter-check-refresh-btn" onclick="loadParameterCheckOverview({ force: true })" title="刷新参数校对数据">
                 <i class="fas fa-rotate" aria-hidden="true"></i><span>刷新</span>
@@ -1102,14 +1082,13 @@
             </div>
           </div>
 
-          <div id="parameterCheckRuntimeStatus" class="parameter-check-runtime-status" role="status" aria-live="polite">正在读取全量复核池...</div>
+          <div id="parameterCheckRuntimeStatus" class="parameter-check-runtime-status" role="status" aria-live="polite">正在读取校对结果...</div>
 
-          <dl id="parameterCheckSummary" class="parameter-check-summary-strip is-five-columns" aria-label="校对结果汇总">
-            <div><dt>全量候选</dt><dd>-</dd></div>
-            <div><dt>AI 初判与快照一致</dt><dd>-</dd></div>
-            <div><dt>待人工复核</dt><dd>-</dd></div>
-            <div><dt>已人工处理</dt><dd>-</dd></div>
-            <div><dt>运行中扫描</dt><dd>-</dd></div>
+          <dl id="parameterCheckSummary" class="parameter-check-summary-strip" aria-label="校对结果汇总">
+            <div><dt>已校对声明</dt><dd>-</dd></div>
+            <div><dt>结果一致</dt><dd>-</dd></div>
+            <div><dt>存在冲突</dt><dd>-</dd></div>
+            <div><dt>待补参数</dt><dd>-</dd></div>
           </dl>
 
           <div class="gov-filter-panel parameter-check-filter-panel">
@@ -1150,19 +1129,18 @@
             <table class="kb-table parameter-check-table">
               <thead id="parameterCheckTableHead">
                 <tr>
-                  <th>人工状态</th>
-                  <th>型号</th>
+                  <th>校对结论</th>
+                  <th>适用型号</th>
                   <th>参数功能</th>
-                  <th>参考证据</th>
+                  <th>知识库声明</th>
+                  <th>智能参数汇总</th>
                   <th>知识 Wiki ID</th>
-                  <th>KB 待核查声明</th>
-                  <th>AI 初判</th>
-                  <th>快照比对</th>
+                  <th>比对依据</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody id="parameterCheckTableBody">
-                <tr><td colspan="9" class="empty-message">正在读取参数校对结果...</td></tr>
+                <tr><td colspan="8" class="empty-message">正在读取参数校对结果...</td></tr>
               </tbody>
             </table>
           </div>
@@ -1386,7 +1364,7 @@
                             <div class="matrix-more-menu-divider"></div>
                             <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openProductManager()">⚙️ 管理型号库</a>
                             <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openModelMappingModal()">🗺️ 机型映射配置</a>
-                            <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openCopyConfigModal()">📋 复制机型配置</a>
+                            <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); switchTab('newProductEntryView')">📥 新品录入工作台</a>
                         </div>
                     </div>
                     <button id="matrixSubmitChangesBtn" onclick="submitMatrixChanges()" class="primary-btn" title="提交已选修改">✅ 提交已选修改</button>
@@ -1671,15 +1649,15 @@
           </div>
         </section>
 
-        <div id="linkImportModal" class="modal">
+        <div id="linkImportModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="linkImportModalTitle" aria-hidden="true">
           <div class="modal-content link-import-modal-content">
             <div class="link-import-modal-header">
               <div class="link-import-hero">
                 <div class="link-import-hero-badge">多媒体录入</div>
-                <h3 class="modal-title-no-top">链接导入</h3>
+                <h3 id="linkImportModalTitle" class="modal-title-no-top">链接导入</h3>
                 <div class="text-muted">统一处理单条录入、批量粘贴与 JSON 文件导入，让新增内容更快进入数据区。</div>
               </div>
-              <button class="close-modal-btn link-import-close-btn" type="button">关闭</button>
+              <button class="close-modal-btn link-import-close-btn" type="button" aria-label="关闭链接导入弹窗">关闭</button>
             </div>
             <div class="link-import-modal-body">
               <div class="link-import-card link-import-card-primary">
@@ -1691,11 +1669,13 @@
                 </div>
                 <div class="input-group-row link-import-inline-row">
                   <div class="input-wrapper flex-grow">
+                      <label class="sr-only" for="urlInput">图片、视频或页面链接</label>
                       <input id="urlInput" type="url" placeholder="粘贴图片/视频/页面链接" class="modern-input" oninput="this.title=this.value">
                   </div>
                   <div class="input-with-dropdown tags-input-container">
+                    <label class="sr-only" for="tagsInput">标签，逗号分隔</label>
                     <input id="tagsInput" type="text" placeholder="标签，逗号分隔" class="modern-input">
-                    <button id="tagsDropdownBtn" class="dropdown-trigger-btn" title="选择标签">▼</button>
+                    <button id="tagsDropdownBtn" class="dropdown-trigger-btn" type="button" title="选择标签" aria-label="选择标签">▼</button>
                     <div id="tagsDropdown" class="dropdown-menu"></div>
                   </div>
                   <button id="addBtn" class="primary-btn btn-lg">添加</button>
@@ -1711,6 +1691,7 @@
                 </div>
                 <div class="bulk-input-row link-import-bulk-row">
                   <div class="input-wrapper flex-grow">
+                     <label class="sr-only" for="bulkInput">批量链接，每行一个</label>
                      <textarea id="bulkInput" placeholder="批量添加：每行一个链接" class="modern-textarea" rows="6"></textarea>
                   </div>
                   <div class="link-import-bulk-actions">
@@ -1729,9 +1710,11 @@
         <section class="gov-filter-panel link-filter-panel">
           <div class="gov-filter-row gov-filter-row-basic link-filter-search-row">
              <div class="gov-filter-field gov-filter-field-id link-filter-field-id">
+                <label class="sr-only" for="linkSearchKBID">搜索 KB ID</label>
                 <input type="text" id="linkSearchKBID" placeholder="搜索 KB ID..." class="input-modern" oninput="renderLinkTable(); this.title=this.value">
              </div>
              <div class="gov-filter-field gov-filter-field-status link-filter-field-status">
+                <label class="sr-only" for="linkFilterStatus">ID 状态</label>
                 <select id="linkFilterStatus" class="input-modern form-select" onchange="renderLinkTable()">
                    <option value="all">ID状态（全部）</option>
                    <option value="has_id">有ID</option>
@@ -1739,6 +1722,7 @@
                 </select>
              </div>
              <div class="gov-filter-field gov-filter-field-status link-filter-field-type">
+                <label class="sr-only" for="linkFilterType">链接类型</label>
                 <select id="linkFilterType" class="input-modern form-select" onchange="renderLinkTable()">
                    <option value="all">链接类型（全部）</option>
                    <option value="image">图片</option>
@@ -1749,6 +1733,7 @@
                 </select>
              </div>
              <div class="gov-filter-field gov-filter-field-question link-filter-field-url">
+                <label class="sr-only" for="linkSearchURL">搜索 URL</label>
                 <input type="text" id="linkSearchURL" placeholder="搜索 URL..." class="input-modern" oninput="renderLinkTable(); this.title=this.value">
              </div>
              <div class="gov-filter-field link-tag-selector-field">
@@ -1799,12 +1784,12 @@
             </colgroup>
             <thead>
               <tr>
-                <th width="40" data-col-key="checkbox"><input type="checkbox" id="selectAll"></th>
+                <th width="40" data-col-key="checkbox"><input type="checkbox" id="selectAll" aria-label="选择当前页全部链接"></th>
                 <th class="col-urls" data-col-key="preview">预览</th>
-                <th class="col-id" data-col-key="kb_id" onclick="handleLinkSort('kb_id')" title="点击排序">KB ID</th>
-                <th class="col-question" data-col-key="url" onclick="handleLinkSort('url')" title="点击排序">链接信息</th>
-                <th class="col-link-src" data-col-key="type" onclick="handleLinkSort('type')" title="点击排序">链接类型</th>
-                <th class="col-keyword" data-col-key="tags" onclick="handleLinkSort('tags')" title="点击排序">标签管理</th>
+                <th class="col-id" data-col-key="kb_id" tabindex="0" aria-label="KB ID，按此列排序" onclick="handleLinkSort('kb_id')" title="点击排序">KB ID</th>
+                <th class="col-question" data-col-key="url" tabindex="0" aria-label="链接信息，按此列排序" onclick="handleLinkSort('url')" title="点击排序">链接信息</th>
+                <th class="col-link-src" data-col-key="type" tabindex="0" aria-label="链接类型，按此列排序" onclick="handleLinkSort('type')" title="点击排序">链接类型</th>
+                <th class="col-keyword" data-col-key="tags" tabindex="0" aria-label="标签管理，按此列排序" onclick="handleLinkSort('tags')" title="点击排序">标签管理</th>
                 <th class="col-action" data-col-key="action">操作</th>
               </tr>
             </thead>
@@ -2316,6 +2301,7 @@
                             <option value="管控中心">管控中心</option>
                             <option value="badcase标注工作台">badcase标注工作台</option>
                             <option value="知识库内容检测工具">知识库内容检测工具</option>
+                            <option value="新品差异复核">新品差异复核</option>
                         </select>
                     </label>
                     <label class="mod-filter-field">
@@ -2474,10 +2460,138 @@
           </div>
       </div>
 
+      <div id="newProductEntryView" class="d-none">
+          <div class="kb-section new-product-entry-section">
+            <div class="new-product-entry-hero">
+                <div>
+                    <h3 class="new-product-entry-title">新品录入</h3>
+                    <p class="new-product-entry-desc">在一个工作区内创建草稿、核对差异、处理风险并提交矩阵修改。</p>
+                </div>
+                <div class="new-product-entry-hero-actions">
+                    <button type="button" class="primary-btn" onclick="openCopyConfigModal()"><i class="fas fa-plus" aria-hidden="true"></i><span>创建新品批次</span></button>
+                    <button type="button" class="action-btn btn-secondary-outline" onclick="document.getElementById('newProductEntryBatches')?.scrollIntoView({behavior: 'smooth', block: 'start'})"><i class="fas fa-clock-rotate-left" aria-hidden="true"></i><span>继续已有批次</span></button>
+                    <button type="button" class="action-btn btn-secondary-outline" onclick="submitNewProductEntryMatrixChanges()"><i class="fas fa-cloud-arrow-up" aria-hidden="true"></i><span>提交矩阵修改</span></button>
+                </div>
+            </div>
+
+            <ol class="new-product-entry-flow" aria-label="新品录入流程">
+                <li id="newProductEntryStep-configure" class="is-current"><span class="new-product-entry-flow-index">1</span><strong>创建配置</strong><small>生成目标机型的未生效草稿</small></li>
+                <li id="newProductEntryStep-review"><span class="new-product-entry-flow-index">2</span><strong>校验差异</strong><small>识别参数和知识风险</small></li>
+                <li id="newProductEntryStep-decide"><span class="new-product-entry-flow-index">3</span><strong>处理风险</strong><small>保存并执行人工决定</small></li>
+                <li id="newProductEntryStep-ready"><span class="new-product-entry-flow-index">4</span><strong>完成校验</strong><small>确认待提交清单</small></li>
+                <li id="newProductEntryStep-submit"><span class="new-product-entry-flow-index">5</span><strong>提交矩阵</strong><small>正式写入目标配置</small></li>
+            </ol>
+
+            <div class="new-product-entry-workspace">
+                <section id="copyConfigForm" class="new-product-entry-config" aria-labelledby="copyConfigFormTitle">
+                    <div class="new-product-entry-panel-head"><div><h4 id="copyConfigFormTitle">创建新品批次</h4><p>先选择复制范围，再生成可校验的目标机型草稿。</p></div><div class="new-product-entry-panel-head-actions"><span id="copyConfigFormState" class="new-product-entry-status">尚未创建草稿</span><button id="copyConfigCompactToggle" type="button" class="action-btn btn-secondary-outline" onclick="toggleCopyConfigCompact()">调整配置</button></div></div>
+                    <div class="new-product-entry-config-body">
+                        <div class="new-product-entry-config-main">
+                            <div class="new-product-entry-form-group">
+                                <label class="new-product-entry-form-label">复制来源</label>
+                                <div class="new-product-entry-mode-tabs" role="tablist" aria-label="复制来源类型">
+                                    <button type="button" class="tab-btn active" onclick="switchCopyMode('model')" id="tab-copy-model">按机型</button>
+                                    <button type="button" class="tab-btn" onclick="switchCopyMode('category')" id="tab-copy-category">按分类</button>
+                                </div>
+                                <div id="copy-model-content" class="new-product-entry-source-field">
+                                    <label for="copySourceModel">源机型</label><select id="copySourceModel" class="form-select" onchange="fetchCopyStats()"></select><small id="copyModelStats">请选择源机型...</small>
+                                </div>
+                                <div id="copy-category-content" class="new-product-entry-source-field d-none">
+                                    <label for="copySourceCategory">源分类</label><select id="copySourceCategory" class="form-select" onchange="fetchCopyStats()"></select><small id="copyCategoryStats">请选择源分类...</small>
+                                </div>
+                            </div>
+
+                            <div class="new-product-entry-form-group">
+                                <label class="new-product-entry-form-label">克隆范围</label>
+                                <div class="new-product-entry-option-list">
+                                    <label><input type="radio" name="copyScope" value="all" checked onchange="updateCopyScopeSummary()"><span><strong>全部源数据</strong><small>复制源机型或源分类下的全部知识。</small></span></label>
+                                    <label><input type="radio" name="copyScope" value="filtered" onchange="updateCopyScopeSummary()"><span><strong>当前筛选结果</strong><em id="copyScopeFilteredCount">待选择源</em><small>沿用机型矩阵当前筛选条件。</small></span></label>
+                                    <label><input type="radio" name="copyScope" value="selected" onchange="updateCopyScopeSummary()"><span><strong>已勾选数据</strong><em id="copyScopeSelectedCount">待选择源</em><small>只复制机型矩阵中已勾选的知识。</small></span></label>
+                                </div>
+                                <p id="copyScopeSummary" class="new-product-entry-form-hint">将克隆全部源数据。</p>
+                            </div>
+
+                            <div class="new-product-entry-form-group new-product-entry-exclude-tags">
+                                <div class="new-product-entry-field-heading">
+                                    <label id="copyExcludeTagsLabel" class="new-product-entry-form-label">过滤标签</label>
+                                    <span id="copyExcludeTagsCount" class="new-product-entry-field-count">未选择</span>
+                                </div>
+                                <div id="copyExcludeTagsSelector" class="new-product-entry-multiselect">
+                                    <button id="copyExcludeTagsTrigger" type="button" class="new-product-entry-multiselect-trigger" aria-labelledby="copyExcludeTagsLabel copyExcludeTagsValue" aria-haspopup="listbox" aria-expanded="false" onclick="toggleCopyExcludeTags(event)">
+                                        <span id="copyExcludeTagsValue">选择知识库管理标签</span>
+                                        <i class="fas fa-chevron-down" aria-hidden="true"></i>
+                                    </button>
+                                    <div id="copyExcludeTagsPopover" class="new-product-entry-multiselect-popover" hidden>
+                                        <label class="new-product-entry-multiselect-search" for="copyExcludeTagsSearch"><i class="fas fa-search" aria-hidden="true"></i><input id="copyExcludeTagsSearch" type="search" placeholder="搜索标签" autocomplete="off" oninput="renderCopyExcludeTags()"></label>
+                                        <div id="copyExcludeTagsOptions" class="new-product-entry-multiselect-options" role="listbox" aria-multiselectable="true"><div class="new-product-entry-multiselect-empty">正在读取标签...</div></div>
+                                        <div class="new-product-entry-multiselect-footer"><span id="copyExcludeTagsFooter">未选择标签</span><button type="button" onclick="clearCopyExcludeTags(event)">清空</button></div>
+                                    </div>
+                                </div>
+                                <p class="new-product-entry-form-hint">命中任一所选标签的 KB 将从本次克隆中排除。</p>
+                            </div>
+
+                            <div class="new-product-entry-form-group">
+                                <label class="new-product-entry-form-label" for="copyTargetInput">目标机型</label>
+                                <div class="new-product-entry-target-input"><div><input type="search" id="copyTargetInput" placeholder="输入关键词搜索型号库，例如 P30" class="form-control" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="targetSuggestions" aria-autocomplete="list"><div id="targetSuggestions" class="new-product-entry-suggestions" role="listbox" aria-label="型号库候选"></div></div><button type="button" onclick="addCopyTarget()" class="action-btn">选择型号</button></div>
+                                <div id="copyTargetList" class="new-product-entry-target-list"></div>
+                                <p class="new-product-entry-form-hint">仅可选择型号库中的标准型号名称。差异校验开启时，每个批次仅支持一个目标机型。</p>
+                            </div>
+                        </div>
+                        <aside class="new-product-entry-config-side">
+                            <div class="new-product-entry-form-group">
+                                <span class="new-product-entry-form-label">写入策略</span>
+                                <div class="new-product-entry-option-list compact"><label><input type="radio" name="copyStrategy" value="append" checked><span><strong>仅追加</strong><small>跳过已有关系。</small></span></label><label><input type="radio" name="copyStrategy" value="force_sync"><span><strong>强制同步</strong><small>以目标配置替换源关联。</small></span></label></div>
+                            </div>
+                            <section class="copy-review-section" aria-labelledby="copyReviewTitle">
+                                <div class="copy-review-heading"><div><h4 id="copyReviewTitle">差异校验</h4><p>草稿不会直接写入矩阵，完成差异处理后才能提交。</p></div><label class="copy-review-switch"><input id="copyReviewEnabled" type="checkbox" checked onchange="updateCopyReviewControls()"><span>开启</span></label></div>
+                                <fieldset id="copyReviewMethods" class="copy-review-methods"><legend>识别方式</legend><label title="开始克隆前同步最新参数快照，并重新校验当前知识库内容"><input id="copyReviewParameterCheck" type="checkbox" checked onchange="updateCopyReviewControls()"><span><strong>同步最新参数并校对</strong><small>重新拉取参数并校验当前知识。</small></span></label><label><input id="copyReviewManualAi" type="checkbox" onchange="updateCopyReviewControls()"><span><strong>输入差异分析</strong><small>用差异描述形成可追溯规则。</small></span></label></fieldset>
+                                <label id="copyReviewManualField" class="copy-review-manual-field d-none" for="copyReviewManualText"><span>新旧型号差异</span><textarea id="copyReviewManualText" class="form-control" rows="4" maxlength="5000" oninput="updateCopyReviewControls()" placeholder="例如：旧型号最大吸力 22000Pa，新品 40000Pa"></textarea></label>
+                                <div id="copyReviewValidation" class="copy-review-validation" role="alert" aria-live="polite"></div>
+                            </section>
+                        </aside>
+                    </div>
+                    <div class="new-product-entry-config-footer"><div id="copyConfigProgress" class="copy-config-progress" role="status" aria-live="polite" hidden><div class="copy-config-progress-head"><strong id="copyConfigProgressLabel">正在准备</strong><span id="copyConfigProgressCount">--</span></div><div class="copy-config-progress-track" aria-hidden="true"><span id="copyConfigProgressBar"></span></div><div id="copyConfigProgressDetail" class="copy-config-progress-detail">正在连接处理服务...</div></div><button id="copyConfigSubmitButton" type="button" onclick="executeCopyConfig()" class="primary-btn">生成待校验草稿</button></div>
+                </section>
+                <aside class="new-product-entry-summary" aria-label="当前批次摘要"><div class="new-product-entry-summary-state"><span>批次进度</span><strong id="newProductEntryBatchStatus">正在读取批次...</strong></div><dl><div><dt>草稿条目</dt><dd id="newProductEntryStat-items">-</dd></div><div><dt>待处理风险</dt><dd id="newProductEntryStat-pending">-</dd></div><div><dt>待提交修改</dt><dd id="newProductEntryStat-changes">-</dd></div></dl><p id="newProductEntrySubmitStatus" class="new-product-entry-summary-note">完成校验后才能提交矩阵修改。</p><button type="button" class="action-btn btn-secondary-outline" onclick="switchTab('parameterCheckView')"><i class="fas fa-sliders" aria-hidden="true"></i><span>查看参数校对</span></button></aside>
+            </div>
+
+            <div id="newProductEntryReviewMount" class="new-product-entry-review-mount" aria-live="polite"></div>
+
+            <section class="new-product-entry-batches" aria-labelledby="newProductEntryBatchesTitle">
+                <div class="new-product-entry-panel-head"><div><h4 id="newProductEntryBatchesTitle">最近复核批次</h4><p>只展示当前用户可继续处理或查看结果的批次。</p></div><button type="button" class="action-btn btn-secondary-outline" onclick="loadNewProductEntryBatches()"><i class="fas fa-rotate" aria-hidden="true"></i><span>刷新</span></button></div>
+                <div id="newProductEntryBatches" class="new-product-entry-batches-list"><div class="empty-message">正在读取批次...</div></div>
+            </section>
+          </div>
+      </div>
+
       <div id="smartMappingView" class="d-none">
           <div class="kb-section">
-            <div class="kb-header-group">
-                <div class="kb-title">模块一：数据源准备与筛选</div>
+            <nav class="sm-stepper" aria-label="智能映射流程">
+                <button type="button" class="sm-stepper-item" id="smStepButton1" data-sm-step="1" onclick="smToggleStep(1)" aria-controls="smStepPanel1">
+                    <span class="sm-stepper-index">1</span>
+                    <span class="sm-stepper-copy"><strong>数据准备</strong><small id="smStepSummary1">等待导入</small></span>
+                </button>
+                <span class="sm-stepper-connector" aria-hidden="true"></span>
+                <button type="button" class="sm-stepper-item" id="smStepButton2" data-sm-step="2" onclick="smToggleStep(2)" aria-controls="smStepPanel2">
+                    <span class="sm-stepper-index">2</span>
+                    <span class="sm-stepper-copy"><strong>自动比对</strong><small id="smStepSummary2">等待数据源</small></span>
+                </button>
+                <span class="sm-stepper-connector" aria-hidden="true"></span>
+                <button type="button" class="sm-stepper-item" id="smStepButton3" data-sm-step="3" onclick="smToggleStep(3)" aria-controls="smStepPanel3">
+                    <span class="sm-stepper-index">3</span>
+                    <span class="sm-stepper-copy"><strong>人工审核</strong><small id="smStepSummary3">等待比对结果</small></span>
+                </button>
+            </nav>
+
+            <div class="kb-header-group sm-step-panel" id="smStepPanel1" data-sm-step-panel="1">
+                <div class="sm-step-panel-head">
+                    <div class="sm-step-panel-title-group">
+                        <div class="kb-title">模块一：数据源准备与筛选</div>
+                        <span id="smStepPanelSummary1" class="sm-step-inline-summary">等待导入</span>
+                    </div>
+                    <button type="button" class="sm-step-detail-toggle" onclick="smToggleStep(1)">查看详情</button>
+                </div>
+                <div class="sm-step-panel-body">
 
                 <div class="sm-two-col">
                     <div class="sm-card">
@@ -2506,10 +2620,18 @@
                         <div class="form-hint">工作表名称固定：产品FAQ表（A=问题 B=答案 C=适配型号）、知识库表（A=ID B=问题 C=答案 D=适配型号）。</div>
                     </div>
                 </div>
+                </div>
             </div>
 
-            <div class="kb-header-group">
-                <div class="kb-title">模块二：智能语义比对引擎</div>
+            <div class="kb-header-group sm-step-panel" id="smStepPanel2" data-sm-step-panel="2">
+                <div class="sm-step-panel-head">
+                    <div class="sm-step-panel-title-group">
+                        <div class="kb-title">模块二：智能语义比对引擎</div>
+                        <span id="smStepPanelSummary2" class="sm-step-inline-summary">等待数据源</span>
+                    </div>
+                    <button type="button" class="sm-step-detail-toggle" onclick="smToggleStep(2)">查看详情</button>
+                </div>
+                <div class="sm-step-panel-body">
                 <div class="sm-embedding-meta">
                     <span id="smAlgorithmStatus" class="text-muted">当前算法：Embedding</span>
                 </div>
@@ -2523,15 +2645,30 @@
                     </div>
                     <span id="smThresholdLabel" class="text-muted">Embedding 阈值：0.75</span>
                 </div>
+                </div>
             </div>
 
-            <div class="kb-header-group">
-                <div class="kb-title">模块三：在线对比预览与配置工作台</div>
+            <div class="kb-header-group sm-step-panel" id="smStepPanel3" data-sm-step-panel="3">
+                <div class="sm-step-panel-head">
+                    <div class="sm-step-panel-title-group">
+                        <div class="kb-title">模块三：在线对比预览与配置工作台</div>
+                        <span id="smStepPanelSummary3" class="sm-step-inline-summary">等待比对结果</span>
+                    </div>
+                    <button type="button" class="sm-step-detail-toggle" onclick="smToggleStep(3)">查看详情</button>
+                </div>
+                <div class="sm-step-panel-body">
                 <div class="sm-workbench-toolbar">
                     <div class="sm-workbench-toolbar-left">
                         <input id="smWorkbenchSearch" type="text" class="form-control sm-workbench-search" placeholder="搜索（问题/答案/ID/理由）" oninput="smSetWorkbenchFilter('q', this.value)">
                         <select id="smWorkbenchModelFilter" class="form-control sm-workbench-select" onchange="smSetWorkbenchFilter('model', this.value)"></select>
+                        <select id="smWorkbenchDecisionFilter" class="form-control sm-workbench-select" onchange="smSetWorkbenchFilter('decision', this.value)">
+                            <option value="pending" selected>处理状态：待处理</option>
+                            <option value="all">处理状态：全部</option>
+                            <option value="submit">处理状态：待提交</option>
+                            <option value="skip">处理状态：已跳过</option>
+                        </select>
                         <select id="smWorkbenchMatchTypeFilter" class="form-control sm-workbench-select" onchange="smSetWorkbenchFilter('matchType', this.value)">
+                            <option value="low" selected>匹配状态：低匹配（部分/无匹配）</option>
                             <option value="all">匹配状态：全部</option>
                             <option value="问题+答案均一致">🟢 完全匹配</option>
                             <option value="仅问题一致">🟡 部分匹配-问题</option>
@@ -2544,20 +2681,6 @@
                             <option value="rowNumberAsc">排序：行号升序</option>
                             <option value="matchBestFirst">排序：匹配度优先</option>
                         </select>
-                    </div>
-                    <div class="sm-workbench-toolbar-right">
-                        <select id="smWorkbenchPageSize" class="form-control sm-workbench-select" onchange="smSetWorkbenchFilter('pageSize', this.value)">
-                            <option value="50">50/页</option>
-                            <option value="100">100/页</option>
-                            <option value="0">全部</option>
-                        </select>
-                        <button type="button" class="action-btn sm-workbench-page-btn" onclick="smPrevWorkbenchPage()">上一页</button>
-                        <button type="button" class="action-btn sm-workbench-page-btn" onclick="smNextWorkbenchPage()">下一页</button>
-                        <span id="smWorkbenchPageInfo" class="text-muted"></span>
-                        <span id="smWorkbenchSelectedInfo" class="text-muted"></span>
-                        <button type="button" class="action-btn" onclick="smBatchMarkSubmit()">采纳选中</button>
-                        <button type="button" class="action-btn" onclick="smBatchMarkSkip()">跳过选中</button>
-                        <button type="button" class="action-btn" onclick="smClearWorkbenchSelection()">清除选择</button>
                     </div>
                 </div>
                 <div class="table-container min-h-200 mb-0">
@@ -2606,16 +2729,32 @@
             <div class="sm-submit-bar">
                 <div class="sm-submit-left">
                     <span id="smSummary" class="text-muted"></span>
+                    <div class="sm-workbench-pagination" aria-label="对比结果分页">
+                        <select id="smWorkbenchPageSize" class="form-control sm-workbench-select" aria-label="每页显示数量" onchange="smSetWorkbenchFilter('pageSize', this.value)">
+                            <option value="50">50/页</option>
+                            <option value="100">100/页</option>
+                            <option value="0">全部</option>
+                        </select>
+                        <button type="button" class="action-btn sm-workbench-page-btn" onclick="smPrevWorkbenchPage()">上一页</button>
+                        <button type="button" class="action-btn sm-workbench-page-btn" onclick="smNextWorkbenchPage()">下一页</button>
+                        <span id="smWorkbenchPageInfo" class="text-muted"></span>
+                    </div>
                 </div>
                 <div class="sm-submit-right">
+                    <span id="smWorkbenchSelectedInfo" class="text-muted" role="status" aria-live="polite"></span>
+                    <button type="button" id="smBatchSubmitBtn" class="action-btn" onclick="smBatchMarkSubmit()" disabled>采纳勾选</button>
+                    <button type="button" id="smBatchSkipBtn" class="action-btn" onclick="smBatchMarkSkip()" disabled>跳过勾选</button>
+                    <button type="button" id="smClearSelectionBtn" class="action-btn" onclick="smClearWorkbenchSelection()" disabled>清除勾选</button>
+                    <span class="sm-submit-actions-divider" aria-hidden="true"></span>
                     <button type="button" onclick="smMarkAllSkip()" class="action-btn">全部跳过</button>
                     <button type="button" onclick="smClearCompareCache()" class="action-btn">清除缓存</button>
                     <button type="button" onclick="smExportResult()" id="smExportBtn" class="action-btn" disabled>导出对比结果</button>
                     <button type="button" onclick="smOpenArchiveModal()" id="smArchiveBtn" class="action-btn" disabled>归档本次提交</button>
-                    <button type="button" onclick="smSubmitChanges()" id="smSubmitBtn" class="primary-btn" disabled>提交修改</button>
+                    <button type="button" onclick="smSubmitChanges()" id="smSubmitBtn" class="primary-btn" disabled>提交待提交修改</button>
+                </div>
+                </div>
                 </div>
             </div>
-          </div>
       </div>
             </div>
           </div>
@@ -2987,6 +3126,10 @@
                     </section>
 
                     <aside class="kb-edit-side-pane">
+                <section id="kbEditPendingActivity" class="kb-pending-activity" aria-live="polite" style="display:none; border-left:3px solid #d97706; padding:10px 12px; background:#fffbeb; margin-bottom:12px;">
+                    <div style="font-weight:600; color:#92400e;">待归档动态</div>
+                    <div id="kbEditPendingActivityText" style="margin-top:4px; color:#78350f; font-size:13px;"></div>
+                </section>
                 <section id="kbEditTemplatePanel" class="kb-template-panel">
                     <div class="kb-template-head">
                         <div>
@@ -3001,6 +3144,18 @@
                     </div>
                     <div id="kbTemplateStatus" class="kb-template-status">未选择模板，新增条目将从空白表单开始。</div>
                     <div id="kbTemplateResult" class="kb-template-result d-none"></div>
+                </section>
+
+                <section id="kbEditReferencePanel" class="kb-reference-panel">
+                    <div class="kb-reference-head">
+                        <div>
+                            <div class="kb-reference-title">可引用知识建议</div>
+                            <div class="kb-reference-subtitle">系统仅推荐，需逐条确认；不会自动改写答案。</div>
+                        </div>
+                        <button type="button" id="kbReferenceRefreshBtn" class="action-btn btn-sm" onclick="kbRefreshReferenceCandidates()">刷新建议</button>
+                    </div>
+                    <div id="kbReferenceStatus" class="kb-reference-status">填写问题或答案后，系统会推荐可能相关的已有知识。</div>
+                    <div id="kbReferenceCandidates" class="kb-reference-candidates"></div>
                 </section>
 
                 <!-- 产品（默认折叠，减少滚动负担） -->
@@ -3138,7 +3293,7 @@
             <div id="apiConfigFields">
                 <div class="form-group">
                     <label class="form-label">API Key:</label>
-                    <input type="text" id="apiKeyInput" placeholder="sk-...">
+                    <input type="password" id="apiKeyInput" placeholder="输入 API Key" autocomplete="new-password">
                     <div id="apiConfigStatus" style="margin-top: 6px; font-size: 12px; color: #64748b;">知识库评分配置：未加载</div>
                 </div>
                 <div class="form-group">
@@ -3648,7 +3803,7 @@ G10 系列: G10S, G10S Pro"></textarea>
             <!-- 1. 知识库管理 -->
             <div class="manual-section">
                 <h3><i class="fas fa-database"></i> 1. 知识库管理 (Knowledge Base Management)</h3>
-                <p class="manual-desc">核心数据维护模块，支持对主库 (V1) 和测试库 (V1T-1) 的全生命周期管理。</p>
+                <p class="manual-desc">核心数据维护模块，统一维护主库 V1。</p>
                 
                 <div class="feature-grid">
                     <div class="feature-card">
@@ -3659,7 +3814,7 @@ G10 系列: G10S, G10S Pro"></textarea>
                             <ul style="padding-left: 15px; margin-top: 5px;">
 	                                <li><span class="manual-badge badge-upsert">增量更新 (Upsert)</span> ID 存在则更新，不存在则新增（推荐用于日常维护）。</li>
 	                                <li><span class="manual-badge badge-append">批量新增 (Append)</span> 自动跳过已存在的 ID，仅插入新数据（安全补充）。</li>
-	                                <li><span class="manual-badge badge-overwrite">全量覆盖 (Overwrite)</span> 导入前先自动将 V1 同步至 V1T-1 备份，再清空 V1 并重新导入（用于重大版本重置）。</li>
+	                                <li><span class="manual-badge badge-overwrite">全量覆盖 (Overwrite)</span> 导入前先将 V1 和评分缓存备份到本地文件，再清空 V1 并重新导入（用于重大版本重置）。</li>
 	                                <li><span class="manual-badge badge-overwrite">同步删除缺失 ID</span> 可选开关；V1 中存在但导入文件 ID 列未包含的记录，会二次确认后从 V1 物理删除。</li>
 	                            </ul>
                             <li><strong>辅助功能 ：</strong></li>
@@ -3672,7 +3827,6 @@ G10 系列: G10S, G10S Pro"></textarea>
                     <div class="feature-card">
                         <h4><i class="fas fa-sync-alt" style="color: var(--primary-color);"></i> 数据同步 (Data Sync)</h4>
                         <ul class="feature-list">
-                            <li><strong>同步此刻到前刻 ：</strong>将 V1 库（此刻状态）全量覆盖同步至 V1T-1 库（前刻备份）。</li>
                             <li><strong>一键同步下游 ：</strong>将当前 V1 同步至机型矩阵、多媒体预览、评分表；治理月度召回仍须在治理 Tab 导入 Excel，本操作会更新评分快照供治理关联展示。</li>
                         </ul>
                     </div>
@@ -4218,9 +4372,8 @@ G10 系列: G10S, G10S Pro"></textarea>
       </div>
   </div>
 
-  <!-- Copy Config Modal -->
-  <div id="copyConfigModal" class="modal">
-    <div class="modal-content" style="width: 640px;">
+  <!-- Legacy copy config modal retained as an empty compatibility target. -->
+  <template id="copyConfigModal">
         <div class="modal-header" style="border-bottom: 1px solid #eee; padding-bottom: 15px;">
             <h3 style="margin: 0; color: #333;"><i class="fas fa-clipboard-check" style="color: #9B59B6; margin-right: 10px;"></i> 复制机型配置</h3>
             <button class="close-modal-btn" onclick="closeCopyConfigModal()">&times;</button>
@@ -4294,11 +4447,148 @@ G10 系列: G10S, G10S Pro"></textarea>
                     </label>
                 </div>
             </div>
+
+            <section class="copy-review-section" aria-labelledby="copyReviewTitle">
+                <div class="copy-review-heading">
+                    <div>
+                        <h4 id="copyReviewTitle">克隆后差异校验</h4>
+                        <p>克隆关系先作为待确认候选，完成差异处理后才能提交。</p>
+                    </div>
+                    <label class="copy-review-switch">
+                        <input id="copyReviewEnabled" type="checkbox" checked onchange="updateCopyReviewControls()">
+                        <span>开启</span>
+                    </label>
+                </div>
+                <fieldset id="copyReviewMethods" class="copy-review-methods">
+                    <legend>差异识别方式</legend>
+                    <label>
+                        <input id="copyReviewParameterCheck" type="checkbox" checked onchange="updateCopyReviewControls()">
+                        <span><strong>智能参数与知识库校对</strong><small>使用已确认参数快照，识别型号参数冲突。</small></span>
+                    </label>
+                    <label>
+                        <input id="copyReviewManualAi" type="checkbox" onchange="updateCopyReviewControls()">
+                        <span><strong>输入差异并分析（规则 + AI 辅助）</strong><small>保留原始输入，形成可追溯规则并定位知识。</small></span>
+                    </label>
+                </fieldset>
+                <label id="copyReviewManualField" class="copy-review-manual-field d-none" for="copyReviewManualText">
+                    <span>新旧型号差异</span>
+                    <textarea id="copyReviewManualText" class="form-control" rows="4" maxlength="5000" oninput="updateCopyReviewControls()" placeholder="例如：旧型号最大吸力 22000Pa，新品 40000Pa"></textarea>
+                </label>
+                <div id="copyReviewValidation" class="copy-review-validation" role="alert" aria-live="polite"></div>
+            </section>
         </div>
         <div class="modal-footer" style="padding: 15px 20px; border-top: 1px solid #eee; display: flex; justify-content: flex-end; gap: 10px;">
             <button onclick="closeCopyConfigModal()" class="action-btn" style="padding: 8px 20px; cursor: pointer;">取消</button>
-            <button onclick="executeCopyConfig()" class="primary-btn" style="background-color: #9B59B6; border-color: #9B59B6; color: white; padding: 8px 20px; border-radius: 4px; cursor: pointer;">开始追加</button>
+            <button onclick="executeCopyConfig()" class="primary-btn" style="background-color: #9B59B6; border-color: #9B59B6; color: white; padding: 8px 20px; border-radius: 4px; cursor: pointer;">开始克隆</button>
         </div>
+        <div id="copyConfigProgress" class="copy-config-progress" role="status" aria-live="polite" hidden>
+            <div class="copy-config-progress-head">
+                <strong id="copyConfigProgressLabel">正在准备</strong>
+                <span id="copyConfigProgressCount">--</span>
+            </div>
+            <div class="copy-config-progress-track" aria-hidden="true"><span id="copyConfigProgressBar"></span></div>
+            <div id="copyConfigProgressDetail" class="copy-config-progress-detail">正在连接处理服务...</div>
+        </div>
+    </div>
+  </template>
+
+  <div id="cloneReviewWorkspace" class="modal clone-review-modal" aria-hidden="true">
+    <div class="modal-content clone-review-dialog">
+      <div class="modal-header clone-review-header">
+        <div>
+          <h3>克隆后差异校验</h3>
+          <p id="cloneReviewSubtitle">正在读取批次</p>
+        </div>
+        <div class="clone-review-header-actions">
+          <button type="button" class="action-btn btn-secondary-outline" onclick="reloadCloneReviewWorkspace()"><i class="fas fa-rotate" aria-hidden="true"></i><span>刷新</span></button>
+          <button class="close-modal-btn" onclick="closeCloneReviewWorkspace()" aria-label="关闭差异校验工作台">&times;</button>
+        </div>
+      </div>
+      <div class="clone-review-body">
+        <ol id="cloneReviewFlow" class="clone-review-flow" aria-label="克隆校验流程">
+          <li data-flow-step="clone">开始克隆</li>
+          <li data-flow-step="copy">生成未生效草稿</li>
+          <li data-flow-step="review">克隆后差异校验</li>
+          <li data-flow-step="decide">人工处理差异</li>
+          <li data-flow-step="apply">执行已确认决定</li>
+          <li data-flow-step="complete">完成校验</li>
+          <li data-flow-step="success">校验完成，待提交</li>
+          <li data-flow-step="submit">克隆发布成功</li>
+        </ol>
+        <div id="cloneReviewRuntime" class="clone-review-runtime" role="status" aria-live="polite">正在读取批次数据...</div>
+        <dl id="cloneReviewSummary" class="clone-review-summary" aria-label="批次汇总"></dl>
+        <div id="cloneReviewRules" class="clone-review-rules"></div>
+        <div class="clone-review-layout">
+          <section class="clone-review-list" aria-label="差异条目列表">
+            <div class="clone-review-list-toolbar">
+              <div class="clone-review-list-title">
+                <strong>需人工处理知识</strong>
+                <button id="cloneReviewExportButton" type="button" class="action-btn btn-secondary-outline clone-review-export-button" onclick="exportCloneReviewBackup(this)" title="导出当前批次的全部知识、差异规则和批次信息" disabled><i class="fas fa-download" aria-hidden="true"></i><span>导出完整备份</span></button>
+              </div>
+              <div class="clone-review-list-filters" aria-label="知识筛选">
+                <label class="clone-review-filter-field" for="cloneReviewRiskFilter">
+                  <span>风险</span>
+                  <select id="cloneReviewRiskFilter" onchange="renderCloneReviewItems()">
+                    <option value="all">全部</option>
+                    <option value="high">高</option>
+                    <option value="medium">中</option>
+                    <option value="default">默认</option>
+                    <option value="waiting">待校验</option>
+                    <option value="error">检测异常</option>
+                  </select>
+                </label>
+                <label class="clone-review-filter-field" for="cloneReviewDecisionFilter">
+                  <span>决定</span>
+                  <select id="cloneReviewDecisionFilter" onchange="renderCloneReviewItems()">
+                    <option value="all">全部</option>
+                    <option value="requires_attention">待处理</option>
+                    <option value="pending">待决定</option>
+                    <option value="keep">保留</option>
+                    <option value="link_existing">关联已有</option>
+                    <option value="remove_target">移除目标</option>
+                    <option value="defer">暂缓确认</option>
+                  </select>
+                </label>
+                <label class="clone-review-pending-filter"><input id="cloneReviewPendingOnly" type="checkbox" checked onchange="renderCloneReviewItems()"> 仅看待处理</label>
+                <label class="clone-review-filter-field clone-review-id-filter" for="cloneReviewIdFilter">
+                  <span>ID 搜索</span>
+                  <input id="cloneReviewIdFilter" type="search" autocomplete="off" placeholder="知识 ID" aria-label="搜索知识 ID" oninput="handleCloneReviewIdFilter()">
+                </label>
+              </div>
+            </div>
+            <div class="clone-review-table-wrap">
+              <table class="kb-table clone-review-table">
+                <thead><tr><th>风险</th><th>知识与差异</th><th>建议</th><th>决定</th><th>执行</th></tr></thead>
+                <tbody id="cloneReviewItemsBody"><tr><td colspan="5" class="empty-message">正在读取</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+          <aside id="cloneReviewDetail" class="clone-review-detail" aria-label="证据和人工决定">
+            <div class="empty-message">选择一条知识查看证据和处理动作</div>
+          </aside>
+        </div>
+      </div>
+      <div class="modal-footer clone-review-footer">
+        <label id="cloneReviewManualCoverageWrap" class="clone-review-coverage d-none">
+          <input id="cloneReviewManualCoverage" type="checkbox">
+          <span>本次输入已覆盖当前已知差异</span>
+        </label>
+        <span id="cloneReviewFooterStatus" class="clone-review-footer-status"></span>
+        <button id="cloneReviewDeleteButton" type="button" class="danger-btn clone-review-delete-button" onclick="deleteCloneReviewBatch(copyConfigState.activeReviewBatchId, this)" title="删除当前批次及其全部复核记录" hidden><i class="fas fa-trash-alt" aria-hidden="true"></i><span>删除当前批次</span></button>
+        <button id="cloneReviewResumeButton" type="button" class="action-btn btn-secondary-outline" onclick="resumeCloneReviewScan()" title="仅校验仍在等待的条目" hidden><i class="fas fa-play" aria-hidden="true"></i><span>继续校验</span></button>
+        <button id="cloneReviewApplyButton" type="button" class="action-btn btn-secondary-outline" onclick="applyCloneReviewDecisions()">执行已确认决定</button>
+        <button id="cloneReviewCompleteButton" type="button" class="primary-btn" onclick="completeCloneReviewBatch()">完成校验</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cloneReviewBatchListModal" class="modal clone-review-batch-list-modal" aria-hidden="true">
+    <div class="modal-content clone-review-batch-list-dialog">
+      <div class="modal-header">
+        <h3>差异校验批次</h3>
+        <button class="close-modal-btn" onclick="closeCloneReviewBatchListModal()" aria-label="关闭差异校验批次">&times;</button>
+      </div>
+      <div class="modal-body"><div id="cloneReviewBatchList" class="clone-review-batch-list">正在读取批次...</div></div>
     </div>
   </div>
 

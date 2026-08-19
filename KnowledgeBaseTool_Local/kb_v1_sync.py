@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 import uuid
 from datetime import datetime, timezone
+from runtime_safety import is_test_process, validate_test_sqlite_path
 
 
 SYNC_FIELDS = (
@@ -44,14 +45,25 @@ def content_hash(row):
 
 def _rows_by_id(rows):
     result = {}
+    duplicate_ids = set()
     for row in rows or []:
         wiki_id = str(row.get('question_wiki_id') or '').strip()
         if wiki_id:
+            if wiki_id in result:
+                duplicate_ids.add(wiki_id)
             result[wiki_id] = dict(row)
+    if duplicate_ids:
+        sample = ', '.join(sorted(duplicate_ids)[:10])
+        suffix = '…' if len(duplicate_ids) > 10 else ''
+        raise ValueError(
+            f'V1 导入包含重复 question_wiki_id，已拒绝生成快照: {sample}{suffix}'
+        )
     return result
 
 
 def _connect(db_path):
+    if is_test_process():
+        db_path = validate_test_sqlite_path(db_path, os.path.dirname(os.path.abspath(__file__)))
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     con.execute('''CREATE TABLE IF NOT EXISTS kb_v1_sync_snapshots (

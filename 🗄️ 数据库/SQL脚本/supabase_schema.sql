@@ -19,69 +19,13 @@ CREATE TABLE IF NOT EXISTS knowledge_base_v1 (
     product_name TEXT
 );
 
--- 创建知识库 V1T-1 表 (结构与 V1 相同)
-CREATE TABLE IF NOT EXISTS knowledge_base_v1_t1 (
-    question_wiki_id TEXT PRIMARY KEY,
-    question_type TEXT,
-    question TEXT,
-    answer TEXT,
-    answer_type TEXT,
-    if_bm25 BOOLEAN,
-    similar_questions JSONB,
-    error_list JSONB,
-    keyword_list JSONB,
-    image_urls JSONB,
-    video_urls JSONB,
-    file_urls JSONB,
-    link_type TEXT,
-    link_url TEXT,
-    update_time TIMESTAMPTZ,
-    product_category_name TEXT,
-    product_name TEXT
-);
-
 -- 开启 RLS (Row Level Security)
 ALTER TABLE knowledge_base_v1 ENABLE ROW LEVEL SECURITY;
-ALTER TABLE knowledge_base_v1_t1 ENABLE ROW LEVEL SECURITY;
 
--- 创建允许所有操作的策略 (注意：这意味着任何拥有 Key 的人都可以操作这两张表)
+-- 创建允许所有操作的策略 (注意：这意味着任何拥有 Key 的人都可以操作此表)
 -- 如果表已存在策略，这可能会报错，可以忽略
 CREATE POLICY "Allow all operations for anon" ON knowledge_base_v1
 FOR ALL USING (true) WITH CHECK (true);
-
-CREATE POLICY "Allow all operations for anon" ON knowledge_base_v1_t1
-FOR ALL USING (true) WITH CHECK (true);
-
--- 创建同步函数：清空 V1T-1 并从 V1 复制数据
-CREATE OR REPLACE FUNCTION sync_knowledge_base()
-RETURNS void AS $$
-BEGIN
-    -- 清空目标表
-    TRUNCATE TABLE knowledge_base_v1_t1;
-    
-    -- 插入数据
-    INSERT INTO knowledge_base_v1_t1 
-    SELECT
-        question_wiki_id,
-        question_type,
-        question,
-        answer,
-        answer_type,
-        if_bm25,
-        similar_questions,
-        error_list,
-        keyword_list,
-        image_urls,
-        video_urls,
-        file_urls,
-        link_type,
-        link_url,
-        update_time,
-        product_category_name,
-        product_name
-    FROM knowledge_base_v1;
-END;
-$$ LANGUAGE plpgsql;
 
 CREATE TABLE IF NOT EXISTS kb_recall (
     id bigserial PRIMARY KEY,

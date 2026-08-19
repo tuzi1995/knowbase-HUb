@@ -81,7 +81,7 @@ async function api(path, method = 'GET', body = null) {
       const msg = (e && e.message) ? e.message : String(e);
       throw new Error(`请求失败: ${url} (${msg})`);
     }
-    
+
     if (res.status === 401) {
       showLogin(true);
       throw new Error('Unauthorized');
@@ -125,6 +125,72 @@ function escapeHtml(text) {
         .replace(/'/g, "&#039;");
 }
 
+function normalizeSafeHttpUrl(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    try {
+        const candidate = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
+        const parsed = new URL(candidate);
+        return (parsed.protocol === 'http:' || parsed.protocol === 'https:') ? parsed.href : '';
+    } catch (_) {
+        return '';
+    }
+}
+
+function appendSearchableKbIds(container, rawValue) {
+    String(rawValue ?? '').split(/[,，]/).map(value => value.trim()).filter(Boolean).forEach((wikiId) => {
+        const row = document.createElement('div');
+        row.className = 'clickable-id-row';
+        const control = document.createElement('button');
+        control.type = 'button';
+        control.className = 'clickable-id';
+        control.title = '点击搜索此ID';
+        control.setAttribute('aria-label', `按 KB ID ${wikiId} 搜索`);
+        control.textContent = wikiId;
+        control.addEventListener('click', () => searchKBById(wikiId));
+        row.appendChild(control);
+        container.appendChild(row);
+    });
+}
+
+function appendKbUrlRow(container, rawValue) {
+    const displayUrl = String(rawValue ?? '').trim();
+    if (!displayUrl) return false;
+    const safeUrl = normalizeSafeHttpUrl(displayUrl);
+    const row = document.createElement('div');
+    row.className = 'kb-url-row';
+
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'kb-mini-action-btn kb-mini-action-btn-icon';
+    copyButton.title = '复制链接';
+    copyButton.setAttribute('aria-label', '复制链接');
+    copyButton.innerHTML = '<i class="fas fa-copy" aria-hidden="true"></i>';
+    copyButton.addEventListener('click', () => copyToClipboard(displayUrl));
+
+    const searchButton = document.createElement('button');
+    searchButton.type = 'button';
+    searchButton.className = 'kb-url-link';
+    searchButton.title = `点击搜索: ${displayUrl}`;
+    searchButton.textContent = displayUrl;
+    searchButton.addEventListener('click', () => searchKBByUrl(displayUrl));
+
+    row.append(copyButton, searchButton);
+    if (safeUrl) {
+        const openLink = document.createElement('a');
+        openLink.href = safeUrl;
+        openLink.target = '_blank';
+        openLink.rel = 'noopener noreferrer';
+        openLink.title = '在新标签页打开';
+        openLink.className = 'kb-url-open-btn kb-mini-action-btn-icon';
+        openLink.setAttribute('aria-label', '在新标签页打开');
+        openLink.innerHTML = '<i class="fas fa-external-link-alt" aria-hidden="true"></i>';
+        row.appendChild(openLink);
+    }
+    container.appendChild(row);
+    return true;
+}
+
 // Global State
 let currentUser = null;
 let currentTab = 'kbView';
@@ -142,6 +208,7 @@ let linkSortDir = 'desc';
 let bulkPendingUrls = [];
 let bulkPendingTags = [];
 let duplicateGroupsCache = [];
+let linkImportModalReturnFocus = null;
 let allTags = []; // Global tags cache
 const LINK_TABLE_STORAGE_KEY = 'link_table_config';
 const LINK_TABLE_DEFAULT_WIDTHS = {
@@ -242,6 +309,7 @@ let selectedKBRows = new Set();
 let kbSelectedProductCategories = new Set();
 let kbSelectedTags = new Set();
 let kbAllTags = [];
+let kbTagsLoadPromise = null;
 let kbSortBy = 'question_wiki_id';
 let kbSortDir = 'desc';
 let kbShowSelectedOnly = false;
@@ -537,9 +605,8 @@ function clearKBActionFilters() {
 }
 
 function setSelectedKBTable(table) {
-    const value = table === 'knowledge_base_v1_t1' ? 'knowledge_base_v1_t1' : 'knowledge_base_v1';
     document.querySelectorAll('input[name="kbTable"]').forEach(input => {
-        input.checked = input.value === value;
+        input.checked = input.value === 'knowledge_base_v1';
     });
 }
 
@@ -702,62 +769,53 @@ async function prefetchKBNextPage(currentPage, params) {
     }
 }
 
-async function fetchKBAllTags() {
+function normalizeKnowledgeBaseTags(tags) {
+    if (!Array.isArray(tags)) throw new Error('标签列表格式错误');
+    return Array.from(new Set(
+        tags.map(tag => String(tag ?? '').trim()).filter(Boolean)
+    )).sort((left, right) => left.localeCompare(right, 'zh-CN'));
+}
+
+async function loadKnowledgeBaseTags(forceRefresh = false) {
+    if (!forceRefresh && kbAllTags.length) return [...kbAllTags];
+    if (kbTagsLoadPromise) return kbTagsLoadPromise;
+    kbTagsLoadPromise = (async () => {
+        const tags = normalizeKnowledgeBaseTags(await api('/kb/tags'));
+        kbAllTags = tags;
+        return tags;
+    })();
     try {
-        // Use raw fetch so we can handle non-JSON (e.g. 404 HTML) gracefully.
-        const url = API_BASE + '/kb/tags';
-        const resp = await fetch(url, { method: 'GET', credentials: 'same-origin' });
-        if (resp.status === 401) {
-            showLogin(true);
-            throw new Error('Unauthorized');
-        }
-        const text = await resp.text();
-        let json = null;
-        try { json = text ? JSON.parse(text) : null; } catch { json = null; }
-
-        if (!resp.ok) {
-            const msg = (json && json.message) ? json.message : (text ? String(text).slice(0, 200) : '');
-            showToast(`加载标签失败: 后端未提供 /api/kb/tags (HTTP ${resp.status})`, 'error');
-            if (msg) console.error('kb/tags error body:', msg);
-            kbAllTags = [];
-            return;
-        }
-
-        if (Array.isArray(json)) {
-            kbAllTags = json.map(t => String(t ?? '').trim()).filter(Boolean);
-        } else if (json && typeof json === 'object' && json.success === false) {
-            showToast('加载标签失败: ' + (json.message || '未知错误'), 'error');
-            kbAllTags = [];
-        } else {
-            kbAllTags = [];
-        }
-    } catch (e) {
-        console.error('Failed to load KB tags:', e);
-        try { showToast('加载标签异常: ' + (e?.message || String(e)), 'error'); } catch {}
-        kbAllTags = [];
+        return await kbTagsLoadPromise;
+    } finally {
+        kbTagsLoadPromise = null;
     }
+}
+
+async function fetchKBAllTags() {
+    return loadKnowledgeBaseTags();
 }
 
 let tempKbSelectedTags = new Set();
 
-async function openKbTagFilterModal() {
-    const modal = document.getElementById('kbTagFilterModal');
-    if (!modal) return;
-    
-    // sync temp state with actual state
-    tempKbSelectedTags = new Set(kbSelectedTags);
-    
-    // load tags if not loaded
-    await fetchKBAllTags();
-    
-    // render list
+function renderKbTagFilterModalList(state = 'loaded') {
     const listContainer = document.getElementById('kbTagFilterModalList');
+    if (!listContainer) return;
     listContainer.innerHTML = '';
-    
-    if (!kbAllTags || kbAllTags.length === 0) {
-        listContainer.innerHTML = '<div class="text-muted" style="width: 100%; text-align: center; padding: 20px;">没有可选标签</div>';
-    } else {
-        kbAllTags.forEach(tag => {
+
+    if (state === 'loading') {
+        listContainer.innerHTML = '<div class="kb-tag-load-state" role="status">正在读取标签...</div>';
+        return;
+    }
+    if (state === 'error') {
+        listContainer.innerHTML = '<div class="kb-tag-load-state is-error" role="alert"><span>标签加载失败，请重试</span><button type="button" class="tag-load-retry" onclick="retryKbTagFilterModal()">重新加载</button></div>';
+        return;
+    }
+    if (!kbAllTags.length) {
+        listContainer.innerHTML = '<div class="kb-tag-load-state">知识库管理中暂无标签</div>';
+        return;
+    }
+
+    kbAllTags.forEach(tag => {
             const label = document.createElement('label');
             label.style.display = 'flex';
             label.style.alignItems = 'center';
@@ -800,10 +858,29 @@ async function openKbTagFilterModal() {
             label.appendChild(cb);
             label.appendChild(text);
             listContainer.appendChild(label);
-        });
+    });
+}
+
+async function retryKbTagFilterModal() {
+    renderKbTagFilterModalList('loading');
+    try {
+        await loadKnowledgeBaseTags(true);
+        renderKbTagFilterModalList('loaded');
+    } catch (error) {
+        console.error('Failed to load KB tags:', error);
+        renderKbTagFilterModalList('error');
+        showToast('知识库标签加载失败，请重试', 'error');
     }
-    
+}
+window.retryKbTagFilterModal = retryKbTagFilterModal;
+
+async function openKbTagFilterModal() {
+    const modal = document.getElementById('kbTagFilterModal');
+    if (!modal) return;
+
+    tempKbSelectedTags = new Set(kbSelectedTags);
     modal.style.display = 'flex';
+    await retryKbTagFilterModal();
 }
 
 function closeKbTagFilterModal() {
@@ -873,21 +950,16 @@ function updateKBPreviewSelectedButton() {
         compareBtn.title = n < 2 ? '请至少勾选 2 条数据进行对比' : `对比已勾选的 ${n} 条数据`;
     }
 
-    const isCurrentLibrary = getSelectedKBTable() === 'knowledge_base_v1';
     const deleteBtn = document.getElementById('kbDeleteSelectedBtn');
     if (deleteBtn) {
-        deleteBtn.disabled = n === 0 || !isCurrentLibrary;
-        deleteBtn.title = !isCurrentLibrary
-            ? '前刻库仅用于对比，不能删除'
-            : (n === 0 ? '请至少勾选 1 条数据' : `删除已勾选的 ${n} 条数据`);
+        deleteBtn.disabled = n === 0;
+        deleteBtn.title = n === 0 ? '请至少勾选 1 条数据' : `删除已勾选的 ${n} 条数据`;
     }
 
     const batchEditBtn = document.getElementById('kbBatchEditBtn');
     if (batchEditBtn) {
-        batchEditBtn.disabled = n === 0 || !isCurrentLibrary;
-        batchEditBtn.title = !isCurrentLibrary
-            ? '前刻库仅用于对比，不能批量编辑'
-            : (n === 0 ? '请至少勾选 1 条数据' : `批量编辑已勾选的 ${n} 条数据`);
+        batchEditBtn.disabled = n === 0;
+        batchEditBtn.title = n === 0 ? '请至少勾选 1 条数据' : `批量编辑已勾选的 ${n} 条数据`;
     }
 }
 
@@ -1305,7 +1377,7 @@ const TAB_META = {
     kbView: {
         title: '知识库管理',
         group: '核心数据',
-        description: '维护 V1 / V1T-1 知识库内容，支持搜索、编辑、导出与同步。',
+        description: '维护 V1 知识库内容，支持搜索、编辑、导出与下游同步。',
     },
     kbCompareView: {
         title: '知识对比',
@@ -1350,7 +1422,7 @@ const TAB_META = {
     parameterCheckView: {
         title: '参数校对',
         group: '质量管控',
-        description: '查看 KB 待核查声明与参数功能清单参考证据的校对结果，保留人工确认边界。',
+        description: '以智能参数汇总为基准，校对当前知识库中的参数声明并定位一致与冲突。',
     },
     dataSettingsView: {
         title: '数据设置',
@@ -1376,6 +1448,11 @@ const TAB_META = {
         title: '智能映射',
         group: '工具与映射',
         description: '按准备、比对、人工决策与提交归档的流程处理智能映射任务。',
+    },
+    newProductEntryView: {
+        title: '新品录入',
+        group: '工具与映射',
+        description: '完成复制机型配置、克隆后差异校验、人工确认与矩阵提交。',
     },
 };
 
@@ -1525,7 +1602,7 @@ function scheduleWorkbenchSidebarHeightUpdate() {
 function normalizeWorkbenchViews() {
     const viewsWrap = document.querySelector('.workbench-views');
     if (!viewsWrap) return;
-    const viewIds = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'activityArchiveView', 'smartMappingView'];
+    const viewIds = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'activityArchiveView', 'smartMappingView', 'newProductEntryView'];
     viewIds.forEach(id => {
         const el = document.getElementById(id);
         if (el && el.parentElement !== viewsWrap) viewsWrap.appendChild(el);
@@ -1534,7 +1611,7 @@ function normalizeWorkbenchViews() {
 
 function switchTab(tabId) {
     normalizeWorkbenchViews();
-    const tabs = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'activityArchiveView', 'smartMappingView'];
+    const tabs = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'activityArchiveView', 'smartMappingView', 'newProductEntryView'];
     const viewsWrap = document.querySelector('.workbench-views');
     const isQualityControlCenter = tabId === 'controlCenterView';
     [
@@ -1627,6 +1704,8 @@ function switchTab(tabId) {
         if (typeof loadActivityArchives === 'function') loadActivityArchives();
     } else if (tabId === 'smartMappingView') {
         if (typeof smInitSmartMapping === 'function') smInitSmartMapping();
+    } else if (tabId === 'newProductEntryView') {
+        if (typeof loadNewProductEntryBatches === 'function') loadNewProductEntryBatches();
     }
     if (typeof enableAllTableColumnResize === 'function') enableAllTableColumnResize();
     scheduleWorkbenchSidebarHeightUpdate();
@@ -2724,7 +2803,7 @@ const parameterCheckState = {
     overviewEpoch: 0,
     runId: '',
     page: 1,
-    aiView: 'queue',
+    aiView: 'comparison',
     selectedFindingId: '',
     overview: null,
     pollTimer: null,
@@ -2772,24 +2851,15 @@ function renderParameterCheckRunOptions(overview) {
     const select = document.getElementById('parameterCheckRunSelect');
     if (!select) return;
     const selectedRunId = overview?.selected_run?.run_id || parameterCheckState.runId || '';
-    const options = Array.isArray(overview?.runs) ? overview.runs : [];
-    select.innerHTML = `<option value="">全量复核池</option>${options.map(run => {
-            const stage = run.stage === 'numeric_comparison'
-                ? '逐型号比较'
-                : (run.stage === 'ai_feature_extraction'
-                    ? `${run.feature_name || '参数功能'}全量扫描`
-                    : (run.stage === 'ai_candidate_extraction' ? '历史 AI 候选提取' : '规则候选提取'));
-            const count = Number(['ai_candidate_extraction', 'ai_feature_extraction'].includes(run.stage)
-                ? (run.result_counts?.candidate_count || 0)
-                : (run.result_counts?.finding_count || 0));
+    const options = (Array.isArray(overview?.runs) ? overview.runs : [])
+        .filter(run => run.stage === 'numeric_comparison');
+    select.innerHTML = `<option value="">最新校对结果</option>${options.length ? `<optgroup label="历史校对批次">${options.map(run => {
+            const count = Number(run.result_counts?.finding_count || 0);
             const completedAt = formatParameterCheckTime(run.completed_at || run.created_at);
-            return `<option value="${escapeHtml(run.run_id)}">${escapeHtml(`${stage} · ${run.status} · ${count} 条 · ${completedAt}`)}</option>`;
-        }).join('')}`;
-    select.value = selectedRunId || '';
-    const aiViewField = document.getElementById('parameterCheckAiViewField');
-    const aiViewSelect = document.getElementById('parameterCheckAiView');
-    if (aiViewField) aiViewField.hidden = !isParameterCheckAiRun(overview);
-    if (aiViewSelect) aiViewSelect.value = parameterCheckState.aiView;
+            const workflow = run.result_counts?.proposed_claim_count ? `已比对 ${count} 条` : `${count} 条结果`;
+            return `<option value="${escapeHtml(run.run_id)}">${escapeHtml(`${workflow} · ${completedAt}`)}</option>`;
+        }).join('')}</optgroup>` : ''}`;
+    select.value = options.some(run => run.run_id === selectedRunId) ? selectedRunId : '';
 }
 
 function renderParameterCheckFilterOptions(overview) {
@@ -2808,7 +2878,6 @@ function renderParameterCheckFilterOptions(overview) {
     };
     renderOptions('parameterCheckModelId', options.models, '全部型号');
     renderOptions('parameterCheckFeatureId', options.features, '全部功能');
-    renderOptions('parameterCheckScanFeatureId', overview?.scan_feature_options, '选择参数功能');
     const resultSelect = document.getElementById('parameterCheckResultStatus');
     const resultField = resultSelect?.closest('label');
     const modelField = document.getElementById('parameterCheckModelId')?.closest('label');
@@ -2830,10 +2899,9 @@ function renderParameterCheckFilterOptions(overview) {
 function renderParameterCheckSummary(overview) {
     const summary = overview?.summary || {};
     const counts = summary.result_status_counts || {};
-    const resolutionCounts = summary.resolution_status_counts || {};
     const strip = document.getElementById('parameterCheckSummary');
     if (!strip) return;
-    strip.classList.toggle('is-five-columns', isParameterCheckQueueView(overview));
+    strip.classList.toggle('is-five-columns', false);
     const metrics = isParameterCheckAuditView(overview)
         ? [
             ['本次已扫描', summary.scanned_knowledge_count || 0, 'neutral'],
@@ -2857,10 +2925,10 @@ function renderParameterCheckSummary(overview) {
             ['已人工处理', (summary.review_status_counts?.accepted || 0) + (summary.review_status_counts?.corrected || 0) + (summary.review_status_counts?.false_positive || 0), 'neutral'],
         ]
         : [
-            ['比较结果', summary.finding_count || 0, 'neutral'],
+            ['已校对声明', summary.finding_count || 0, 'neutral'],
+            ['结果一致', counts.consistent || 0, 'success'],
             ['存在冲突', counts.conflict || 0, 'danger'],
             ['待补参数', counts.needs_parameter_data || 0, 'warning'],
-            ['待人工处理', resolutionCounts.unreviewed || 0, 'pending'],
         ];
     strip.innerHTML = metrics.map(([label, value, tone]) => (
         `<div class="parameter-check-summary-item is-${tone}"><dt>${label}</dt><dd>${value}</dd></div>`
@@ -2960,11 +3028,11 @@ function renderParameterCheckTable(overview) {
             ? `<tr><th>扫描结果</th><th>知识 Wiki ID</th><th>AI 返回</th><th>通过校验</th><th>审计说明</th><th>响应摘要</th><th>扫描时间</th><th>操作</th></tr>`
             : isCandidateView
             ? `<tr><th>人工状态</th><th>型号</th><th>参数功能</th><th>参考证据</th><th>知识 Wiki ID</th><th>KB 待核查声明</th><th>AI 初判</th><th>快照比对</th><th>操作</th></tr>`
-            : `<tr><th>人工状态</th><th>型号</th><th>参数功能</th><th>参考证据</th><th>知识 Wiki ID</th><th>KB 待核查声明</th><th>AI 初判</th><th>快照比对</th><th>操作</th></tr>`;
+            : `<tr><th>校对结论</th><th>适用型号</th><th>参数功能</th><th>知识库声明</th><th>智能参数汇总</th><th>知识 Wiki ID</th><th>比对依据</th><th>操作</th></tr>`;
     }
 
     if (!overview?.selected_run && !isQueueView) {
-        tbody.innerHTML = `<tr><td colspan="${isAuditView ? 8 : 9}" class="empty-message">暂无可展示的参数校对运行。请先保留现有审计记录或执行一轮只读校对。</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${isAuditView ? 8 : 8}" class="empty-message">暂无已完成的校对批次。请先校对当前知识库。</td></tr>`;
     } else if (!findings.length) {
         tbody.innerHTML = `<tr><td colspan="${isAuditView ? 8 : 9}" class="empty-message">${isAuditView ? '本批还没有可展示的扫描审计记录。' : (isQueueView ? '全量复核池中暂无符合筛选条件的 AI 候选。' : (isCandidateView ? '本批没有可展示的 AI 候选。' : '当前筛选条件下没有校对结果。'))}</td></tr>`;
     } else if (isAuditView) {
@@ -3008,18 +3076,16 @@ function renderParameterCheckTable(overview) {
     } else {
         tbody.innerHTML = findings.map(finding => {
             const result = parameterCheckMeta(PARAMETER_CHECK_RESULT_META, finding.result_status, finding.result_status);
-            const resolution = parameterCheckMeta(PARAMETER_CHECK_RESOLUTION_META, finding.resolution_status, finding.resolution_status);
             const isSelected = finding.finding_id === selected;
             return `
                 <tr class="parameter-check-row${isSelected ? ' is-selected' : ''}">
-                  <td><span class="parameter-check-status is-${resolution.tone}">${escapeHtml(resolution.label)}</span></td>
+                  <td><span class="parameter-check-status is-${result.tone}">${escapeHtml(result.label)}</span></td>
                   <td>${escapeHtml(finding.model_name || finding.model_id)}</td>
                   <td>${escapeHtml(finding.feature_name || finding.feature_id)}</td>
-                  <td>${renderParameterCheckReferenceEvidence([], finding.canonical_value || '无可用参数证据')}</td>
-                  <td><button type="button" class="parameter-check-wiki-link" data-wiki-id="${escapeHtml(finding.question_wiki_id)}" onclick="openParameterCheckKnowledge(this.dataset.wikiId)">${escapeHtml(finding.question_wiki_id)}</button></td>
                   <td>${escapeHtml(finding.asserted_value || '-')}</td>
-                  <td><span class="parameter-check-status is-muted">未生成</span></td>
-                  <td><span class="parameter-check-status is-${result.tone}">${escapeHtml(result.label)}</span></td>
+                  <td>${renderParameterCheckReferenceEvidence([], finding.canonical_value || '待补充')}</td>
+                  <td><button type="button" class="parameter-check-wiki-link" data-wiki-id="${escapeHtml(finding.question_wiki_id)}" onclick="openParameterCheckKnowledge(this.dataset.wikiId)">${escapeHtml(finding.question_wiki_id)}</button></td>
+                  <td><span class="parameter-check-comparison-reason" title="${escapeHtml(finding.reason || '未提供判断依据。')}">${escapeHtml(finding.reason || '未提供判断依据。')}</span></td>
                   <td><button type="button" class="action-btn btn-secondary-outline parameter-check-detail-btn" data-finding-id="${escapeHtml(finding.finding_id)}" onclick="selectParameterCheckFinding(this.dataset.findingId)">查看证据</button></td>
                 </tr>
             `;
@@ -3151,17 +3217,17 @@ function renderParameterCheckDetail(overview) {
         ${pendingNote}
         <div class="parameter-check-evidence-grid">
           <article>
-            <h4>KB 待核查声明</h4>
+            <h4>当前知识库内容</h4>
             ${renderParameterCheckKnowledgeContent(finding)}
             <dl><div><dt>声明值</dt><dd>${escapeHtml(finding.asserted_value || '-')}</dd></div><div><dt>型号</dt><dd>${escapeHtml(finding.model_name || finding.model_id)}</dd></div></dl>
           </article>
           <article>
-            <h4>参考证据</h4>
+            <h4>智能参数汇总</h4>
             <p class="parameter-check-parameter-value">${escapeHtml(finding.canonical_value || '待补充')}</p>
             <dl><div><dt>功能项</dt><dd>${escapeHtml(finding.feature_name || finding.feature_id)}</dd></div><div><dt>参数版本</dt><dd>${escapeHtml(finding.feature_value_version || '-')}</dd></div></dl>
           </article>
           <article>
-            <h4>快照比对</h4>
+            <h4>比对结论</h4>
             <p>${escapeHtml(finding.reason || '未提供判断依据。')}</p>
             <dl><div><dt>最近更新</dt><dd>${escapeHtml(formatParameterCheckTime(finding.updated_at))}</dd></div><div><dt>处理备注</dt><dd>${escapeHtml(finding.resolution_note || '尚未填写')}</dd></div></dl>
           </article>
@@ -3202,7 +3268,7 @@ function renderParameterCheckOverview(overview) {
             status.textContent = `全量复核池已汇总 ${overview?.summary?.candidate_count || 0} 条 AI 候选，其中 ${overview?.summary?.review_status_counts?.unreviewed || 0} 条待人工复核。`;
         }
     } else if (!overview?.selected_run) {
-        status.textContent = '当前没有可展示的校对运行。';
+        status.textContent = '当前没有已完成的校对批次。点击“校对当前知识库”即可按智能参数汇总重新比较。';
     } else if (isParameterCheckAuditView(overview)) {
         const summary = overview?.summary || {};
         status.textContent = `本批已扫描 ${summary.scanned_knowledge_count || 0} 条知识；扫描审计保留 AI 输出数量与校验结果。`;
@@ -3210,7 +3276,7 @@ function renderParameterCheckOverview(overview) {
         const summary = overview?.summary || {};
         status.textContent = `AI 候选已给出初步判断，当前有 ${summary.review_status_counts?.unreviewed || 0} 条待人工复核；模型为 ${overview.selected_run.ai_model || '未记录模型'}。`;
     } else if (snapshot) {
-        status.textContent = `使用快照 ${snapshot.snapshot_id}，同步于 ${formatParameterCheckTime(snapshot.synced_at)}。`;
+        status.textContent = `本批以智能参数汇总快照 ${snapshot.snapshot_id} 为基准，同步于 ${formatParameterCheckTime(snapshot.synced_at)}；共得到 ${overview?.summary?.finding_count || 0} 条校对结果。`;
     } else {
         status.textContent = '已读取校对运行，但未找到对应参数快照元数据。';
     }
@@ -3274,7 +3340,7 @@ async function loadParameterCheckOverview(options = {}) {
                 category_name: '扫地机',
                 page: String(options.page || parameterCheckState.page || 1),
                 page_size: '50',
-                ai_view: options.aiView || parameterCheckState.aiView || 'queue',
+                ai_view: options.aiView || parameterCheckState.aiView || 'comparison',
             });
             if (selectedRunId) params.set('run_id', selectedRunId);
             const resultStatus = getParameterCheckFilterValue('parameterCheckResultStatus');
@@ -3294,7 +3360,7 @@ async function loadParameterCheckOverview(options = {}) {
             parameterCheckState.runId = overview.selected_run?.run_id || '';
             parameterCheckState.aiView = isParameterCheckAuditView(overview)
                 ? 'audit'
-                : (isParameterCheckQueueView(overview) ? 'queue' : 'candidates');
+                : (isParameterCheckQueueView(overview) ? 'queue' : (isParameterCheckCandidateView(overview) ? 'candidates' : 'comparison'));
             parameterCheckState.page = overview.pagination?.page || 1;
             renderParameterCheckOverview(overview);
         } catch (error) {
@@ -3350,13 +3416,42 @@ async function runParameterCheckAiFeatureScan() {
 function changeParameterCheckRun(runId) {
     parameterCheckState.runId = String(runId || '');
     parameterCheckState.page = 1;
-    parameterCheckState.aiView = parameterCheckState.runId ? 'candidates' : 'queue';
+    parameterCheckState.aiView = 'comparison';
     parameterCheckState.selectedFindingId = '';
     ['parameterCheckResultStatus', 'parameterCheckModelId', 'parameterCheckFeatureId', 'parameterCheckWikiId'].forEach(id => {
         const input = document.getElementById(id);
         if (input) input.value = '';
     });
     loadParameterCheckOverview({ runId: parameterCheckState.runId, page: 1, force: true });
+}
+
+async function runParameterCheckCurrentKnowledgeComparison() {
+    if (parameterCheckState.loading) return;
+    const button = document.getElementById('parameterCheckRunCurrentBtn');
+    const status = document.getElementById('parameterCheckRuntimeStatus');
+    if (button) button.disabled = true;
+    if (status) status.textContent = '正在同步最新参数，并重新提取当前知识库声明进行逐型号比对...';
+    try {
+        const snapshot = await api('/kb/parameter-check/snapshots/sync', 'POST', {
+            category_name: '扫地机',
+        });
+        if (!snapshot?.success) throw new Error(snapshot?.message || '最新参数同步失败。');
+        const result = await api('/kb/parameter-check/runs', 'POST', {
+            category_name: '扫地机',
+            mode: 'refresh_compare',
+        });
+        if (!result?.success) throw new Error(result?.message || '当前知识库校对失败。');
+        parameterCheckState.loaded = false;
+        parameterCheckState.runId = String(result.run_id || '');
+        parameterCheckState.aiView = 'comparison';
+        parameterCheckState.page = 1;
+        parameterCheckState.selectedFindingId = '';
+        await loadParameterCheckOverview({ runId: parameterCheckState.runId, aiView: 'comparison', page: 1, force: true });
+    } catch (error) {
+        if (status) status.textContent = error?.message || '当前知识库校对失败。';
+    } finally {
+        if (button) button.disabled = false;
+    }
 }
 
 function changeParameterCheckAiView(aiView) {
@@ -3560,11 +3655,18 @@ let smWorkbenchRows = [];
 let smManualSearchRowIdx = null;
 let smManualSearchResults = [];
 let smLastOperationId = null;
-let smWorkbenchFilter = { q: '', model: 'all', matchType: 'all', sort: 'default', page: 1, pageSize: 50 };
+function smGetDefaultWorkbenchFilter(pageSize = 50) {
+    return { q: '', model: 'all', decision: 'pending', matchType: 'low', sort: 'default', page: 1, pageSize };
+}
+
+let smWorkbenchFilter = smGetDefaultWorkbenchFilter();
 let smWorkbenchSelected = new Set();
 let smWorkbenchExpanded = new Set();
 let smWorkbenchOtherInfoOpen = new Set();
+let smStepActive = 1;
+let smStepOpen = null;
 let smWorkbenchEventsBound = false;
+let smWorkbenchRenderDeferred = false;
 let smCacheSaveTimer = null;
 let smEmbeddingConfig = {
     api_url: 'https://api.siliconflow.cn/v1/embeddings',
@@ -3573,7 +3675,17 @@ let smEmbeddingConfig = {
     threshold: 0.75,
     api_key_configured: false,
     api_key_source: '',
-    cache_count: 0
+    cache_count: 0,
+    ai_review: {
+        enabled: false,
+        match_types: ['问题+答案均一致', '仅问题一致', '仅答案一致'],
+        batch_size: 8,
+        base_url: '',
+        model: '',
+        fail_closed: true,
+        api_key_configured: false,
+        api_key_source: ''
+    }
 };
 
 function smGetCompareCacheKeys() {
@@ -3609,6 +3721,7 @@ function smBuildCompareCachePayload() {
         models: r.models,
         other_info: r.other_info,
         reasonEdited: r.reasonEdited,
+        manualContentEdited: r.manualContentEdited,
         manual_kb_id: r.manual_kb_id,
         other_info_loaded: r.other_info_loaded
     })) : [];
@@ -3617,12 +3730,13 @@ function smBuildCompareCachePayload() {
         ? {
             q: String(smWorkbenchFilter.q || ''),
             model: String(smWorkbenchFilter.model || 'all'),
-            matchType: String(smWorkbenchFilter.matchType || 'all'),
+            decision: String(smWorkbenchFilter.decision || 'pending'),
+            matchType: String(smWorkbenchFilter.matchType || 'low'),
             sort: String(smWorkbenchFilter.sort || 'default'),
             page: Math.max(1, Number(smWorkbenchFilter.page || 1)),
             pageSize: Math.max(0, Number(smWorkbenchFilter.pageSize || 50))
         }
-        : { q: '', model: 'all', matchType: 'all', sort: 'default', page: 1, pageSize: 50 };
+        : smGetDefaultWorkbenchFilter();
     return {
         v: 1,
         savedAt: Date.now(),
@@ -3632,7 +3746,7 @@ function smBuildCompareCachePayload() {
         lastOperationId: smLastOperationId || null,
         summary: {
             total: rows.length,
-            submit: rows.filter(r => r && r.decision === 'submit').length,
+            submit: rows.filter(r => r && r.decision === 'submit' && !smIsAiReviewBlocking(r)).length,
             skip: rows.filter(r => r && r.decision === 'skip').length
         }
     };
@@ -3681,15 +3795,18 @@ function smRestoreCompareCache() {
         models: Array.isArray(r.models) ? r.models.filter(Boolean) : [],
         other_info: (r.other_info && typeof r.other_info === 'object') ? r.other_info : {},
         reasonEdited: !!r.reasonEdited,
+        manualContentEdited: !!r.manualContentEdited,
         manual_kb_id: r.manual_kb_id,
         other_info_loaded: !!r.other_info_loaded
     })) : [];
     if (data.filter && typeof data.filter === 'object') {
+        const hasWorkbenchFilterV2 = Object.prototype.hasOwnProperty.call(data.filter, 'decision');
         smWorkbenchFilter = {
             ...smWorkbenchFilter,
             q: String(data.filter.q || ''),
             model: String(data.filter.model || 'all'),
-            matchType: String(data.filter.matchType || 'all'),
+            decision: hasWorkbenchFilterV2 ? String(data.filter.decision || 'pending') : 'pending',
+            matchType: hasWorkbenchFilterV2 ? String(data.filter.matchType || 'low') : 'low',
             sort: String(data.filter.sort || 'default'),
             page: Math.max(1, Number(data.filter.page || 1)),
             pageSize: Math.max(0, Number(data.filter.pageSize || 50))
@@ -3747,20 +3864,110 @@ function smSetProgress(pct, text) {
     const inner = document.getElementById('smProgressInner');
     if (inner) inner.style.width = `${Math.max(0, Math.min(100, pct || 0))}%`;
     smSetStatusText('smProgressText', text || '');
+    smUpdateStepProgress();
+}
+
+function smGetStepSnapshot() {
+    const hasSource = smFaqItems.length > 0 && smKbItems.length > 0;
+    const hasResults = smWorkbenchRows.length > 0;
+    const progressText = String(document.getElementById('smProgressText')?.textContent || '').trim();
+    const total = smWorkbenchRows.length;
+    const pending = smWorkbenchRows.filter(row => row && row.decision === 'pending').length;
+    const submit = smWorkbenchRows.filter(row => row && row.decision === 'submit' && !smIsAiReviewBlocking(row)).length;
+    const skip = smWorkbenchRows.filter(row => row && row.decision === 'skip').length;
+    const algorithm = String(smWorkbenchRows[0]?.match?.embedding_model || smEmbeddingConfig?.model || '').trim();
+    const threshold = Number(smEmbeddingConfig?.threshold || 0.75).toFixed(2);
+    const progress = progressText || (hasResults ? `已完成 ${total} 条` : (hasSource ? '等待开始' : '等待数据源'));
+    return {
+        active: hasResults ? 3 : (hasSource ? 2 : 1),
+        steps: {
+            1: {
+                status: hasSource ? 'done' : 'active',
+                summary: hasSource ? `FAQ ${smFaqItems.length} 条 · 知识库 ${smKbItems.length} 条` : (smExcelFileObj ? `已选择 ${smExcelFileObj.name}` : '等待导入')
+            },
+            2: {
+                status: hasResults ? 'done' : (hasSource ? 'active' : 'pending'),
+                summary: hasResults ? `已完成 ${total} 条 · ${algorithm || 'Embedding'} · 阈值 ${threshold}` : progress
+            },
+            3: {
+                status: hasResults ? 'active' : 'pending',
+                summary: hasResults ? `待处理 ${pending} · 待提交 ${submit} · 已跳过 ${skip}` : '等待比对结果'
+            }
+        }
+    };
+}
+
+function smUpdateStepProgress(forceActive = false) {
+    const snapshot = smGetStepSnapshot();
+    if (forceActive || smStepActive !== snapshot.active) {
+        smStepActive = snapshot.active;
+        smStepOpen = null;
+    }
+    const openStep = smStepOpen || smStepActive;
+    Object.entries(snapshot.steps).forEach(([key, data]) => {
+        const step = Number(key);
+        const button = document.getElementById(`smStepButton${step}`);
+        const panel = document.getElementById(`smStepPanel${step}`);
+        const summary = data.summary || '';
+        const statusLabel = data.status === 'done' ? '已完成' : (data.status === 'active' ? '进行中' : '待开始');
+        const statusClass = data.status === 'done' ? 'is-done' : (data.status === 'active' ? 'is-active' : 'is-pending');
+        [document.getElementById(`smStepSummary${step}`), document.getElementById(`smStepPanelSummary${step}`)].forEach((el) => {
+            if (el) el.textContent = summary;
+        });
+        if (button) {
+            button.classList.remove('is-done', 'is-active', 'is-pending');
+            button.classList.add(statusClass);
+            button.disabled = data.status === 'pending';
+            button.setAttribute('aria-current', data.status === 'active' ? 'step' : 'false');
+            button.setAttribute('aria-label', `${step}. ${step === 1 ? '数据准备' : (step === 2 ? '自动比对' : '人工审核')}，${statusLabel}，${summary}`);
+        }
+        if (panel) {
+            panel.classList.toggle('is-collapsed', step !== openStep);
+            panel.classList.toggle('is-complete', data.status === 'done');
+            const detailToggle = panel.querySelector('.sm-step-detail-toggle');
+            if (detailToggle) detailToggle.textContent = step === openStep ? '收起详情' : '查看详情';
+        }
+    });
+}
+
+function smToggleStep(step) {
+    const target = Number(step);
+    if (![1, 2, 3].includes(target)) return;
+    const snapshot = smGetStepSnapshot();
+    if (snapshot.steps[target]?.status === 'pending') return;
+    smStepOpen = smStepOpen === target ? null : target;
+    smUpdateStepProgress();
 }
 
 function smRenderEmbeddingConfig() {
     const config = smEmbeddingConfig || {};
+    const ai = config.ai_review && typeof config.ai_review === 'object' ? config.ai_review : {};
     const apiUrl = document.getElementById('smEmbeddingApiUrl');
     const model = document.getElementById('smEmbeddingModel');
     const dimensions = document.getElementById('smEmbeddingDimensions');
     const threshold = document.getElementById('smEmbeddingThreshold');
     const apiKey = document.getElementById('smEmbeddingApiKey');
+    const aiEnabled = document.getElementById('smAiReviewEnabled');
+    const aiBaseUrl = document.getElementById('smAiReviewBaseUrl');
+    const aiModel = document.getElementById('smAiReviewModel');
+    const aiBatchSize = document.getElementById('smAiReviewBatchSize');
+    const aiKey = document.getElementById('smAiReviewApiKey');
+    const aiFailClosed = document.getElementById('smAiReviewFailClosed');
     if (apiUrl) apiUrl.value = String(config.api_url || '');
     if (model) model.value = String(config.model || '');
     if (dimensions) dimensions.value = String(config.dimensions || 1024);
     if (threshold) threshold.value = String(config.threshold || 0.75);
     if (apiKey) apiKey.value = '';
+    if (aiEnabled) aiEnabled.checked = !!ai.enabled;
+    if (aiBaseUrl) aiBaseUrl.value = String(ai.base_url || '');
+    if (aiModel) aiModel.value = String(ai.model || '');
+    if (aiBatchSize) aiBatchSize.value = String(ai.batch_size || 8);
+    if (aiKey) aiKey.value = '';
+    if (aiFailClosed) aiFailClosed.checked = ai.fail_closed !== false;
+    const selectedTypes = new Set(Array.isArray(ai.match_types) ? ai.match_types : []);
+    document.querySelectorAll('input[name="smAiReviewMatchType"]').forEach((el) => {
+        el.checked = selectedTypes.has(String(el.value || ''));
+    });
 
     const sourceLabels = {
         environment: '环境变量 Key',
@@ -3771,17 +3978,35 @@ function smRenderEmbeddingConfig() {
         ? (sourceLabels[String(config.api_key_source || '')] || 'API Key 已配置')
         : 'API Key 未配置';
     const cacheCount = Number(config.cache_count || 0);
-    smSetEmbeddingConfigStatus(`${keyText} · 已缓存 ${cacheCount} 条向量`);
+    const aiKeyText = ai.enabled
+        ? (ai.api_key_configured ? 'AI 复核 Key 已配置' : 'AI 复核 Key 未配置')
+        : 'AI 事实复核未启用';
+    smSetEmbeddingConfigStatus(`${keyText} · ${aiKeyText} · 已缓存 ${cacheCount} 条向量`);
+    const aiStatus = document.getElementById('smAiReviewConfigStatus');
+    if (aiStatus) {
+        aiStatus.textContent = ai.enabled
+            ? `${aiKeyText} · ${ai.match_types?.length || 0} 类结果复核 · 每批 ${Number(ai.batch_size || 8)} 条${ai.fail_closed === false ? ' · 失败转人工' : ' · 失败阻断提交'}`
+            : '默认关闭。启用后会对 Embedding 判定为一致的结果核对尺寸、数字、单位、型号、范围、条件、步骤和结论。';
+    }
     smSetStatusText('smThresholdLabel', `Embedding 阈值：${Number(config.threshold || 0.75).toFixed(2)}`);
 }
 
 function smCollectEmbeddingConfig() {
+    const matchTypes = Array.from(document.querySelectorAll('input[name="smAiReviewMatchType"]:checked'))
+        .map(el => String(el.value || '').trim()).filter(Boolean);
     return {
         api_url: String(document.getElementById('smEmbeddingApiUrl')?.value || '').trim(),
         model: String(document.getElementById('smEmbeddingModel')?.value || '').trim(),
         dimensions: Number(document.getElementById('smEmbeddingDimensions')?.value || 1024),
         threshold: Number(document.getElementById('smEmbeddingThreshold')?.value || 0.75),
-        api_key: String(document.getElementById('smEmbeddingApiKey')?.value || '').trim()
+        api_key: String(document.getElementById('smEmbeddingApiKey')?.value || '').trim(),
+        ai_review_enabled: !!document.getElementById('smAiReviewEnabled')?.checked,
+        ai_review_match_types: matchTypes,
+        ai_review_batch_size: Number(document.getElementById('smAiReviewBatchSize')?.value || 8),
+        ai_review_base_url: String(document.getElementById('smAiReviewBaseUrl')?.value || '').trim(),
+        ai_review_model: String(document.getElementById('smAiReviewModel')?.value || '').trim(),
+        ai_review_api_key: String(document.getElementById('smAiReviewApiKey')?.value || '').trim(),
+        ai_review_fail_closed: !!document.getElementById('smAiReviewFailClosed')?.checked
     };
 }
 
@@ -3820,7 +4045,10 @@ async function smTestEmbeddingConfig() {
     try {
         const res = await api('/smart_mapping/embedding/test', 'POST', smCollectEmbeddingConfig());
         if (!res || !res.success) throw new Error(res?.message || '连接失败');
-        smSetEmbeddingConfigStatus(`连接成功 · ${res.model || ''} · ${res.dimensions || 0} 维`);
+        const aiText = res.ai_review?.enabled
+            ? `AI复核测试${res.ai_review.tested ? `：${res.ai_review.decision || 'uncertain'}` : '未执行'}`
+            : 'AI复核未启用';
+        smSetEmbeddingConfigStatus(`连接成功 · ${res.model || ''} · ${res.dimensions || 0} 维 · ${aiText}`);
         if (typeof showToast === 'function') showToast('Embedding API 连接成功', 'success');
     } catch (e) {
         smSetEmbeddingConfigStatus(`连接失败：${e?.message || String(e)}`);
@@ -3831,12 +4059,14 @@ async function smTestEmbeddingConfig() {
 
 function smSetAlgorithmStatus(match) {
     const algorithm = String(match?.algorithm || 'embedding');
+    const aiEnabled = smEmbeddingConfig?.ai_review?.enabled === true;
+    const aiText = aiEnabled ? 'AI事实复核开启' : 'AI事实复核关闭';
     if (algorithm === 'ngram_fallback') {
-        smSetStatusText('smAlgorithmStatus', '当前算法：字符相似度降级');
+        smSetStatusText('smAlgorithmStatus', `当前算法：字符相似度降级 · ${aiText}`);
         return;
     }
     const model = String(match?.embedding_model || smEmbeddingConfig?.model || '').trim();
-    smSetStatusText('smAlgorithmStatus', `当前算法：Embedding${model ? ` · ${model}` : ''}`);
+    smSetStatusText('smAlgorithmStatus', `当前算法：Embedding${model ? ` · ${model}` : ''} · ${aiText}`);
 }
 
 function smUpdateReadyState() {
@@ -3845,17 +4075,37 @@ function smUpdateReadyState() {
     const archiveBtn = document.getElementById('smArchiveBtn');
     const exportBtn = document.getElementById('smExportBtn');
     if (compareBtn) compareBtn.disabled = !(smFaqItems.length > 0 && smKbItems.length > 0);
-    const hasSubmit = smWorkbenchRows.some(r => r && r.decision === 'submit');
-    if (submitBtn) submitBtn.disabled = !hasSubmit;
+    const submitCount = smWorkbenchRows.filter(r => r && r.decision === 'submit' && !smIsAiReviewBlocking(r)).length;
+    if (submitBtn) {
+        submitBtn.disabled = submitCount === 0;
+        submitBtn.textContent = submitCount > 0 ? `提交 ${submitCount} 条修改` : '提交待提交修改';
+        submitBtn.title = submitCount > 0
+            ? `提交全部 ${submitCount} 条待提交修改，不受当前勾选范围影响`
+            : '暂无待提交修改';
+    }
     if (archiveBtn) archiveBtn.disabled = !smLastOperationId;
     if (exportBtn) exportBtn.disabled = !(smWorkbenchRows && smWorkbenchRows.length > 0);
     const summary = document.getElementById('smSummary');
     if (summary) {
         const total = smWorkbenchRows.length;
-        const submit = smWorkbenchRows.filter(r => r.decision === 'submit').length;
         const skip = smWorkbenchRows.filter(r => r.decision === 'skip').length;
-        summary.textContent = total ? `共 ${total} 条：待提交 ${submit} 条，已跳过 ${skip} 条` : '';
+        summary.textContent = total ? `共 ${total} 条：待提交 ${submitCount} 条，已跳过 ${skip} 条` : '';
     }
+    smUpdateStepProgress();
+}
+
+function smIsAiReviewBlocking(row) {
+    const value = row?.match?.ai_review_blocking;
+    return value === true || String(value || '').toLowerCase() === 'true';
+}
+
+function smSetManualReviewPending(row) {
+    if (!row || !row.match || !row.match.ai_review_enabled) return;
+    row.match.ai_review_status = 'pending_manual';
+    row.match.ai_review_blocking = true;
+    row.match.ai_review_manual_override = false;
+    row.manualContentEdited = true;
+    row.decision = 'pending';
 }
 
 let _smArchiveModalBackup = null;
@@ -3989,6 +4239,7 @@ async function smInitSmartMapping() {
             if (files && files[0]) {
                 smExcelFileObj = files[0];
                 smSetStatusText('smExcelStatus', `已选择：${smExcelFileObj.name}`);
+                smUpdateStepProgress();
             }
         });
     }
@@ -4114,6 +4365,7 @@ function smRenderModelMultiSelect(host) {
     trigger.addEventListener('click', (e) => {
         e.stopPropagation();
         select.classList.toggle('open');
+        select.closest('.sm-step-panel')?.classList.toggle('has-open-dropdown', select.classList.contains('open'));
         if (select.classList.contains('open')) {
             refreshList(document.getElementById('smModelSearchInput')?.value);
         }
@@ -4121,6 +4373,7 @@ function smRenderModelMultiSelect(host) {
 
     document.addEventListener('click', () => {
         select.classList.remove('open');
+        select.closest('.sm-step-panel')?.classList.remove('has-open-dropdown');
     });
 
     options.addEventListener('click', (e) => {
@@ -4168,10 +4421,11 @@ function smChooseCompareExcelFile() {
     input.click();
     input.onchange = () => {
         const f = input.files && input.files[0] ? input.files[0] : null;
-        if (f) {
-            smExcelFileObj = f;
-            smSetStatusText('smExcelStatus', `已选择：${f.name}`);
-        }
+    if (f) {
+        smExcelFileObj = f;
+        smSetStatusText('smExcelStatus', `已选择：${f.name}`);
+        smUpdateStepProgress();
+    }
     };
 }
 
@@ -4227,14 +4481,81 @@ async function smUploadAndParseCompareExcel() {
     }
 }
 
+function smNormalizeCompareResultRow(raw, existing = null) {
+    const r = raw && typeof raw === 'object' ? raw : {};
+    const faq = r.faq && typeof r.faq === 'object' ? r.faq : {};
+    const match = r.match && typeof r.match === 'object' ? r.match : {};
+    const modelsRaw = String(faq.models_raw || '').trim();
+    const row = {
+        ...r,
+        faq: { ...faq },
+        match: { ...match },
+        models: modelsRaw ? modelsRaw.split(/[,，]/).map(s => String(s || '').trim()).filter(Boolean) : [],
+        decision: existing?.decision || 'pending',
+        mode: existing?.modeEdited ? existing.mode : (match.type === '无匹配' ? 'create' : 'update'),
+        modeEdited: !!existing?.modeEdited,
+        reasonEdited: !!existing?.reasonEdited,
+        manual_kb_id: existing?.manual_kb_id,
+        other_info: existing?.other_info && typeof existing.other_info === 'object' ? existing.other_info : {},
+        other_info_loaded: !!existing?.other_info_loaded
+    };
+    if (existing?.manualContentEdited) {
+        row.faq = { ...faq, ...existing.faq };
+        row.match = { ...match, ...existing.match };
+        row.models = Array.isArray(existing.models) ? existing.models : row.models;
+        row.mode = existing.mode || row.mode;
+        row.reason = existing.reason;
+    }
+    if (existing?.reasonEdited) row.reason = existing.reason;
+    if (existing?.match?.ai_review_manual_override) {
+        row.match = { ...match, ...existing.match };
+        row.mode = existing.mode || row.mode;
+    }
+    return row;
+}
+
+function smMergeCompareResults(results) {
+    if (!Array.isArray(results)) return false;
+    const previous = new Map();
+    (smWorkbenchRows || []).forEach((row, index) => {
+        const rowNumber = row?.faq?.row_number;
+        const key = rowNumber !== undefined && rowNumber !== null && String(rowNumber).trim()
+            ? `row:${rowNumber}` : `idx:${index}`;
+        previous.set(key, row);
+    });
+    const seen = new Set();
+    const next = results.map((raw, index) => {
+        const rowNumber = raw?.faq?.row_number;
+        const key = rowNumber !== undefined && rowNumber !== null && String(rowNumber).trim()
+            ? `row:${rowNumber}` : `idx:${index}`;
+        seen.add(key);
+        return smNormalizeCompareResultRow(raw, previous.get(key));
+    });
+    (smWorkbenchRows || []).forEach((row, index) => {
+        const rowNumber = row?.faq?.row_number;
+        const key = rowNumber !== undefined && rowNumber !== null && String(rowNumber).trim()
+            ? `row:${rowNumber}` : `idx:${index}`;
+        if (!seen.has(key)) next.push(row);
+    });
+    smWorkbenchRows = next;
+    smRenderWorkbenchWhenIdle();
+    smSetAlgorithmStatus(smWorkbenchRows[0]?.match);
+    smUpdateReadyState();
+    smScheduleSaveCompareCache();
+    return true;
+}
+
 function smResetWorkbench() {
     smCompareJobId = null;
     smWorkbenchRows = [];
     smWorkbenchSelected = new Set();
     smWorkbenchExpanded = new Set();
-    smWorkbenchFilter = { q: '', model: 'all', matchType: 'all', sort: 'default', page: 1, pageSize: smWorkbenchFilter.pageSize || 50 };
+    smWorkbenchRenderDeferred = false;
+    smWorkbenchFilter = smGetDefaultWorkbenchFilter(smWorkbenchFilter.pageSize || 50);
     const body = document.getElementById('smWorkbenchBody');
     if (body) body.innerHTML = '<tr><td colspan="11" class="empty-message">请先导入对比Excel</td></tr>';
+    const compareBtn = document.getElementById('smCompareBtn');
+    if (compareBtn) compareBtn.textContent = '开始比对';
     smSetProgress(0, '');
     smUpdateWorkbenchToolbarInfo(0, 0, 0);
     smUpdateWorkbenchModelFilter();
@@ -4244,7 +4565,16 @@ function smResetWorkbench() {
 
 async function smStartCompare() {
     const btn = document.getElementById('smCompareBtn');
-    if (btn) btn.disabled = true;
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '比对中...';
+    }
+    smWorkbenchRows = [];
+    smWorkbenchSelected = new Set();
+    smWorkbenchExpanded = new Set();
+    smWorkbenchOtherInfoOpen = new Set();
+    smRenderWorkbench();
+    smUpdateReadyState();
     smSetProgress(1, '任务创建中...');
     try {
         if (smFaqItems.length === 0 || smKbItems.length === 0) throw new Error('请先导入包含两张工作表的对比Excel');
@@ -4259,8 +4589,10 @@ async function smStartCompare() {
         await smPollCompareStatus();
     } catch (e) {
         smSetProgress(0, `❌ ${e.message}`);
+        if (btn) btn.textContent = '开始比对';
     } finally {
         if (btn) btn.disabled = false;
+        if (btn && smWorkbenchRows.length > 0) btn.textContent = '重新比对';
         smUpdateReadyState();
     }
 }
@@ -4274,9 +4606,14 @@ async function smPollCompareStatus() {
         const total = Number(res.total || 0);
         const done = Number(res.done || 0);
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        if (Array.isArray(res.results) && res.results.length > 0) {
+            smMergeCompareResults(res.results);
+        }
         if (res.status === 'running') {
             const phase = String(res.message || '').trim();
-            smSetProgress(Math.max(1, pct), phase || `比对中：${done}/${total}`);
+            const streamed = smWorkbenchRows.length;
+            const streamedText = streamed ? ` · 已展示 ${streamed}/${total}` : '';
+            smSetProgress(Math.max(1, pct), `${phase || `比对中：${done}/${total}`}${streamedText}`);
             await new Promise(r => setTimeout(r, 350));
             continue;
         }
@@ -4285,31 +4622,12 @@ async function smPollCompareStatus() {
         }
         if (res.status === 'done') {
             smSetProgress(100, `完成：${done}/${total}`);
-            smWorkbenchRows = Array.isArray(res.results) ? res.results : [];
-            smWorkbenchRows = smWorkbenchRows.map((r) => {
-                const faq = (r && r.faq) ? r.faq : {};
-                const raw = String(faq.models_raw || '').trim();
-                const rowModels = raw ? raw.split(/[,，]/).map(s => String(s || '').trim()).filter(Boolean) : [];
-                return {
-                    ...r,
-                    models: rowModels,
-                    decision: 'pending',
-                    mode: r && r.match && r.match.type === '无匹配' ? 'create' : 'update',
-                    reasonEdited: false
-                };
-            });
-            smWorkbenchSelected = new Set();
+            const compareBtn = document.getElementById('smCompareBtn');
+            if (compareBtn) compareBtn.textContent = '重新比对';
+            smMergeCompareResults(Array.isArray(res.results) ? res.results : []);
             smWorkbenchExpanded = new Set();
-            smWorkbenchFilter = {
-                q: '',
-                model: 'all',
-                matchType: 'all',
-                sort: 'default',
-                page: 1,
-                pageSize: smWorkbenchFilter.pageSize || 50
-            };
-            smRenderWorkbench();
-            smSetAlgorithmStatus(smWorkbenchRows[0]?.match);
+            smWorkbenchFilter = smGetDefaultWorkbenchFilter(smWorkbenchFilter.pageSize || 50);
+            smRenderWorkbenchWhenIdle();
             if (String(smWorkbenchRows[0]?.match?.algorithm || '') === 'ngram_fallback' && typeof showToast === 'function') {
                 showToast('Embedding API 不可用，本次已使用字符相似度完成比对', 'warning');
             }
@@ -4326,6 +4644,23 @@ function smStatusBadge(type) {
     if (type === '仅问题一致') return '<span class="sm-badge warn">🟡 仅问题一致</span>';
     if (type === '仅答案一致') return '<span class="sm-badge warn">🟡 仅答案一致</span>';
     return '<span class="sm-badge bad">🔴 无匹配</span>';
+}
+
+function smAiReviewBadge(match) {
+    const status = String(match?.ai_review_status || '').trim();
+    if (!status || status === 'not_applicable') return '';
+    const meta = {
+        pass: ['pass', 'AI通过'],
+        conflict: ['conflict', 'AI冲突'],
+        uncertain: ['pending', 'AI待人工'],
+        pending: ['pending', 'AI待人工'],
+        error: ['pending', 'AI待人工'],
+        manual_override: ['manual', '人工覆盖'],
+        pending_manual: ['pending', '待人工复核']
+    }[status] || ['pending', 'AI待人工'];
+    const detail = [match?.ai_review_reason, ...(Array.isArray(match?.ai_review_conflicts) ? match.ai_review_conflicts : [])]
+        .map(x => String(x || '').trim()).filter(Boolean).join('；');
+    return `<span class="sm-ai-review-badge ${meta[0]}" title="${escapeHtml(detail || meta[1])}">${meta[1]}</span>`;
 }
 
 function smStripNumberPrefix(s) {
@@ -4452,7 +4787,8 @@ function smPickMatchType(qSim, aSim, threshold = 0.7) {
 function smSetWorkbenchFilter(key, value) {
     if (key === 'q') smWorkbenchFilter.q = String(value || '');
     if (key === 'model') smWorkbenchFilter.model = String(value || 'all');
-    if (key === 'matchType') smWorkbenchFilter.matchType = String(value || 'all');
+    if (key === 'decision') smWorkbenchFilter.decision = String(value || 'pending');
+    if (key === 'matchType') smWorkbenchFilter.matchType = String(value || 'low');
     if (key === 'sort') smWorkbenchFilter.sort = String(value || 'default');
     if (key === 'pageSize') smWorkbenchFilter.pageSize = Math.max(0, Number(value || 50));
     smWorkbenchFilter.page = 1;
@@ -4471,12 +4807,34 @@ function smNextWorkbenchPage() {
 }
 
 function smToggleCellExpand(key, e) {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
     const k = String(key || '');
     if (!k) return;
-    if (smWorkbenchExpanded.has(k)) smWorkbenchExpanded.delete(k);
-    else smWorkbenchExpanded.add(k);
-    smRenderWorkbench();
+    const expanded = !smWorkbenchExpanded.has(k);
+    if (expanded) smWorkbenchExpanded.add(k);
+    else smWorkbenchExpanded.delete(k);
+
+    const button = e?.currentTarget;
+    const cell = button && typeof button.closest === 'function' ? button.closest('.sm-cell') : null;
+    if (!cell || cell.getAttribute('data-cell-key') !== k) {
+        smRenderWorkbench();
+        return;
+    }
+
+    cell.classList.toggle('is-expanded', expanded);
+    button.textContent = expanded ? '收起▲' : '展开▼';
+    button.setAttribute('aria-expanded', String(expanded));
+
+    const content = cell.querySelector('textarea, .sm-readonly-box');
+    if (!content) return;
+    if (content.tagName === 'TEXTAREA') {
+        content.style.height = expanded ? 'auto' : '';
+        if (expanded && content.scrollHeight) {
+            content.style.height = `${Math.min(520, content.scrollHeight)}px`;
+        }
+    }
+    cell.classList.toggle('is-overflow', expanded || content.scrollHeight > content.clientHeight + 2);
 }
 
 function smToggleOtherInfo(idx, e) {
@@ -4499,6 +4857,7 @@ function smEditOtherInfo(idx, field, value) {
     if (!f) return;
     row.other_info = row.other_info && typeof row.other_info === 'object' ? row.other_info : {};
     row.other_info[f] = value;
+    smSetManualReviewPending(row);
     smScheduleSaveCompareCache();
 }
 
@@ -4535,9 +4894,23 @@ async function smEnsureRowOtherInfoLoaded(idx) {
 
 function smUpdateWorkbenchSelectedInfo() {
     const el = document.getElementById('smWorkbenchSelectedInfo');
-    if (!el) return;
     const n = smWorkbenchSelected ? smWorkbenchSelected.size : 0;
-    el.textContent = n ? `已选 ${n} 条` : '';
+    if (el) {
+        el.textContent = n ? `当前勾选 ${n} 条` : '当前未勾选';
+        el.title = '勾选仅用于批量采纳或跳过，不会限制右侧的提交范围';
+    }
+    const batchSubmitBtn = document.getElementById('smBatchSubmitBtn');
+    const batchSkipBtn = document.getElementById('smBatchSkipBtn');
+    const clearBtn = document.getElementById('smClearSelectionBtn');
+    if (batchSubmitBtn) {
+        batchSubmitBtn.disabled = n === 0;
+        batchSubmitBtn.textContent = n ? `采纳勾选（${n}）` : '采纳勾选';
+    }
+    if (batchSkipBtn) {
+        batchSkipBtn.disabled = n === 0;
+        batchSkipBtn.textContent = n ? `跳过勾选（${n}）` : '跳过勾选';
+    }
+    if (clearBtn) clearBtn.disabled = n === 0;
 }
 
 function smClearWorkbenchSelection() {
@@ -4547,11 +4920,15 @@ function smClearWorkbenchSelection() {
 
 function smBatchMarkSubmit() {
     if (!smWorkbenchSelected || smWorkbenchSelected.size === 0) return;
+    const blocked = [];
     Array.from(smWorkbenchSelected).forEach(idx => {
         const row = smWorkbenchRows[idx];
-        if (row) row.decision = 'submit';
+        if (!row) return;
+        if (smIsAiReviewBlocking(row)) blocked.push(Number(idx) + 1);
+        else row.decision = 'submit';
     });
     smWorkbenchSelected = new Set();
+    if (blocked.length && typeof showToast === 'function') showToast(`第 ${blocked.join(', ')} 行 AI 复核未完成，已保留待人工状态`, 'warning');
     smUpdateReadyState();
     smRenderWorkbench();
     smScheduleSaveCompareCache();
@@ -4600,6 +4977,17 @@ function smUpdateWorkbenchModelFilter() {
     if (sel.value !== cur) smWorkbenchFilter.model = sel.value;
 }
 
+function smUpdateWorkbenchFilterControls() {
+    const decision = document.getElementById('smWorkbenchDecisionFilter');
+    if (decision) decision.value = String(smWorkbenchFilter.decision || 'pending');
+    const matchType = document.getElementById('smWorkbenchMatchTypeFilter');
+    if (matchType) matchType.value = String(smWorkbenchFilter.matchType || 'low');
+    const sort = document.getElementById('smWorkbenchSort');
+    if (sort) sort.value = String(smWorkbenchFilter.sort || 'default');
+    const pageSize = document.getElementById('smWorkbenchPageSize');
+    if (pageSize) pageSize.value = String(Number(smWorkbenchFilter.pageSize || 0));
+}
+
 function smEnsureWorkbenchEvents() {
     if (smWorkbenchEventsBound) return;
     const body = document.getElementById('smWorkbenchBody');
@@ -4623,7 +5011,29 @@ function smEnsureWorkbenchEvents() {
         }
         smUpdateWorkbenchSelectedInfo();
     });
+    body.addEventListener('focusout', () => {
+        setTimeout(() => {
+            if (!smWorkbenchRenderDeferred || smWorkbenchHasActiveEditor()) return;
+            smRenderWorkbenchWhenIdle();
+        }, 0);
+    });
     smWorkbenchEventsBound = true;
+}
+
+function smWorkbenchHasActiveEditor() {
+    const body = document.getElementById('smWorkbenchBody');
+    const active = document.activeElement;
+    return !!(body && active && body.contains(active) && active.matches('textarea, input, select'));
+}
+
+function smRenderWorkbenchWhenIdle() {
+    if (smWorkbenchHasActiveEditor()) {
+        smWorkbenchRenderDeferred = true;
+        return false;
+    }
+    smWorkbenchRenderDeferred = false;
+    smRenderWorkbench();
+    return true;
 }
 
 function smRefreshWorkbenchOverflow() {
@@ -4654,14 +5064,18 @@ function smRefreshWorkbenchOverflow() {
 function smGetWorkbenchFilteredIndices() {
     const q = String(smWorkbenchFilter.q || '').trim().toLowerCase();
     const model = String(smWorkbenchFilter.model || 'all');
-    const mt = String(smWorkbenchFilter.matchType || 'all');
+    const decisionFilter = String(smWorkbenchFilter.decision || 'pending');
+    const mt = String(smWorkbenchFilter.matchType || 'low');
     const indices = [];
     (smWorkbenchRows || []).forEach((row, idx) => {
         if (!row) return;
         const faq = row.faq || {};
         const match = row.match || {};
         const type = (match.type === '问题+答案均一致' || match.type === '仅问题一致' || match.type === '仅答案一致' || match.type === '无匹配') ? match.type : '无匹配';
-        if (mt !== 'all' && type !== mt) return;
+        const decision = String(row.decision || 'pending');
+        if (decisionFilter !== 'all' && decision !== decisionFilter) return;
+        if (mt === 'low' && type === '问题+答案均一致') return;
+        if (mt !== 'all' && mt !== 'low' && type !== mt) return;
         if (model !== 'all') {
             const ms = Array.isArray(row.models) ? row.models : [];
             const ok = ms.some(m => String(m || '') === model) || String(faq.models_text || '').includes(model);
@@ -4676,7 +5090,9 @@ function smGetWorkbenchFilteredIndices() {
                 match.kb_id,
                 match.kb_question,
                 match.kb_answer,
-                row.reason
+                row.reason,
+                match.ai_review_reason,
+                ...(Array.isArray(match.ai_review_conflicts) ? match.ai_review_conflicts : [])
             ].map(x => String(x || '')).join(' ').toLowerCase();
             if (!s.includes(q)) return;
         }
@@ -4710,9 +5126,11 @@ function smGetWorkbenchFilteredIndices() {
 }
 
 function smRenderWorkbench() {
+    smWorkbenchRenderDeferred = false;
     const body = document.getElementById('smWorkbenchBody');
     if (!body) return;
     smUpdateWorkbenchModelFilter();
+    smUpdateWorkbenchFilterControls();
     smEnsureWorkbenchEvents();
     const all = smGetWorkbenchFilteredIndices();
     const total = all.length;
@@ -4741,6 +5159,10 @@ function smRenderWorkbench() {
         const kbA = String(match.kb_answer || '').trim();
         const kbId = String(match.kb_id || '').trim();
         const reason = String(row.reason || '').trim();
+        const aiReviewDetail = [
+            ...(Array.isArray(match.ai_review_conflicts) ? match.ai_review_conflicts : []),
+            match.ai_review_reason
+        ].map(x => String(x || '').trim()).filter(Boolean).filter((value, index, values) => values.indexOf(value) === index).join('；');
         const decision = row.decision || 'pending';
         const mode = row.mode || (type === '无匹配' ? 'create' : 'update');
         const otherInfo = row.other_info && typeof row.other_info === 'object' ? row.other_info : {};
@@ -4756,14 +5178,15 @@ function smRenderWorkbench() {
             .map(t => `<option value="${escapeHtml(t)}" ${t === type ? 'selected' : ''}>${escapeHtml(t)}</option>`)
             .join('');
 
-        const decisionLabel = decision === 'submit' ? '待提交' : (decision === 'skip' ? '已跳过' : '待处理');
+        const aiBlocking = smIsAiReviewBlocking(row);
+        const decisionLabel = aiBlocking ? '待人工' : (decision === 'submit' ? '待提交' : (decision === 'skip' ? '已跳过' : '待处理'));
         const rowCls = [
-            decision === 'submit' ? 'sm-row-submit' : '',
+            decision === 'submit' && !aiBlocking ? 'sm-row-submit' : '',
             decision === 'skip' ? 'sm-row-skip' : '',
             smWorkbenchSelected.has(idx) ? 'sm-row-selected' : ''
         ].filter(Boolean).join(' ');
-        const opStatus = decision === 'submit' ? '<div class="sm-op-status">✓ 已采纳</div>' : '';
-        const acceptDisabled = type === '无匹配' && mode !== 'create';
+        const opStatus = decision === 'submit' && !aiBlocking ? '<div class="sm-op-status">✓ 已采纳</div>' : '';
+        const acceptDisabled = (type === '无匹配' && mode !== 'create') || aiBlocking;
         const faqQKey = `${idx}:faq_question`;
         const faqAKey = `${idx}:faq_answer`;
         const kbQKey = `${idx}:kb_question`;
@@ -4779,26 +5202,26 @@ function smRenderWorkbench() {
                 <td>
                     <div class="sm-cell ${smWorkbenchExpanded.has(faqQKey) ? 'is-expanded' : ''}" data-cell-key="${escapeHtml(faqQKey)}">
                         <textarea rows="3" style="white-space:pre-wrap;" oninput="smEditFaq(${idx}, 'question', this.value)" ondblclick="smOpenRowText(${idx}, 'faq_question')">${escapeHtml(faq.question || '')}</textarea>
-                        <button type="button" class="sm-expand-btn" onclick="smToggleCellExpand('${escapeHtml(faqQKey)}', event)">${smWorkbenchExpanded.has(faqQKey) ? '收起▲' : '展开▼'}</button>
+                        <button type="button" class="sm-expand-btn" aria-expanded="${smWorkbenchExpanded.has(faqQKey)}" onclick="smToggleCellExpand('${escapeHtml(faqQKey)}', event)">${smWorkbenchExpanded.has(faqQKey) ? '收起▲' : '展开▼'}</button>
                     </div>
                 </td>
                 <td>
                     <div class="sm-cell ${smWorkbenchExpanded.has(faqAKey) ? 'is-expanded' : ''}" data-cell-key="${escapeHtml(faqAKey)}">
                         <textarea rows="3" style="white-space:pre-wrap;" oninput="smEditFaq(${idx}, 'answer', this.value)" ondblclick="smOpenRowText(${idx}, 'faq_answer')">${escapeHtml(faq.answer || '')}</textarea>
-                        <button type="button" class="sm-expand-btn" onclick="smToggleCellExpand('${escapeHtml(faqAKey)}', event)">${smWorkbenchExpanded.has(faqAKey) ? '收起▲' : '展开▼'}</button>
+                        <button type="button" class="sm-expand-btn" aria-expanded="${smWorkbenchExpanded.has(faqAKey)}" onclick="smToggleCellExpand('${escapeHtml(faqAKey)}', event)">${smWorkbenchExpanded.has(faqAKey) ? '收起▲' : '展开▼'}</button>
                     </div>
                 </td>
                 <td style="text-align:center; font-family:monospace; font-size:12px; font-weight:700; user-select:text; cursor:text;">${escapeHtml(kbIdText)}</td>
                 <td>
                     <div class="sm-cell ${smWorkbenchExpanded.has(kbQKey) ? 'is-expanded' : ''}" data-cell-key="${escapeHtml(kbQKey)}">
                         <textarea rows="3" style="white-space:pre-wrap;" placeholder="-" oninput="smEditMatch(${idx}, 'kb_question', this.value)" ondblclick="smOpenRowText(${idx}, 'kb_question')">${escapeHtml(kbQText)}</textarea>
-                        <button type="button" class="sm-expand-btn" onclick="smToggleCellExpand('${escapeHtml(kbQKey)}', event)">${smWorkbenchExpanded.has(kbQKey) ? '收起▲' : '展开▼'}</button>
+                        <button type="button" class="sm-expand-btn" aria-expanded="${smWorkbenchExpanded.has(kbQKey)}" onclick="smToggleCellExpand('${escapeHtml(kbQKey)}', event)">${smWorkbenchExpanded.has(kbQKey) ? '收起▲' : '展开▼'}</button>
                     </div>
                 </td>
                 <td>
                     <div class="sm-cell ${smWorkbenchExpanded.has(kbAKey) ? 'is-expanded' : ''}" data-cell-key="${escapeHtml(kbAKey)}">
                         <textarea rows="3" style="white-space:pre-wrap;" placeholder="-" oninput="smEditMatch(${idx}, 'kb_answer', this.value)" ondblclick="smOpenRowText(${idx}, 'kb_answer')">${escapeHtml(kbAText)}</textarea>
-                        <button type="button" class="sm-expand-btn" onclick="smToggleCellExpand('${escapeHtml(kbAKey)}', event)">${smWorkbenchExpanded.has(kbAKey) ? '收起▲' : '展开▼'}</button>
+                        <button type="button" class="sm-expand-btn" aria-expanded="${smWorkbenchExpanded.has(kbAKey)}" onclick="smToggleCellExpand('${escapeHtml(kbAKey)}', event)">${smWorkbenchExpanded.has(kbAKey) ? '收起▲' : '展开▼'}</button>
                     </div>
                 </td>
                 <td>
@@ -4857,7 +5280,8 @@ function smRenderWorkbench() {
                 </td>
                 <td>
                     <div class="sm-match-cell">
-                        <div>${smStatusBadge(type)}</div>
+                        <div class="sm-match-badges">${smStatusBadge(type)}${smAiReviewBadge(match)}</div>
+                        ${aiReviewDetail ? `<div class="sm-ai-review-detail" title="${escapeHtml(aiReviewDetail)}">${escapeHtml(aiReviewDetail)}</div>` : ''}
                         <select class="form-control" style="height: 34px; font-size: 12px;" title="${escapeHtml(type)}" onchange="smChangeMatchType(${idx}, this.value)">
                             ${matchTypeOptions}
                         </select>
@@ -4867,7 +5291,7 @@ function smRenderWorkbench() {
                 <td>
                     <div class="sm-cell ${smWorkbenchExpanded.has(reasonKey) ? 'is-expanded' : ''}" data-cell-key="${escapeHtml(reasonKey)}">
                         <textarea rows="3" maxlength="80" style="white-space:pre-wrap;" oninput="smEditReason(${idx}, this.value)" ondblclick="smOpenRowText(${idx}, 'reason')">${escapeHtml(reason)}</textarea>
-                        <button type="button" class="sm-expand-btn" onclick="smToggleCellExpand('${escapeHtml(reasonKey)}', event)">${smWorkbenchExpanded.has(reasonKey) ? '收起▲' : '展开▼'}</button>
+                        <button type="button" class="sm-expand-btn" aria-expanded="${smWorkbenchExpanded.has(reasonKey)}" onclick="smToggleCellExpand('${escapeHtml(reasonKey)}', event)">${smWorkbenchExpanded.has(reasonKey) ? '收起▲' : '展开▼'}</button>
                     </div>
                 </td>
                 <td>
@@ -4927,6 +5351,7 @@ function smEditFaq(idx, field, value) {
     if (!row || !row.faq) return;
     if (field !== 'question' && field !== 'answer') return;
     row.faq[field] = value;
+    smSetManualReviewPending(row);
     if (row.match && row.match.type && row.match.type !== '无匹配' && !row.reasonEdited) {
         row.reason = smBuildReason(row.match.type, row.faq.question, row.faq.answer, row.match.kb_question, row.match.kb_answer);
     }
@@ -4939,6 +5364,7 @@ function smEditMatch(idx, field, value) {
     row.match = row.match && typeof row.match === 'object' ? row.match : {};
     if (field !== 'kb_question' && field !== 'kb_answer') return;
     row.match[field] = value;
+    smSetManualReviewPending(row);
     if (row.match && row.match.type && row.match.type !== '无匹配' && !row.reasonEdited) {
         row.reason = smBuildReason(row.match.type, row.faq?.question, row.faq?.answer, row.match.kb_question, row.match.kb_answer);
     }
@@ -4952,6 +5378,7 @@ function smEditFaqModel(idx, value) {
     row.faq.models_raw = v;
     row.faq.models_text = v ? v : '未指定';
     row.models = v ? v.split(/[,，]/).map(s => String(s || '').trim()).filter(Boolean) : [];
+    smSetManualReviewPending(row);
     smUpdateReadyState();
     smScheduleSaveCompareCache();
 }
@@ -4993,6 +5420,12 @@ function smChangeMatchType(idx, matchType) {
     row.match = row.match || {};
     const mt = (matchType === '问题+答案均一致' || matchType === '仅问题一致' || matchType === '仅答案一致' || matchType === '无匹配') ? matchType : '无匹配';
     row.match.type = mt;
+    if (row.match.ai_review_enabled) {
+        row.match.ai_review_status = 'manual_override';
+        row.match.ai_review_blocking = false;
+        row.match.ai_review_manual_override = true;
+        row.match.ai_review_reason = '用户手动修改匹配类型';
+    }
     if (mt === '无匹配') {
         row.match.kb_id = '';
         row.match.kb_question = '';
@@ -5022,6 +5455,7 @@ function smChangeRowMode(idx, mode) {
     const row = smWorkbenchRows[idx];
     if (!row) return;
     row.mode = mode === 'create' ? 'create' : 'update';
+    row.modeEdited = true;
     smRenderWorkbench();
     smUpdateReadyState();
     smScheduleSaveCompareCache();
@@ -5030,6 +5464,10 @@ function smChangeRowMode(idx, mode) {
 function smMarkSubmit(idx) {
     const row = smWorkbenchRows[idx];
     if (!row) return;
+    if (smIsAiReviewBlocking(row)) {
+        if (typeof showToast === 'function') showToast('AI 事实复核未完成，请先人工确认或修改匹配类型', 'warning');
+        return;
+    }
     row.decision = 'submit';
     smUpdateReadyState();
     smRenderWorkbench();
@@ -5210,6 +5648,13 @@ async function smPickManualMatch(resultIndex) {
         row.match.fallback_reason = e?.message || String(e);
         if (!row.reasonEdited) row.reason = `Embedding不可用，字符相似度降级；${smBuildReason(row.match.type, row.faq?.question, row.faq?.answer, kbQ, kbA)}`.slice(0, 80);
     }
+    if (smEmbeddingConfig?.ai_review?.enabled) {
+        row.match.ai_review_enabled = true;
+        row.match.ai_review_status = 'manual_override';
+        row.match.ai_review_blocking = false;
+        row.match.ai_review_manual_override = true;
+        row.match.ai_review_reason = '用户手动选择知识库候选';
+    }
     row.mode = row.match.type === '无匹配' ? 'create' : (row.mode === 'create' ? 'create' : 'update');
     row.decision = 'pending';
     smSetAlgorithmStatus(row.match);
@@ -5239,8 +5684,22 @@ async function smSubmitChanges() {
             if (!q || !a || models.length === 0) invalid.push(Number(x._idx) + 1);
         });
         if (invalid.length) throw new Error(`以下行缺少内容确认或型号绑定：${invalid.join(', ')}`);
+        const blocked = toSubmit.filter(x => smIsAiReviewBlocking(x.r)).map(x => Number(x._idx) + 1);
+        if (blocked.length) throw new Error(`以下行 AI 事实复核未完成，请先人工确认或修改匹配类型：${blocked.join(', ')}`);
 
-        smSetStatusText('smSummary', '提交中...');
+        const selectedCount = smWorkbenchSelected ? smWorkbenchSelected.size : 0;
+        const selectionNote = selectedCount > 0
+            ? `\n\n当前勾选的 ${selectedCount} 条仅用于批量采纳或跳过，不会限制本次提交范围。`
+            : '';
+        const confirmed = await showDangerConfirmModal(
+            '提交智能映射修改',
+            `将提交当前结果中全部 ${toSubmit.length} 条待提交修改，并写入修改记录。${selectionNote}`,
+            `提交 ${toSubmit.length} 条修改`
+        );
+        if (!confirmed) return;
+
+        if (btn) btn.textContent = `正在提交 ${toSubmit.length} 条...`;
+        smSetStatusText('smSummary', `正在提交 ${toSubmit.length} 条修改...`);
         const payload = {
             table: 'knowledge_base_v1',
             items: toSubmit.map(x => ({
@@ -5396,12 +5855,60 @@ async function addLinksBatch(urls, tags) {
 function openLinkImportModal() {
   hideLinkAddError();
   const modal = document.getElementById('linkImportModal');
-  if (modal) modal.style.display = 'block';
+  if (!modal) return;
+  linkImportModalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  modal.style.display = 'block';
+  modal.setAttribute('aria-hidden', 'false');
+  window.setTimeout(() => document.getElementById('urlInput')?.focus(), 0);
 }
 
 function closeLinkImportModal() {
   const modal = document.getElementById('linkImportModal');
-  if (modal) modal.style.display = 'none';
+  if (!modal) return;
+  modal.style.display = 'none';
+  modal.setAttribute('aria-hidden', 'true');
+  const returnFocus = linkImportModalReturnFocus;
+  linkImportModalReturnFocus = null;
+  if (returnFocus && document.contains(returnFocus)) returnFocus.focus();
+}
+
+function setupLinkImportAccessibility() {
+  const modal = document.getElementById('linkImportModal');
+  if (!modal) return;
+  modal.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeLinkImportModal();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(modal.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+    )).filter((el) => el.offsetParent !== null);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+}
+
+function setupKeyboardSortableHeaders() {
+  document.querySelectorAll('th[onclick]').forEach((header) => {
+    if (header.dataset.keyboardSortable === 'true') return;
+    header.dataset.keyboardSortable = 'true';
+    if (!header.hasAttribute('tabindex')) header.setAttribute('tabindex', '0');
+    header.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      header.click();
+    });
+  });
 }
 
 async function addSingleWithDuplicateCheck(url, tags) {
@@ -5591,18 +6098,18 @@ async function batchCopyPreviews() {
       const kbId = item.kb_id && String(item.kb_id).trim() ? String(item.kb_id).trim() : '无ID';
       const typeLabel = _getLinkSourceLabel(item);
       const tags = Array.isArray(item.tags) ? item.tags.filter(t => !_isSysLinkTag(t)).join(',') : '';
+      const safeUrl = normalizeSafeHttpUrl(item.url);
+      const displayUrl = escapeHtml(item.url || '');
       html += '<tr><td>';
-      if (item.type === 'image') {
-        try {
-            const fullUrl = new URL(item.url, window.location.href).href;
-            html += `<img src="${fullUrl}" height="100" />`;
-        } catch (e) {
-            html += `<img src="${item.url}" height="100" />`;
-        }
+      if (item.type === 'image' && safeUrl) {
+        html += `<img src="${escapeHtml(safeUrl)}" height="100" />`;
+      } else if (safeUrl) {
+        html += `<a href="${escapeHtml(safeUrl)}">${displayUrl}</a>`;
       } else {
-        html += `<a href="${item.url}">${item.url}</a>`;
+        html += displayUrl;
       }
-      html += `</td><td><a href="${item.url}">${item.url}</a></td><td>${escapeHtml(typeLabel)}</td><td>${escapeHtml(kbId)}</td><td>${escapeHtml(tags)}</td></tr>`;
+      const linkCell = safeUrl ? `<a href="${escapeHtml(safeUrl)}">${displayUrl}</a>` : displayUrl;
+      html += `</td><td>${linkCell}</td><td>${escapeHtml(typeLabel)}</td><td>${escapeHtml(kbId)}</td><td>${escapeHtml(tags)}</td></tr>`;
     });
     
     html += '</tbody></table>';
@@ -5932,6 +6439,7 @@ function renderLinkRow(item) {
   const tdCheck = document.createElement('td');
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
+  checkbox.setAttribute('aria-label', `选择链接 ${item.kb_id || item.url || item.id}`);
   checkbox.checked = selectedIds.has(item.id);
   checkbox.onchange = (e) => {
     if (e.target.checked) selectedIds.add(item.id);
@@ -5947,15 +6455,23 @@ function renderLinkRow(item) {
   const box = document.createElement('div');
   box.className = 'preview-box';
   
-  if (item.type === 'image') {
+  const safePreviewUrl = normalizeSafeHttpUrl(item.url);
+  if (item.type === 'image' && safePreviewUrl) {
     const img = document.createElement('img');
-    img.src = item.url;
+    img.src = safePreviewUrl;
+    img.alt = `图片预览：${item.kb_id || item.url || '未命名链接'}`;
     img.loading = 'lazy'; // Lazy load
     img.style.cursor = 'pointer';
     img.referrerPolicy = 'no-referrer'; // Fix for hotlink protection
-    img.onclick = () => openModal(item.url);
+    img.onclick = () => openModal(safePreviewUrl);
+    img.tabIndex = 0;
+    img.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      openModal(safePreviewUrl);
+    });
     box.appendChild(img);
-  } else if (item.type === 'video') {
+  } else if (item.type === 'video' && safePreviewUrl) {
     // Optimization: Don't create video element until clicked to prevent lag
     const container = document.createElement('div');
     container.style.position = 'relative';
@@ -5977,7 +6493,7 @@ function renderLinkRow(item) {
     container.onclick = () => {
         container.innerHTML = ''; // Clear placeholder
         const v = document.createElement('video');
-        v.src = item.url;
+        v.src = safePreviewUrl;
         v.controls = true;
         v.autoplay = true;
         v.style.width = '100%';
@@ -5990,11 +6506,19 @@ function renderLinkRow(item) {
         container.appendChild(v);
         container.onclick = null; // Remove handler
     };
+    container.tabIndex = 0;
+    container.setAttribute('role', 'button');
+    container.setAttribute('aria-label', `播放视频：${item.kb_id || item.url || '未命名链接'}`);
+    container.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      container.click();
+    });
     
     box.appendChild(container);
-  } else if (item.type === 'youtube') {
+  } else if (item.type === 'youtube' && safePreviewUrl) {
     const f = document.createElement('iframe');
-    f.src = toYoutubeEmbed(item.url);
+    f.src = toYoutubeEmbed(safePreviewUrl);
     box.appendChild(f);
   } else {
     box.innerHTML = '<span style="color:#999">无预览</span>';
@@ -6011,13 +6535,7 @@ function renderLinkRow(item) {
   tdKbId.title = item.kb_id || '';
   
   if (item.kb_id) {
-      const rawId = item.kb_id;
-      // Split by comma/chinese comma
-      const ids = rawId.split(/[,，]/).map(s => s.trim()).filter(s => s);
-      const idHtml = ids.map(oneId => 
-         `<div class="clickable-id-row"><span class="clickable-id" onclick="searchKBById('${oneId}')" title="点击搜索此ID">${oneId}</span></div>`
-      ).join('');
-      tdKbId.innerHTML = idHtml;
+      appendSearchableKbIds(tdKbId, item.kb_id);
   } else {
       tdKbId.textContent = '-';
   }
@@ -6027,18 +6545,13 @@ function renderLinkRow(item) {
   const tdLink = document.createElement('td');
   tdLink.className = 'link-cell';
   
-  const cleanUrl = item.url.replace(/"/g, '&quot;').replace(/'/g, "\\'"); // Basic escape
   const createdAtSeconds = parseCreatedAtSeconds(item);
   const createdAtText = createdAtSeconds ? new Date(createdAtSeconds * 1000).toLocaleString() : '-';
-  
-  tdLink.innerHTML = `
-    <div class="kb-url-row">
-        <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="copyToClipboard('${cleanUrl}')" title="复制链接"><i class="fas fa-copy"></i></button>
-        <a href="javascript:void(0)" onclick="searchKBByUrl('${cleanUrl}')" title="点击搜索: ${cleanUrl}" class="kb-url-link">${item.url}</a>
-        <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="searchKBByUrl('${cleanUrl}')" title="按此链接搜索"><i class="fas fa-search"></i></button>
-        <a href="${item.url}" target="_blank" title="在新标签页打开" class="kb-url-open-btn kb-mini-action-btn-icon"><i class="fas fa-external-link-alt"></i></a>
-    </div>
-    <div class="meta">时间: ${createdAtText}</div>`;
+  appendKbUrlRow(tdLink, item.url);
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = `时间: ${createdAtText}`;
+  tdLink.appendChild(meta);
   tr.appendChild(tdLink);
 
   const tdLinkSrc = document.createElement('td');
@@ -6055,11 +6568,17 @@ function renderLinkRow(item) {
   (item.tags || []).filter(t => !_isSysLinkTag(t)).forEach(t => {
     const el = document.createElement('span');
     el.className = 'tag';
-    el.innerHTML = `${t} <span class="rm-tag">&times;</span>`;
-    el.querySelector('.rm-tag').addEventListener('click', () => {
+    el.appendChild(document.createTextNode(`${String(t)} `));
+    const removeTag = document.createElement('button');
+    removeTag.type = 'button';
+    removeTag.className = 'rm-tag';
+    removeTag.setAttribute('aria-label', `移除标签 ${String(t)}`);
+    removeTag.textContent = '×';
+    removeTag.addEventListener('click', () => {
       const nextTags = (item.tags || []).filter(x => !_isSysLinkTag(x) && x !== t);
       updateTags(item.id, nextTags);
     });
+    el.appendChild(removeTag);
     tagList.appendChild(el);
   });
   
@@ -6067,6 +6586,7 @@ function renderLinkRow(item) {
   addRow.className = 'add-tag-row';
   const inp = document.createElement('input');
   inp.placeholder = '添加标签...';
+  inp.setAttribute('aria-label', `为链接 ${item.kb_id || item.url || item.id} 添加标签`);
   const btn = document.createElement('button');
   btn.textContent = '添加';
   btn.addEventListener('click', () => {
@@ -9211,6 +9731,21 @@ function _normalizeModScalar(v) {
 }
 
 function _normalizeModListLike(v, options = {}) {
+    if (typeof v === 'string') {
+        let parsed = v.trim();
+        for (let i = 0; i < 2 && parsed; i++) {
+            try {
+                const next = JSON.parse(parsed);
+                if (typeof next === 'string' && next !== parsed) {
+                    parsed = next.trim();
+                    continue;
+                }
+                if (Array.isArray(next)) v = next;
+            } catch {}
+            break;
+        }
+        if (!Array.isArray(v)) v = parsed;
+    }
     const parts = parseSmartListValue(v, { ...options, splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true });
     const out = [];
     const seen = new Set();
@@ -9232,6 +9767,7 @@ function _normalizeModFieldValue(field, value) {
     if (f === 'image_urls' || f === 'video_urls' || f === 'file_urls') return _normalizeModListLike(value, { isUrlList: true });
     if (f === 'link_url') return _normalizeModListLike(value, { isUrlList: true });
     if (f === 'keyword_list' || f === 'error_list' || f === 'similar_questions') return _normalizeModListLike(value, { isUrlList: false });
+    if (f === 'kb_tags') return _normalizeModListLike(value, { isUrlList: false });
     if (f === 'if_bm25') return _normalizeModScalar(value).toLowerCase();
     if (f === 'link_type' || f === 'answer_type' || f === 'question_type') return _normalizeModScalar(value);
     return _normalizeModScalar(value);
@@ -9669,7 +10205,9 @@ function renderModificationsTable() {
         else if (changeType === 'delete') badgeClass = 'badge-danger';
         
         const tdOp = document.createElement('td');
-        tdOp.innerHTML = `<span class="badge ${badgeClass}">${opLabel}</span>`;
+        const actionKind = item.action_kind || '';
+        const actionLabel = actionKind === 'association' ? '型号关联' : (actionKind === 'model_scope_edit' ? '适用型号' : (actionKind === 'content_edit' ? '内容修改' : opLabel));
+        tdOp.innerHTML = `<span class="badge ${badgeClass}">${opLabel}</span><small class="mod-action-kind">${_escapeHtml(actionLabel)}</small>`;
         tr.appendChild(tdOp);
 
         const tdWikiId = document.createElement('td');
@@ -9878,7 +10416,7 @@ function _formatDetailsKV(obj, changedFields, diffMap, side) {
     const fields = [
         'question', 'answer', 'products', 'question_type', 'answer_type', 'error_list',
         'image_urls', 'video_urls', 'file_urls', 'link_type', 'link_url',
-        'similar_questions', 'keyword_list', 'if_bm25'
+        'similar_questions', 'keyword_list', 'if_bm25', 'product_category_name', 'kb_tags'
     ];
     const labelMap = {
         question: '问题',
@@ -9894,7 +10432,9 @@ function _formatDetailsKV(obj, changedFields, diffMap, side) {
         link_url: '跳转链接（url/key）',
         similar_questions: '相似提问',
         keyword_list: '关键词',
-        if_bm25: 'BM25'
+        if_bm25: 'BM25',
+        product_category_name: '型号分类',
+        kb_tags: '标签'
     };
     const wrap = document.createElement('div');
     wrap.className = 'mod-details-kv';
@@ -9924,6 +10464,8 @@ function _formatDetailsKV(obj, changedFields, diffMap, side) {
             } else if (k === 'similar_questions') {
                 val.textContent = parseSmartListValue(v, { splitOnAsciiComma: true }).join(',');
             } else if (k === 'keyword_list') {
+                val.textContent = parseSmartListValue(v, { splitOnAsciiComma: true }).join(',');
+            } else if (k === 'kb_tags') {
                 val.textContent = parseSmartListValue(v, { splitOnAsciiComma: true }).join(',');
             } else if (k === 'error_list') {
                 val.textContent = formatJsonCell(v);
@@ -11078,21 +11620,30 @@ function renderKBTable() {
                 kbPrepareCompactCell(td, col, statusText);
             } else if (col.key === 'id') {
                  const rawId = item.question_wiki_id || item.id || '';
-                 const ids = rawId.split(/[,，]/).map(s => s.trim()).filter(s => s);
-                 
-                const idHtml = ids.map(oneId => 
-                    `<div class="clickable-id-row"><span class="clickable-id" onclick="searchKBById('${oneId}')" title="点击搜索此ID">${oneId}</span></div>`
-                 ).join('');
-
-                 td.innerHTML = `
-                    <div class="kb-id-cell-wrap">
-                        <div class="kb-id-cell-list">${idHtml}</div>
-                        <div class="kb-cell-actions-inline">
-                            <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="copyToClipboard('${rawId}')" title="复制ID"><i class="fas fa-copy"></i></button>
-                            <button type="button" class="kb-mini-action-btn kb-mini-action-btn-edit kb-mini-action-btn-icon" onclick="openKBEditModal('${rawId}')" title="编辑"><i class="fas fa-edit"></i></button>
-                        </div>
-                    </div>
-                 `;
+                 const wrap = document.createElement('div');
+                 wrap.className = 'kb-id-cell-wrap';
+                 const idList = document.createElement('div');
+                 idList.className = 'kb-id-cell-list';
+                 appendSearchableKbIds(idList, rawId);
+                 const actions = document.createElement('div');
+                 actions.className = 'kb-cell-actions-inline';
+                 const copyButton = document.createElement('button');
+                 copyButton.type = 'button';
+                 copyButton.className = 'kb-mini-action-btn kb-mini-action-btn-icon';
+                 copyButton.title = '复制ID';
+                 copyButton.setAttribute('aria-label', '复制 KB ID');
+                 copyButton.innerHTML = '<i class="fas fa-copy" aria-hidden="true"></i>';
+                 copyButton.addEventListener('click', () => copyToClipboard(rawId));
+                 const editButton = document.createElement('button');
+                 editButton.type = 'button';
+                 editButton.className = 'kb-mini-action-btn kb-mini-action-btn-edit kb-mini-action-btn-icon';
+                 editButton.title = '编辑';
+                 editButton.setAttribute('aria-label', `编辑 ${rawId}`);
+                 editButton.innerHTML = '<i class="fas fa-edit" aria-hidden="true"></i>';
+                 editButton.addEventListener('click', () => openKBEditModal(rawId));
+                 actions.append(copyButton, editButton);
+                 wrap.append(idList, actions);
+                 td.appendChild(wrap);
             } else if (col.key === 'image_urls' || col.key === 'video_urls' || col.key === 'file_urls') {
                 let val = item[col.field];
                 let urls = [];
@@ -11102,20 +11653,8 @@ function renderKBTable() {
                 if (!Array.isArray(urls)) {
                     urls = parseSmartListValue(val, { splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true, isUrlList: true });
                 }
-                const html = urls.map(u => {
-                    if (!u) return '';
-                    const cleanUrl = String(u).replace(/[\[\]"']/g, '').trim();
-                    if (!cleanUrl) return '';
-                    let href = cleanUrl;
-                    if (!href.match(/^https?:\/\//i)) href = 'http://' + href;
-                    return `
-                    <div class="kb-url-row">
-                        <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="copyToClipboard('${cleanUrl}')" title="复制链接"><i class="fas fa-copy"></i></button>
-                        <a href="javascript:void(0)" onclick="searchKBByUrl('${cleanUrl}')" title="点击搜索: ${cleanUrl}" class="kb-url-link">${cleanUrl}</a>
-                        <a href="${href}" target="_blank" title="在新标签页打开" class="kb-url-open-btn kb-mini-action-btn-icon"><i class="fas fa-external-link-alt"></i></a>
-                    </div>`;
-                }).join('');
-                td.innerHTML = html || '<span class="cell-empty">-</span>';
+                const appended = urls.reduce((count, url) => count + (appendKbUrlRow(td, url) ? 1 : 0), 0);
+                if (!appended) td.innerHTML = '<span class="cell-empty">-</span>';
                 kbPrepareCompactCell(td, col, urls.join('\n'), { modalAllowed: false });
             } else if (col.key === 'link_url') {
                 const val = String(item[col.field] ?? '').trim();
@@ -11124,20 +11663,8 @@ function renderKBTable() {
                     kbPrepareCompactCell(td, col, '-', { modalAllowed: false });
                 } else {
                     const links = parseSmartListValue(val, { splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true, isUrlList: true });
-                    const html = links.map(u => {
-                        if (!u) return '';
-                        const cleanUrl = String(u).replace(/[\[\]"']/g, '').trim();
-                        if (!cleanUrl) return '';
-                        let href = cleanUrl;
-                        if (!href.match(/^https?:\/\//i)) href = 'http://' + href;
-                        return `
-                        <div class="kb-url-row">
-                            <button type="button" class="kb-mini-action-btn kb-mini-action-btn-icon" onclick="copyToClipboard('${cleanUrl}')" title="复制链接"><i class="fas fa-copy"></i></button>
-                            <a href="javascript:void(0)" onclick="searchKBByUrl('${cleanUrl}')" title="点击搜索: ${cleanUrl}" class="kb-url-link">${cleanUrl}</a>
-                            <a href="${href}" target="_blank" title="在新标签页打开" class="kb-url-open-btn kb-mini-action-btn-icon"><i class="fas fa-external-link-alt"></i></a>
-                        </div>`;
-                    }).join('');
-                    td.innerHTML = html || '<span class="cell-empty">-</span>';
+                    const appended = links.reduce((count, url) => count + (appendKbUrlRow(td, url) ? 1 : 0), 0);
+                    if (!appended) td.innerHTML = '<span class="cell-empty">-</span>';
                     kbPrepareCompactCell(td, col, links.join('\n'), { modalAllowed: false });
                 }
             } else if (col.key === 'bm25') {
@@ -12227,16 +12754,14 @@ function getSelectedKBTable() {
 }
 
 function getKBCompareTable() {
-    const checked = document.querySelector('input[name="kbCompareTable"]:checked');
-    return checked ? checked.value : 'knowledge_base_v1';
+    return 'knowledge_base_v1';
 }
 
 function setKBCompareTable(table) {
-    const value = table === 'knowledge_base_v1_t1' ? 'knowledge_base_v1_t1' : 'knowledge_base_v1';
     document.querySelectorAll('input[name="kbCompareTable"]').forEach(input => {
-        input.checked = input.value === value;
+        input.checked = input.value === 'knowledge_base_v1';
     });
-    kbCompareState.table = value;
+    kbCompareState.table = 'knowledge_base_v1';
 }
 
 function getKBCompareRowId(row) {
@@ -12530,7 +13055,7 @@ function buildKBCompareMergeDraft() {
         .map(field => ({ key: field.key, label: field.label, group: field.group || '' }));
     return {
         table: kbCompareState.table,
-        tableLabel: kbCompareState.table === 'knowledge_base_v1_t1' ? '前刻库' : '此刻库',
+        tableLabel: 'V1',
         editId,
         deleteIds,
         sourceIds: rows.map(getKBCompareRowId).filter(Boolean),
@@ -12685,7 +13210,7 @@ function renderKBCompareSummary() {
     const rows = kbCompareState.rows || [];
     const summaries = kbCompareState.fieldSummaries || [];
     const visible = getKBCompareVisibleSummaries();
-    const tableLabel = kbCompareState.table === 'knowledge_base_v1_t1' ? '前刻库' : '此刻库';
+    const tableLabel = 'V1';
 
     if (meta) {
         const diffCount = summaries.filter(s => s.hasDiff && !s.meta).length;
@@ -13155,9 +13680,7 @@ function renderKBCompareMergeDraft() {
         : '';
     const submitStatus = submitResult
         ? `<div class="kb-compare-draft-status is-${submitResult.success ? 'success' : 'error'}">${escapeHtml(submitResult.message || '')}</div>`
-        : (draft.table === 'knowledge_base_v1'
-            ? `<div class="kb-compare-draft-status">当前选中 ${selectedChangedFields.length} 个字段变更、${selectedDeleteCount} 条删除建议；提交后只把选中项写入修改记录，未选项保留在草稿中继续调整。</div>`
-            : '<div class="kb-compare-draft-status is-warning">前刻库仅用于对比，不能直接提交落地。</div>');
+        : `<div class="kb-compare-draft-status">当前选中 ${selectedChangedFields.length} 个字段变更、${selectedDeleteCount} 条删除建议；提交后只把选中项写入修改记录，未选项保留在草稿中继续调整。</div>`;
 
     el.innerHTML = `
         <div class="kb-compare-draft-head">
@@ -13482,11 +14005,6 @@ async function openKBCompareDraftEditor() {
         if (typeof showToast === 'function') showToast('请先生成合并草稿', 'warning');
         return;
     }
-    if (draft.table !== 'knowledge_base_v1') {
-        if (typeof showToast === 'function') showToast('前刻库仅用于对比，请切换到此刻库后再打开编辑', 'warning');
-        else alert('前刻库仅用于对比，请切换到此刻库后再打开编辑');
-        return;
-    }
     const baseRow = (kbCompareState.rows || []).find(row => getKBCompareRowId(row) === draft.editId);
     await openKBEditModal(draft.editId, { item: baseRow || null });
     setTimeout(() => applyKBCompareDraftDigestToEditor(draft.digest), 0);
@@ -13568,10 +14086,6 @@ async function submitKBCompareMergeDraft() {
     const draft = kbCompareState.mergeDraft || buildKBCompareMergeDraft();
     if (!draft) {
         if (typeof showToast === 'function') showToast('请先生成合并草稿', 'warning');
-        return;
-    }
-    if (draft.table !== 'knowledge_base_v1') {
-        if (typeof showToast === 'function') showToast('前刻库仅用于对比，请切换到此刻库后再提交', 'warning');
         return;
     }
     if (kbCompareState.submittingDraft) return;
@@ -14126,7 +14640,7 @@ async function importKB() {
 
     const ok = await showDangerConfirmModal(
       '全量覆盖确认',
-      `你选择了全量覆盖：将导入 ${overwritePreview.incoming_count || 0} 条记录，当前 V1 有 ${overwritePreview.current_v1_count || 0} 条，评分缓存有 ${overwritePreview.score_count || 0} 条。\n系统会先同步 V1 到 V1T-1，并备份评分缓存；若导入失败会尝试自动恢复。确认继续？`,
+      `你选择了全量覆盖：将导入 ${overwritePreview.incoming_count || 0} 条记录，当前 V1 有 ${overwritePreview.current_v1_count || 0} 条，评分缓存有 ${overwritePreview.score_count || 0} 条。\n系统会先将 V1 和评分缓存备份到本地文件；若导入失败会尝试自动恢复。确认继续？`,
       '确认全量覆盖'
     );
     if (!ok) return;
@@ -14265,32 +14779,6 @@ function renderKbImportSyncAction(syncEvent, syncError) {
     }
   };
   host.append(summary, button);
-}
-
-async function syncKB() {
-  if (!await showDangerConfirmModal('同步确认', '此操作将清空 V1T-1 并用 V1 全量覆盖。确认继续？', '确认同步')) return;
-  
-  const btn = document.getElementById('syncBtn');
-  const status = document.getElementById('syncStatus');
-  
-  if (btn) btn.disabled = true;
-  if (status) status.textContent = '正在同步...';
-  
-  try {
-    const data = await api('/kb/sync', 'POST');
-    if (data.success) {
-      if (status) status.textContent = '✅ 同步完成';
-      alert('同步操作成功完成！');
-      loadKBTable(1);
-    } else {
-      throw new Error(data.message);
-    }
-  } catch (e) {
-    if (status) status.textContent = '❌ 同步失败';
-    alert('同步失败: ' + e.message);
-  } finally {
-    if (btn) btn.disabled = false;
-  }
 }
 
 /**
@@ -14474,10 +14962,6 @@ async function completeRevision(event) {
 window.completeRevision = completeRevision;
 
 async function deleteSelectedKBItems() {
-    if (getSelectedKBTable() !== 'knowledge_base_v1') {
-        showToast('前刻库仅用于对比，不能删除', 'warning');
-        return;
-    }
     if (selectedKBRows.size === 0) {
         alert('请先选择要删除的条目');
         return;
@@ -14581,10 +15065,6 @@ function updateKBBatchEditFormState() {
 window.updateKBBatchEditFormState = updateKBBatchEditFormState;
 
 function openKBBatchEditModal() {
-    if (getSelectedKBTable() !== 'knowledge_base_v1') {
-        showToast('前刻库仅用于对比，不能批量编辑', 'warning');
-        return;
-    }
     if (selectedKBRows.size === 0) {
         showToast('请至少勾选 1 条数据', 'warning');
         return;
@@ -14642,10 +15122,6 @@ function collectKBBatchEditOperations() {
 }
 
 async function submitKBBatchEdit() {
-    if (getSelectedKBTable() !== 'knowledge_base_v1') {
-        showToast('前刻库仅用于对比，不能批量编辑', 'warning');
-        return;
-    }
     let operations;
     try {
         operations = collectKBBatchEditOperations();
@@ -14666,7 +15142,7 @@ async function submitKBBatchEdit() {
     });
     const confirmed = await showDangerConfirmModal(
         '批量编辑确认',
-        `将修改 ${ids.length} 条此刻库数据的 ${fieldNames.join('、')}。每条变更都会写入修改记录。确认继续？`,
+        `将修改 ${ids.length} 条此刻库数据的 ${fieldNames.join('、')}。内容字段变更会写入修改记录，标签调整不会。确认继续？`,
         '确认批量编辑'
     );
     if (!confirmed) return;
@@ -15087,9 +15563,15 @@ let __kbEditSyncOnlineBound = false;
 let __kbEditSyncingPending = false;
 let __kbEditSaving = false;
 let __kbEditCurrentPreviewItem = null;
+let __kbEditBaseVersion = null;
 let __kbEditTemplateRefId = '';
 let __kbEditTemplatePickerBound = false;
 let __kbEditQualityContext = null;
+let __kbEditWorkflowContext = null;
+let __kbEditReferenceCandidates = [];
+let __kbEditConfirmedReferences = [];
+let __kbEditReferenceTimer = null;
+let __kbEditReferenceRequestSeq = 0;
 const KB_EDIT_DRAFT_KEY_PREFIX = 'kb_edit_draft_v1:';
 const KB_EDIT_PENDING_SYNC_KEY = 'kb_edit_pending_sync_v1';
 
@@ -15130,6 +15612,8 @@ function __kbEditCollectDigest() {
         kb_tags_input: get('kb_tags_input'),
         // Template source is a draft/preview hint only; it is never submitted to backend.
         template_ref_id: __kbEditNormalizeText(__kbEditTemplateRefId),
+        // Confirmed references are internal metadata; they do not alter the answer body.
+        confirmed_references: JSON.stringify(__kbEditConfirmedReferences),
     };
 }
 
@@ -15653,6 +16137,13 @@ function __kbEditRestoreDraftDigest(digest) {
     if (tagsEl) tagsEl.value = String(digest.kb_tags_input || '');
     __kbEditTemplateRefId = String(digest.template_ref_id || '').trim();
     __kbEditSyncTemplateReferenceUi();
+    try {
+        const references = JSON.parse(String(digest.confirmed_references || '[]'));
+        __kbEditConfirmedReferences = Array.isArray(references) ? references : [];
+    } catch {
+        __kbEditConfirmedReferences = [];
+    }
+    __kbEditRenderReferenceCandidates();
     const pcInput = document.getElementById('productCategorySelectInput');
     if (pcInput) {
         const raw = String(digest.product_category_name || '');
@@ -15680,6 +16171,16 @@ function __kbEditBuildSubmitPayload() {
     try { __kbAnswerSyncToTextarea({ emit: false }); } catch {}
     const formData = new FormData(form);
     const data = Object.fromEntries(formData.entries());
+    if (!__kbEditIsCreateMode) {
+        const baseDigest = __kbEditInitialDigest || {};
+        const currentDigest = __kbEditCollectDigest();
+        const changedFields = Object.keys(currentDigest).filter((key) => String(currentDigest[key] ?? '') !== String(baseDigest[key] ?? ''));
+        data.base_version = Number.isInteger(Number(__kbEditBaseVersion)) ? Number(__kbEditBaseVersion) : undefined;
+        data.base_values = baseDigest;
+        data.changed_fields = changedFields;
+        data.operation_id = data.operation_id || (window.crypto?.randomUUID ? window.crypto.randomUUID() : `kb-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+        data.source_code = __kbEditWorkflowContext?.sourceCode || __kbEditQualityContext?.sourceCode || 'knowledge_base';
+    }
     const tagsInputEl = document.getElementById('kbEditTagsInput');
     const tagNames = __kbParseTagNames(tagsInputEl?.value);
 
@@ -15721,7 +16222,52 @@ function __kbEditBuildSubmitPayload() {
         data.quality_task_id = __kbEditQualityContext.task_id;
         data.base_update_time = __kbEditQualityContext.base_update_time || '';
     }
+    if (__kbEditWorkflowContext?.changeSource && !data.change_source && !data.source_module) {
+        data.change_source = __kbEditWorkflowContext.changeSource;
+    }
+    data.confirmed_references = __kbEditConfirmedReferences.map(item => ({ wiki_id: String(item?.wiki_id || '').trim() }))
+        .filter(item => item.wiki_id);
     return { data, tagNames };
+}
+
+function __kbEditHandleConflict(conflict, data) {
+    const current = conflict?.current || {};
+    const currentVersion = Number(conflict?.current_version || current?.content_version || 0);
+    const choice = String(window.prompt(
+        '检测到同字段并发修改，请选择：\n1 = 取消提交（保留当前草稿）\n2 = 拉取最新作为基线并继续编辑\n3 = 仍然覆盖（需要再次确认）',
+        '2'
+    ) || '').trim();
+    if (choice === '1' || !choice) return { action: 'cancel' };
+    if (choice === '2') {
+        // Keep the draft in the controls, but move the optimistic-lock base to
+        // the server row so the next submit can be reviewed and merged again.
+        const currentDigest = __kbEditCollectDigest();
+        const baseDigest = {};
+        Object.keys(currentDigest).forEach((key) => {
+            const value = current?.[key];
+            baseDigest[key] = Array.isArray(value) ? value.join('\n') : (value ?? '');
+        });
+        __kbEditBaseVersion = currentVersion || null;
+        __kbEditInitialDigest = baseDigest;
+        showToast('已拉取服务器最新版本作为基线，当前草稿保留，请继续检查后提交。', 'info', 6000);
+        return { action: 'rebase' };
+    }
+    if (choice === '3') {
+        if (!window.confirm('确认用当前草稿覆盖服务器最新版本吗？该操作会记录为“冲突后强制覆盖”。')) {
+            return { action: 'cancel' };
+        }
+        return {
+            action: 'force',
+            data: {
+                ...data,
+                conflict_resolution: 'force',
+                force_version: currentVersion,
+                base_version: currentVersion,
+            },
+        };
+    }
+    showToast('未识别的选项，已取消提交。', 'warning');
+    return { action: 'cancel' };
 }
 
 function __kbEditLoadPendingSyncQueue() {
@@ -16120,6 +16666,155 @@ function kbClearTemplateReference() {
 window.kbSearchTemplateById = kbSearchTemplateById;
 window.kbClearTemplateReference = kbClearTemplateReference;
 
+function __kbEditSetReferenceStatus(text, tone = '') {
+    const statusEl = document.getElementById('kbReferenceStatus');
+    if (!statusEl) return;
+    statusEl.className = 'kb-reference-status' + (tone ? ` is-${tone}` : '');
+    statusEl.textContent = text;
+}
+
+function __kbEditRenderReferenceCandidates() {
+    const panel = document.getElementById('kbEditReferencePanel');
+    const listEl = document.getElementById('kbReferenceCandidates');
+    if (!panel || !listEl) return;
+    panel.style.display = __kbEditIsCreateMode ? '' : 'none';
+    if (!__kbEditIsCreateMode) return;
+
+    const selectedIds = new Set(__kbEditConfirmedReferences.map(item => String(item?.wiki_id || '').trim()).filter(Boolean));
+    const candidateIds = new Set(__kbEditReferenceCandidates.map(item => String(item?.wiki_id || '').trim()).filter(Boolean));
+    const visibleCandidates = [
+        ...__kbEditReferenceCandidates,
+        ...__kbEditConfirmedReferences.filter(item => !candidateIds.has(String(item?.wiki_id || '').trim())),
+    ];
+    listEl.innerHTML = visibleCandidates.map(candidate => {
+        const wikiId = String(candidate?.wiki_id || '').trim();
+        if (!wikiId) return '';
+        const isSelected = selectedIds.has(wikiId);
+        const context = [candidate.product_category_name, candidate.product_name].filter(Boolean).join(' · ');
+        return `<article class="kb-reference-candidate${isSelected ? ' is-selected' : ''}">
+            <div class="kb-reference-candidate-question">${_escapeHtml(candidate.question || '未记录问题内容')}</div>
+            <div class="kb-reference-candidate-answer">${_escapeHtml(candidate.answer_excerpt || candidate.answer || '未记录答案内容')}</div>
+            <div class="kb-reference-candidate-footer">
+                <span class="kb-reference-candidate-reason">${_escapeHtml(candidate.reason || context || '待人工确认')}</span>
+                <button type="button" class="action-btn btn-sm" data-reference-id="${_escapeAttr(wikiId)}" onclick="kbToggleReferenceCandidate(this.dataset.referenceId)">${isSelected ? '取消引用' : '确认引用'}</button>
+            </div>
+        </article>`;
+    }).join('');
+}
+
+function __kbEditResetReferenceSuggestions() {
+    if (__kbEditReferenceTimer) {
+        clearTimeout(__kbEditReferenceTimer);
+        __kbEditReferenceTimer = null;
+    }
+    __kbEditReferenceRequestSeq += 1;
+    __kbEditReferenceCandidates = [];
+    __kbEditConfirmedReferences = [];
+    __kbEditRenderReferenceCandidates();
+    __kbEditSetReferenceStatus('填写问题或答案后，系统会推荐可能相关的已有知识。');
+}
+
+function __kbEditScheduleReferenceCandidates() {
+    if (!__kbEditIsCreateMode) return;
+    if (__kbEditReferenceTimer) clearTimeout(__kbEditReferenceTimer);
+    const digest = __kbEditCollectDigest();
+    if (String(digest.question || '').length + String(digest.answer || '').length < 4) {
+        __kbEditReferenceCandidates = [];
+        __kbEditRenderReferenceCandidates();
+        __kbEditSetReferenceStatus('填写问题或答案后，系统会推荐可能相关的已有知识。');
+        return;
+    }
+    __kbEditReferenceTimer = setTimeout(() => kbRefreshReferenceCandidates(), 700);
+}
+
+async function kbRefreshReferenceCandidates() {
+    if (!__kbEditIsCreateMode) return;
+    if (!navigator.onLine) {
+        __kbEditSetReferenceStatus('当前离线，恢复联网后可刷新推荐。', 'error');
+        return;
+    }
+    if (__kbEditReferenceTimer) {
+        clearTimeout(__kbEditReferenceTimer);
+        __kbEditReferenceTimer = null;
+    }
+    const digest = __kbEditCollectDigest();
+    if (String(digest.question || '').length + String(digest.answer || '').length < 4) {
+        __kbEditReferenceCandidates = [];
+        __kbEditRenderReferenceCandidates();
+        __kbEditSetReferenceStatus('请先填写至少四个字的问题或答案。');
+        return;
+    }
+    const requestSeq = ++__kbEditReferenceRequestSeq;
+    const refreshBtn = document.getElementById('kbReferenceRefreshBtn');
+    if (refreshBtn) refreshBtn.disabled = true;
+    __kbEditSetReferenceStatus('正在推荐可能可引用的知识...');
+    try {
+        const result = await api('/kb/reference-candidates', 'POST', {
+            question: digest.question,
+            answer: digest.answer,
+            product_name: digest.product_name,
+            product_category_name: digest.product_category_name,
+            current_wiki_id: digest.question_wiki_id,
+            limit: 6,
+        });
+        if (requestSeq !== __kbEditReferenceRequestSeq || !__kbEditIsCreateMode) return;
+        if (!result?.success) throw new Error(result?.message || '推荐失败');
+        __kbEditReferenceCandidates = Array.isArray(result.candidates) ? result.candidates : [];
+        __kbEditRenderReferenceCandidates();
+        const selectedCount = __kbEditConfirmedReferences.length;
+        __kbEditSetReferenceStatus(__kbEditReferenceCandidates.length
+            ? `已推荐 ${__kbEditReferenceCandidates.length} 条知识，已确认引用 ${selectedCount} 条。`
+            : `未找到可推荐知识，已确认引用 ${selectedCount} 条。`);
+    } catch (error) {
+        if (requestSeq !== __kbEditReferenceRequestSeq) return;
+        __kbEditSetReferenceStatus('推荐失败：' + (error?.message || String(error)), 'error');
+    } finally {
+        if (requestSeq === __kbEditReferenceRequestSeq && refreshBtn) refreshBtn.disabled = false;
+    }
+}
+
+function kbToggleReferenceCandidate(wikiId) {
+    const id = String(wikiId || '').trim();
+    if (!id || !__kbEditIsCreateMode) return;
+    const selectedIndex = __kbEditConfirmedReferences.findIndex(item => String(item?.wiki_id || '').trim() === id);
+    if (selectedIndex >= 0) {
+        __kbEditConfirmedReferences.splice(selectedIndex, 1);
+    } else {
+        const candidate = __kbEditReferenceCandidates.find(item => String(item?.wiki_id || '').trim() === id);
+        if (!candidate) return;
+        if (__kbEditConfirmedReferences.length >= 8) {
+            showToast('一次最多确认引用 8 条知识', 'warning');
+            return;
+        }
+        __kbEditConfirmedReferences.push(candidate);
+    }
+    __kbEditTouched = true;
+    __kbEditRenderReferenceCandidates();
+    __kbEditSetReferenceStatus(`已确认引用 ${__kbEditConfirmedReferences.length} 条知识；保存后仅记录内部来源。`);
+    __kbEditRefreshDirtyState();
+    __kbEditScheduleDraftSave();
+}
+
+window.kbRefreshReferenceCandidates = kbRefreshReferenceCandidates;
+window.kbToggleReferenceCandidate = kbToggleReferenceCandidate;
+
+async function __kbEditLoadPendingActivity(wikiId) {
+    const panel = document.getElementById('kbEditPendingActivity');
+    const text = document.getElementById('kbEditPendingActivityText');
+    if (!panel || !text || !wikiId) return;
+    panel.style.display = 'none';
+    try {
+        const res = await api(`/kb/${encodeURIComponent(wikiId)}/modification-status`);
+        const activity = res?.pending_activity;
+        if (!res?.success || !activity) return;
+        const when = activity.modification_time ? new Date(activity.modification_time).toLocaleString() : '-';
+        text.textContent = `${when}，${activity.source_module || activity.source_display_name || activity.source_code || '未知来源'}；${res.pending_count || 0} 条未归档修改`;
+        panel.style.display = 'block';
+    } catch (_) {
+        panel.style.display = 'none';
+    }
+}
+
 async function openKBEditModal(id = null, options = {}) {
     const modal = document.getElementById('kbEditModal');
     const form = document.getElementById('kbEditForm');
@@ -16128,6 +16823,7 @@ async function openKBEditModal(id = null, options = {}) {
     const seq = ++__kbEditOpenSeq;
     __kbEditIsCreateMode = !id;
     __kbEditQualityContext = options.qualityTask || null;
+    __kbEditWorkflowContext = options.workflowContext || null;
     __kbEditDraftContextId = String(id || '__new__');
     __kbEditEnsureSyncBindings();
     __kbEditBindTemplatePicker();
@@ -16136,10 +16832,11 @@ async function openKBEditModal(id = null, options = {}) {
     try { __aiCancelAllInFlight('kb-edit-open'); } catch {}
     try { __aiResetKbEditUiState(); } catch {}
     kbLoadClipboardSession();
-    
+
     form.reset();
     __kbEditCurrentPreviewItem = null;
     __kbEditResetTemplatePicker();
+    __kbEditResetReferenceSuggestions();
     document.getElementById('kbEditTitle').innerText = __kbEditQualityContext ? '编辑管控任务内容' : (id ? '编辑数据' : '新增数据');
     const tagsEl = document.getElementById('kbEditTagsInput');
     if (tagsEl) tagsEl.value = '';
@@ -16147,14 +16844,16 @@ async function openKBEditModal(id = null, options = {}) {
 
     // Show early to avoid perceived lag and to ensure form fields are present.
     modal.classList.add('is-open');
+    modal.classList.toggle('kb-edit-from-clone-review', !!__kbEditWorkflowContext);
     modal.style.display = 'flex';
     try { __kbAnswerScheduleLayoutRefresh(); } catch {}
     __kbEditScheduleTopReset();
-    
+
     if (id) {
         const item = options.item || currentKBData.find(i => String(i.question_wiki_id) === String(id) || String(i.id) === String(id));
         if (item) {
             __kbEditCurrentPreviewItem = item;
+            __kbEditBaseVersion = Number.isInteger(Number(item.content_version)) ? Number(item.content_version) : null;
             const formatListTextarea = (value, opts = {}) => {
                 if (value === null || value === undefined) return '';
                 const items = parseSmartListValue(value, opts);
@@ -16239,7 +16938,9 @@ async function openKBEditModal(id = null, options = {}) {
             });
             if (window.updateSelectAllStates) window.updateSelectAllStates();
         }
+        __kbEditLoadPendingActivity(String(id));
     }
+    if (!id) __kbEditBaseVersion = null;
 
     // Load product catalog for checkboxes (async; guard against race when switching items quickly)
     await loadProductCatalogForModal();
@@ -16401,6 +17102,19 @@ function __kbEditBindUiHelpers() {
         });
     }
 
+    form.addEventListener('input', (e) => {
+        const name = String(e.target?.name || '');
+        if (['question', 'answer', 'product_name', 'product_category_name'].includes(name)) {
+            __kbEditScheduleReferenceCandidates();
+        }
+    }, true);
+    form.addEventListener('change', (e) => {
+        const name = String(e.target?.name || '');
+        if (['question', 'answer', 'product_name', 'product_category_name'].includes(name)) {
+            __kbEditScheduleReferenceCandidates();
+        }
+    }, true);
+
     if (productsDetailsEl) {
         productsDetailsEl.addEventListener('toggle', updateProductsToggleText);
     }
@@ -16455,6 +17169,7 @@ function closeKBEditModal(options = {}) {
             modal.style.display = 'none';
         }
         __kbEditQualityContext = null;
+        __kbEditWorkflowContext = null;
         postKbEditEmbedMessage('closed', {
             kbId: kbEditEmbedRequest?.id || __kbEditDraftContextId || '',
             saved: kbEditEmbedSaved,
@@ -17546,7 +18261,7 @@ window.renderExtraModels = function(models) {
         
         container.appendChild(extraSection);
     }
-    
+
     const grid = document.getElementById('extra-product-grid');
     
     models.forEach(model => {
@@ -17674,7 +18389,7 @@ function __kbParseTagNames(input) {
 }
 
 async function saveKBItem() {
-    const { data, tagNames } = __kbEditBuildSubmitPayload();
+    let { data, tagNames } = __kbEditBuildSubmitPayload();
     const savedDiffs = __kbEditBuildSavedDiffs();
     
     const btn = document.getElementById('saveKBItemBtn');
@@ -17690,7 +18405,17 @@ async function saveKBItem() {
             showToast('当前离线，已保存到本地并将在联网后自动同步');
             return;
         }
-        const res = await api('/kb/update', 'POST', data);
+        let res = await api('/kb/update', 'POST', data);
+        if (res?.conflict) {
+            const decision = __kbEditHandleConflict(res, data);
+            if (decision.action === 'rebase') return;
+            if (decision.action === 'force') {
+                data = decision.data;
+                res = await api('/kb/update', 'POST', data);
+            } else {
+                return;
+            }
+        }
         
         // 调试日志：输出完整响应
         console.log('[DEBUG] KB Update Response:', res);
@@ -17759,6 +18484,7 @@ async function saveKBItem() {
         __kbEditInitialDigest = __kbEditCollectDigest();
         __kbEditClearDraft(__kbEditDraftContextId);
         const qualityContext = __kbEditQualityContext;
+        const workflowContext = __kbEditWorkflowContext;
         const graphEditedWikiId = String(knowledgeGraphState.editingWikiId || '').trim();
         closeKBEditModal({ force: true });
         // 保存后必须清空分页缓存，否则会继续命中旧数据导致“预览未更新”。
@@ -17783,6 +18509,11 @@ async function saveKBItem() {
             }
         }
         if (typeof loadModifications === 'function') loadModifications(1);
+        if (workflowContext?.onSaved) {
+            try { await workflowContext.onSaved(savedWikiId, res); } catch (workflowError) {
+                showToast(`候选已保存，但批次刷新失败：${workflowError.message || workflowError}`, 'warning');
+            }
+        }
     } catch (e) {
         alert('保存异常: ' + e.message);
         postKbEditEmbedMessage('error', {
@@ -17954,7 +18685,8 @@ let matrixColumnModelSelected = new Set();
 let matrixAllModels = [];
 let matrixColumnModelUIBound = false;
 let matrixPendingChanges = new Map();
-let matrixSubmitOperationId = null;
+let newProductPendingChangeKeys = new Set();
+let newProductPendingSubmitOperationId = null;
 let matrixSubmitInFlight = false;
 let matrixSubmitAttempt = 0;
 let matrixMarkFilter = { modified: true, unmodified: true };
@@ -18002,13 +18734,50 @@ function recordMatrixPendingChange(change) {
     }
 }
 
+function recordNewProductPendingChanges(changes) {
+    (Array.isArray(changes) ? changes : []).forEach(change => {
+        const key = matrixChangeKey(change?.question_wiki_id, change?.product_name);
+        if (!key || key === '::') return;
+        recordMatrixPendingChange(change);
+        if (matrixPendingChanges.has(key)) newProductPendingChangeKeys.add(key);
+        else newProductPendingChangeKeys.delete(key);
+    });
+    newProductPendingSubmitOperationId = null;
+}
+
+function getNewProductPendingChanges() {
+    const changes = [];
+    newProductPendingChangeKeys.forEach(key => {
+        const change = matrixPendingChanges.get(key);
+        if (change) changes.push(change);
+        else newProductPendingChangeKeys.delete(key);
+    });
+    return changes;
+}
+
+function clearNewProductPendingChanges(changes) {
+    (Array.isArray(changes) ? changes : []).forEach(change => {
+        const key = matrixChangeKey(change?.question_wiki_id, change?.product_name);
+        newProductPendingChangeKeys.delete(key);
+        matrixPendingChanges.delete(key);
+    });
+    newProductPendingSubmitOperationId = null;
+}
+
+function setNewProductEntryPendingSummary(count) {
+    const summaryChanges = document.getElementById('newProductEntryStat-changes');
+    const summaryNote = document.getElementById('newProductEntrySubmitStatus');
+    if (summaryChanges) summaryChanges.textContent = count ? String(count) : '-';
+    if (summaryNote && count === 0) summaryNote.textContent = '暂无待提交修改。';
+}
+
 function setMatrixSubmitButtonLoading(isLoading) {
     const btnSelected = document.getElementById('matrixSubmitChangesBtn');
     const btnAll = document.getElementById('matrixSubmitAllChangesBtn');
     const selectedText = '提交已选修改';
     const allText = '提交全量修改';
     const loadingHtml = '<span class="spinner-border spinner-border-sm"></span> 提交中...';
-    
+
     if (btnSelected) {
         btnSelected.disabled = isLoading;
         btnSelected.innerHTML = isLoading ? loadingHtml : selectedText;
@@ -18218,9 +18987,13 @@ async function submitMatrixChangesInBatches(changes, opts = {}) {
         if (opts && typeof opts.onProgress === 'function') opts.onProgress(batchIndex, totalBatches);
 
         const batch = batches[i];
+        const operationId = opts.operationId
+            ? `${opts.operationId}-${batchIndex}`
+            : matrixRandomId();
         const res = await api('/matrix/submit_changes', 'POST', {
-            operation_id: matrixRandomId(),
+            operation_id: operationId,
             attempt: 1,
+            source_code: opts.sourceCode || 'product_matrix',
             changes: batch
         });
         
@@ -18407,6 +19180,7 @@ function normalizeMatrixEditSource(cellData) {
     if (!cellData) return '';
     const src = (cellData.edit_source || '').toString().trim();
     if (src === 'cell' || src === 'bulk') return src;
+    if (src === 'submitted') return '';
     if (cellData.manual_edit) return 'cell';
     return '';
 }
@@ -18481,25 +19255,16 @@ async function refreshMatrixFilteredTotal() {
 function getMatrixRowMarkerFlags(row) {
     let hasGreen = false;
     let hasRed = false;
-    let hasYellow = false;
     
     const cols = Array.isArray(matrixColumns) ? matrixColumns : [];
     const sourceAvailable = Array.isArray(row?.source_products);
-    const prevAvailable = Array.isArray(row?.prev_products);
     
     const sourceSet = sourceAvailable ? toMatrixNormalizedStringSet(row.source_products) : new Set();
-    const prevSet = prevAvailable ? toMatrixNormalizedStringSet(row.prev_products) : new Set();
     
     for (const prod of cols) {
         const prodKey = (prod ?? '').toString().trim();
         if (!prodKey) continue;
         const prodNorm = normalizeMatrixProductName(prodKey);
-        
-        if (sourceAvailable && prevAvailable) {
-            if (sourceSet.has(prodNorm) !== prevSet.has(prodNorm)) {
-                hasYellow = true;
-            }
-        }
         
         if (sourceAvailable) {
             const cellData = row?.products?.[prodKey];
@@ -18512,10 +19277,10 @@ function getMatrixRowMarkerFlags(row) {
             }
         }
         
-        if (hasGreen && hasRed && hasYellow) break;
+        if (hasGreen && hasRed) break;
     }
     
-    return { hasGreen, hasRed, hasYellow };
+    return { hasGreen, hasRed };
 }
 
 function filterMatrixRowsByMarks(rows) {
@@ -18533,22 +19298,18 @@ function filterMatrixRowsByMarks(rows) {
     });
 }
 
-function renderMatrixCellHtml(isConfigured, editSource, showYellowDiff) {
+function renderMatrixCellHtml(isConfigured, editSource) {
     const statusHtml = isConfigured
         ? '<span class="matrix-cell-configured">✅</span>'
         : '<span class="matrix-cell-unconfigured">⚪</span>';
-    
-    const diffHtml = showYellowDiff
-        ? '<span class="matrix-diff-icon" title="此刻库/前刻库机型不一致">🟡</span>'
-        : '';
-    
+
     if (editSource === 'cell') {
-        return `${statusHtml}${diffHtml}<span class="matrix-origin-icon matrix-origin-cell" title="手动点击单格修改导致与同步源不一致">🔴</span>`;
+        return `${statusHtml}<span class="matrix-origin-icon matrix-origin-cell" title="手动点击单格修改导致与同步源不一致">🔴</span>`;
     }
     if (editSource === 'bulk') {
-        return `${statusHtml}${diffHtml}<span class="matrix-origin-icon matrix-origin-bulk" title="按钮修改导致与同步源不一致">🟢</span>`;
+        return `${statusHtml}<span class="matrix-origin-icon matrix-origin-bulk" title="按钮修改导致与同步源不一致">🟢</span>`;
     }
-    return `${statusHtml}${diffHtml}`;
+    return statusHtml;
 }
 
 function setMatrixChipActive(container, value) {
@@ -19119,17 +19880,14 @@ function renderMatrixTable() {
             const cellData = row.products[prodKey];
             const isConfigured = getMatrixProductConfigured(row, prodKey);
             const sourceAvailable = Array.isArray(row.source_products);
-            const prevAvailable = Array.isArray(row.prev_products);
             const sourceSet = sourceAvailable ? toMatrixNormalizedStringSet(row.source_products) : new Set();
-            const prevSet = prevAvailable ? toMatrixNormalizedStringSet(row.prev_products) : new Set();
             const prodNorm = normalizeMatrixProductName(prodKey);
             const sourceConfigured = sourceSet.has(prodNorm);
             const mismatch = sourceAvailable ? (!!isConfigured !== sourceConfigured) : false;
-            const showYellowDiff = sourceAvailable && prevAvailable ? (sourceSet.has(prodNorm) !== prevSet.has(prodNorm)) : false;
             const editSource = mismatch ? normalizeMatrixEditSource(cellData) : '';
             if (minorityModels.has(prodKey)) td.classList.add('matrix-diff-minority-cell');
             
-            td.innerHTML = renderMatrixCellHtml(!!isConfigured, editSource, showYellowDiff);
+            td.innerHTML = renderMatrixCellHtml(!!isConfigured, editSource);
             td.title = isConfigured ? "已配置 (点击取消)" : "未配置 (点击启用)";
             td.onclick = () => toggleMatrixConfig(row.question_wiki_id, prod, !isConfigured, td);
             tr.appendChild(td);
@@ -19367,9 +20125,6 @@ async function toggleMatrixConfig(wiki_id, product_name, new_status, cellElement
             if (Object.prototype.hasOwnProperty.call(res, 'source_products')) {
                 row.source_products = Array.isArray(res.source_products) ? res.source_products : null;
             }
-            if (Object.prototype.hasOwnProperty.call(res, 'prev_products')) {
-                row.prev_products = Array.isArray(res.prev_products) ? res.prev_products : null;
-            }
         }
         const container = document.getElementById('matrixTableContainer');
         const scrollLeft = container ? container.scrollLeft : 0;
@@ -19418,8 +20173,8 @@ function toggleMatrixRow(id) {
 function updateMatrixBulkToolbarState() {
     const toolbar = document.getElementById('matrixBulkToolbar');
     if (toolbar) toolbar.classList.toggle('d-none', selectedMatrixRows.size === 0);
-    const copyModal = document.getElementById('copyConfigModal');
-    if (copyModal && copyModal.style.display && copyModal.style.display !== 'none') {
+    const copyForm = document.getElementById('copyConfigForm');
+    if (copyForm && !copyForm.closest('#newProductEntryView')?.classList.contains('d-none')) {
         updateCopyScopeSummary();
         refreshCopyScopeCounts();
     }
@@ -19666,12 +20421,324 @@ let copyConfigState = {
     mode: 'model', // 'model' or 'category'
     targets: [],
     availableTargets: [],
+    selectedTargetCandidate: '',
+    availableExcludeTags: [],
+    selectedExcludeTags: new Set(),
+    excludeTagsLoaded: false,
+    excludeTagsStatus: 'idle',
     scopePreviewSeq: 0,
     scopePreviewCounts: {
+        all: null,
         filtered: null,
         selected: null
-    }
+    },
+    scopeExcludedCounts: {
+        all: null,
+        filtered: null,
+        selected: null
+    },
+    activeReviewBatchId: '',
+    reviewBatch: null,
+    selectedReviewItemId: '',
+    cloneOperationId: '',
+    cloneProgressTimer: null,
+    reviewWorkspaceTimer: null,
+    reviewWorkspaceReloading: false,
+    reviewCandidateDetail: null,
+    cloneStartedAt: 0,
+    cloneFailed: false,
 };
+
+function setCopyConfigProgress(progress = {}) {
+    const panel = document.getElementById('copyConfigProgress');
+    const label = document.getElementById('copyConfigProgressLabel');
+    const count = document.getElementById('copyConfigProgressCount');
+    const bar = document.getElementById('copyConfigProgressBar');
+    const detail = document.getElementById('copyConfigProgressDetail');
+    if (!panel || !label || !count || !bar || !detail) return;
+    panel.hidden = false;
+    const status = String(progress.status || 'running');
+    const phase = String(progress.phase || '正在处理');
+    const completed = Number(progress.completed);
+    const total = Number(progress.total);
+    const hasCount = Number.isFinite(completed) && Number.isFinite(total) && total > 0;
+    const percent = hasCount
+        ? Math.min(100, Math.max(0, completed / total * 100))
+        : (status === 'succeeded' ? 100 : null);
+    const errorMessage = String(progress.error_message || '').trim();
+    const progressDetail = String(progress.detail || '').trim();
+    label.textContent = phase;
+    count.textContent = hasCount
+        ? `${completed}/${total}`
+        : (status === 'succeeded' ? '已完成' : status === 'failed' ? '失败' : `${formatCopyElapsed(progress.elapsed_seconds)} · 处理中`);
+    bar.style.width = percent === null ? '35%' : `${percent}%`;
+    bar.classList.toggle('is-indeterminate', status === 'running' && (percent === null || completed === 0));
+    detail.textContent = status === 'failed'
+        ? `失败原因：${errorMessage || progressDetail || '服务未返回具体原因，请稍后再次克隆。'}`
+        : (progressDetail || '处理服务正在工作，请稍候...');
+    panel.classList.toggle('is-error', status === 'failed');
+    if (status === 'failed') copyConfigState.cloneFailed = true;
+}
+
+function getCopyConfigFailureReason(result, fallback = '操作未完成') {
+    const reasons = [];
+    if (result instanceof Error) {
+        reasons.push(result.message);
+    } else if (result && typeof result === 'object') {
+        reasons.push(result.message, result.detail);
+        if (Array.isArray(result.errors)) reasons.push(...result.errors);
+    }
+    const uniqueReasons = Array.from(new Set(
+        reasons
+            .filter(reason => typeof reason === 'string')
+            .map(reason => reason.trim())
+            .filter(Boolean)
+    ));
+    return uniqueReasons.join('；') || fallback;
+}
+
+function formatCopyElapsed(seconds) {
+    const value = Math.max(0, Number(seconds) || 0);
+    if (value < 60) return `${value}秒`;
+    return `${Math.floor(value / 60)}分${String(value % 60).padStart(2, '0')}秒`;
+}
+
+function stopCopyConfigProgressPolling() {
+    if (copyConfigState.cloneProgressTimer) {
+        clearTimeout(copyConfigState.cloneProgressTimer);
+        copyConfigState.cloneProgressTimer = null;
+    }
+}
+
+async function pollCopyConfigProgress(operationId) {
+    stopCopyConfigProgressPolling();
+    const poll = async () => {
+        try {
+            const progress = await api(`/matrix/clone_config/progress/${encodeURIComponent(operationId)}`);
+            if (progress?.success) {
+                setCopyConfigProgress(progress);
+                if (!['succeeded', 'failed'].includes(progress.status)) {
+                    copyConfigState.cloneProgressTimer = setTimeout(poll, 700);
+                }
+            } else {
+                copyConfigState.cloneProgressTimer = setTimeout(poll, 1200);
+            }
+        } catch (error) {
+            setCopyConfigProgress({ phase: '正在处理', detail: '进度暂时不可用，任务仍在等待结果。', elapsed_seconds: Math.floor((Date.now() - copyConfigState.cloneStartedAt) / 1000) });
+            copyConfigState.cloneProgressTimer = setTimeout(poll, 1500);
+        }
+    };
+    await poll();
+}
+
+function getCopyReviewPayload() {
+    const enabled = !!document.getElementById('copyReviewEnabled')?.checked;
+    const methods = [];
+    if (document.getElementById('copyReviewParameterCheck')?.checked) methods.push('parameter_check');
+    if (document.getElementById('copyReviewManualAi')?.checked) methods.push('manual_difference_ai');
+    return {
+        enabled,
+        auto_scan: true,
+        detection_methods: methods,
+        manual_difference_text: document.getElementById('copyReviewManualText')?.value.trim() || ''
+    };
+}
+
+function getCopyTargetMatches(query) {
+    const normalizedQuery = String(query || '').trim().toLowerCase();
+    return (copyConfigState.availableTargets || [])
+        .filter(target => !copyConfigState.targets.includes(target))
+        .filter(target => !normalizedQuery || target.toLowerCase().includes(normalizedQuery))
+        .slice(0, 12);
+}
+
+function renderCopyTargetSuggestions() {
+    const input = document.getElementById('copyTargetInput');
+    const suggestions = document.getElementById('targetSuggestions');
+    if (!input || !suggestions) return;
+    const query = input.value.trim();
+    const matches = getCopyTargetMatches(query);
+    if (!query) {
+        suggestions.innerHTML = '';
+        suggestions.style.display = 'none';
+        input.setAttribute('aria-expanded', 'false');
+        return;
+    }
+    if (!matches.length) {
+        suggestions.innerHTML = '<div class="new-product-entry-suggestion-empty">型号库中没有匹配项，请调整关键词。</div>';
+    } else {
+        suggestions.innerHTML = matches.map(target => `
+            <button type="button" class="new-product-entry-suggestion-item" role="option" aria-selected="false">${escapeHtml(target)}</button>
+        `).join('');
+        suggestions.querySelectorAll('.new-product-entry-suggestion-item').forEach((button, index) => {
+            button.addEventListener('click', () => selectCopyTargetCandidate(matches[index]));
+        });
+    }
+    suggestions.style.display = 'block';
+    input.setAttribute('aria-expanded', 'true');
+}
+
+function selectCopyTargetCandidate(target) {
+    const selected = String(target || '').trim();
+    if (!selected || !(copyConfigState.availableTargets || []).includes(selected)) return;
+    const input = document.getElementById('copyTargetInput');
+    const suggestions = document.getElementById('targetSuggestions');
+    copyConfigState.selectedTargetCandidate = selected;
+    if (input) {
+        input.value = selected;
+        input.setAttribute('aria-expanded', 'false');
+    }
+    if (suggestions) suggestions.style.display = 'none';
+    addCopyTarget(selected);
+}
+window.selectCopyTargetCandidate = selectCopyTargetCandidate;
+
+function updateCopyReviewControls() {
+    const review = getCopyReviewPayload();
+    const methods = document.getElementById('copyReviewMethods');
+    const manualField = document.getElementById('copyReviewManualField');
+    const validation = document.getElementById('copyReviewValidation');
+    const forceSync = document.querySelector('input[name="copyStrategy"][value="force_sync"]');
+    const append = document.querySelector('input[name="copyStrategy"][value="append"]');
+    const submit = document.getElementById('copyConfigSubmitButton');
+    const supportsReview = copyConfigState.mode === 'model';
+    if (methods) methods.disabled = !review.enabled || !supportsReview;
+    if (manualField) manualField.classList.toggle('d-none', !review.enabled || !supportsReview || !review.detection_methods.includes('manual_difference_ai'));
+    if (forceSync) forceSync.disabled = review.enabled;
+    if (review.enabled && append) append.checked = true;
+    let message = '';
+    if (review.enabled && !supportsReview) message = '按分类克隆暂不支持差异校验，请关闭差异校验后继续。';
+    if (review.enabled && review.detection_methods.length === 0) message = '请至少选择一种差异识别方式。';
+    if (review.enabled && review.detection_methods.includes('manual_difference_ai') && !review.manual_difference_text) message = '请输入新旧型号差异。';
+    if (validation) validation.textContent = message;
+    if (submit) submit.disabled = !!message;
+    updateCopySubmitLabel();
+}
+window.updateCopyReviewControls = updateCopyReviewControls;
+
+function updateCopySubmitLabel() {
+    const btn = document.getElementById('copyConfigSubmitButton');
+    if (!btn || btn.disabled && btn.innerText === '处理中...') return;
+    if (copyConfigState.cloneFailed) {
+        btn.innerText = '再次克隆';
+        return;
+    }
+    const strategy = document.querySelector('input[name="copyStrategy"]:checked')?.value || 'append';
+    const reviewEnabled = !!document.getElementById('copyReviewEnabled')?.checked;
+    btn.innerText = strategy === 'force_sync' ? '开始替换' : (reviewEnabled ? '开始克隆' : '开始追加');
+}
+
+async function loadCopyExcludeTags() {
+    copyConfigState.excludeTagsStatus = 'loading';
+    renderCopyExcludeTags();
+    try {
+        copyConfigState.availableExcludeTags = await loadKnowledgeBaseTags();
+        copyConfigState.excludeTagsLoaded = true;
+        copyConfigState.excludeTagsStatus = 'loaded';
+        renderCopyExcludeTags();
+    } catch (error) {
+        copyConfigState.excludeTagsLoaded = false;
+        copyConfigState.excludeTagsStatus = 'error';
+        renderCopyExcludeTags();
+        console.error('Failed to load clone exclusion tags:', error);
+        showToast('知识库标签加载失败，请重试', 'error');
+    }
+}
+window.loadCopyExcludeTags = loadCopyExcludeTags;
+
+function renderCopyExcludeTags() {
+    const options = document.getElementById('copyExcludeTagsOptions');
+    const search = document.getElementById('copyExcludeTagsSearch');
+    const trigger = document.getElementById('copyExcludeTagsTrigger');
+    const value = document.getElementById('copyExcludeTagsValue');
+    const count = document.getElementById('copyExcludeTagsCount');
+    const footer = document.getElementById('copyExcludeTagsFooter');
+    if (!options || !trigger || !value || !count || !footer) return;
+
+    const selected = copyConfigState.selectedExcludeTags;
+    const query = String(search?.value || '').trim().toLocaleLowerCase('zh-CN');
+    const visibleTags = copyConfigState.availableExcludeTags.filter(tag => (
+        !query || tag.toLocaleLowerCase('zh-CN').includes(query)
+    ));
+    if (copyConfigState.excludeTagsStatus === 'loading') {
+        options.innerHTML = '<div class="new-product-entry-multiselect-empty" role="status">正在读取标签...</div>';
+    } else if (copyConfigState.excludeTagsStatus === 'error') {
+        options.innerHTML = '<div class="new-product-entry-multiselect-empty is-error" role="alert"><span>标签加载失败，请重试</span><button type="button" class="tag-load-retry" onclick="loadCopyExcludeTags()">重新加载</button></div>';
+    } else {
+        options.innerHTML = visibleTags.length
+            ? visibleTags.map(tag => {
+                const checked = selected.has(tag);
+                return `<label class="new-product-entry-multiselect-option" role="option" aria-selected="${checked}"><input type="checkbox" data-copy-exclude-tag="${escapeHtml(tag)}" ${checked ? 'checked' : ''}><span>${escapeHtml(tag)}</span></label>`;
+            }).join('')
+            : `<div class="new-product-entry-multiselect-empty">${query ? '没有匹配标签' : '知识库管理中暂无标签'}</div>`;
+    }
+    options.querySelectorAll('[data-copy-exclude-tag]').forEach(input => {
+        input.addEventListener('change', () => setCopyExcludeTag(input.dataset.copyExcludeTag || '', input.checked));
+    });
+
+    const selectedNames = Array.from(selected);
+    value.textContent = selectedNames.length === 0
+        ? '选择知识库管理标签'
+        : (selectedNames.length <= 2 ? selectedNames.join('、') : `${selectedNames.slice(0, 2).join('、')} 等 ${selectedNames.length} 个`);
+    count.textContent = selectedNames.length ? `已选 ${selectedNames.length} 个` : '未选择';
+    footer.textContent = selectedNames.length ? `已选择 ${selectedNames.length} 个标签` : '未选择标签';
+    trigger.classList.toggle('is-selected', selectedNames.length > 0);
+    const clearButton = footer.parentElement?.querySelector('button');
+    if (clearButton) clearButton.disabled = selectedNames.length === 0;
+}
+
+function setCopyExcludeTag(tagName, checked) {
+    const tag = String(tagName || '').trim();
+    if (!tag) return;
+    if (checked) copyConfigState.selectedExcludeTags.add(tag);
+    else copyConfigState.selectedExcludeTags.delete(tag);
+    copyConfigState.cloneOperationId = matrixRandomId();
+    renderCopyExcludeTags();
+    refreshCopyScopeCounts();
+}
+
+function clearCopyExcludeTags(event) {
+    event?.stopPropagation();
+    if (!copyConfigState.selectedExcludeTags.size) return;
+    copyConfigState.selectedExcludeTags.clear();
+    copyConfigState.cloneOperationId = matrixRandomId();
+    renderCopyExcludeTags();
+    refreshCopyScopeCounts();
+}
+window.clearCopyExcludeTags = clearCopyExcludeTags;
+
+function toggleCopyExcludeTags(event) {
+    event?.stopPropagation();
+    const trigger = document.getElementById('copyExcludeTagsTrigger');
+    const popover = document.getElementById('copyExcludeTagsPopover');
+    if (!trigger || !popover) return;
+    const shouldOpen = popover.hidden;
+    popover.hidden = !shouldOpen;
+    trigger.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+    if (shouldOpen) {
+        if (copyConfigState.excludeTagsStatus === 'idle' || copyConfigState.excludeTagsStatus === 'error') {
+            loadCopyExcludeTags();
+        }
+        setTimeout(() => document.getElementById('copyExcludeTagsSearch')?.focus(), 0);
+    }
+}
+window.toggleCopyExcludeTags = toggleCopyExcludeTags;
+
+function closeCopyExcludeTags() {
+    const trigger = document.getElementById('copyExcludeTagsTrigger');
+    const popover = document.getElementById('copyExcludeTagsPopover');
+    if (popover) popover.hidden = true;
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+}
+
+function getCopyExcludeTagNames() {
+    return Array.from(copyConfigState.selectedExcludeTags || []);
+}
+
+function withCopyExcludeTags(scope) {
+    const excludeTagNames = getCopyExcludeTagNames();
+    return excludeTagNames.length ? { ...scope, exclude_tag_names: excludeTagNames } : scope;
+}
 
 function getCopyScopeMode() {
     return document.querySelector('input[name="copyScope"]:checked')?.value || 'all';
@@ -19747,55 +20814,74 @@ function getCopyPreviewCount(result) {
     return Number.isFinite(count) ? count : null;
 }
 
+function getCopyPreviewExcludedCount(result) {
+    if (!result || result.status !== 'fulfilled' || !result.value?.success) return null;
+    const count = Number(result.value.excluded_count);
+    return Number.isFinite(count) ? count : null;
+}
+
 async function refreshCopyScopeCounts() {
-    const modal = document.getElementById('copyConfigModal');
-    if (!modal || modal.style.display === 'none') return;
+    const form = document.getElementById('copyConfigForm');
+    if (!form || form.closest('#newProductEntryView')?.classList.contains('d-none')) return;
 
     const selectedCount = selectedMatrixRows ? selectedMatrixRows.size : 0;
     const { mode, source } = getCopySourcePayload();
     const seq = ++copyConfigState.scopePreviewSeq;
 
     if (!source) {
-        copyConfigState.scopePreviewCounts = { filtered: null, selected: null };
+        copyConfigState.scopePreviewCounts = { all: null, filtered: null, selected: null };
+        copyConfigState.scopeExcludedCounts = { all: null, filtered: null, selected: null };
         setCopyScopeCountBadge('filtered', '待选择源', 'muted');
         setCopyScopeCountBadge('selected', `已选 ${selectedCount} 条`, selectedCount > 0 ? 'warning' : 'muted');
         updateCopyScopeSummary();
         return;
     }
 
-    copyConfigState.scopePreviewCounts = { filtered: null, selected: null };
+    copyConfigState.scopePreviewCounts = { all: null, filtered: null, selected: null };
+    copyConfigState.scopeExcludedCounts = { all: null, filtered: null, selected: null };
     setCopyScopeCountBadge('filtered', '计算中...', 'loading');
     setCopyScopeCountBadge('selected', selectedCount > 0 ? '计算中...' : '命中 0 条', selectedCount > 0 ? 'loading' : 'muted');
     updateCopyScopeSummary();
 
     const selectedIds = Array.from(selectedMatrixRows || []);
+    const allPreview = api('/matrix/clone_config/preview', 'POST', {
+        mode,
+        source,
+        scope: withCopyExcludeTags({ mode: 'all' })
+    });
     const filteredPreview = api('/matrix/clone_config/preview', 'POST', {
         mode,
         source,
-        scope: {
+        scope: withCopyExcludeTags({
             mode: 'filtered',
             filters: getMatrixCloneFilterPayload()
-        }
+        })
     });
     const selectedPreview = selectedIds.length > 0
         ? api('/matrix/clone_config/preview', 'POST', {
             mode,
             source,
-            scope: {
+            scope: withCopyExcludeTags({
                 mode: 'selected',
                 wiki_ids: selectedIds
-            }
+            })
         })
         : Promise.resolve({ success: true, count: 0, source_count: 0 });
 
-    const [filteredResult, selectedResult] = await Promise.allSettled([filteredPreview, selectedPreview]);
+    const [allResult, filteredResult, selectedResult] = await Promise.allSettled([allPreview, filteredPreview, selectedPreview]);
     if (seq !== copyConfigState.scopePreviewSeq) return;
 
     const filteredCount = getCopyPreviewCount(filteredResult);
     const selectedMatchedCount = getCopyPreviewCount(selectedResult);
     copyConfigState.scopePreviewCounts = {
+        all: getCopyPreviewCount(allResult),
         filtered: filteredCount,
         selected: selectedMatchedCount
+    };
+    copyConfigState.scopeExcludedCounts = {
+        all: getCopyPreviewExcludedCount(allResult),
+        filtered: getCopyPreviewExcludedCount(filteredResult),
+        selected: getCopyPreviewExcludedCount(selectedResult)
     };
 
     if (filteredCount === null) {
@@ -19818,13 +20904,17 @@ function updateCopyScopeSummary() {
     if (!summary) return;
 
     const scopeMode = getCopyScopeMode();
+    const excludedCount = copyConfigState.scopeExcludedCounts?.[scopeMode];
+    const exclusionText = typeof excludedCount === 'number' && excludedCount > 0
+        ? `，已按标签排除 ${excludedCount} 条`
+        : '';
     if (scopeMode === 'selected') {
         const count = selectedMatrixRows ? selectedMatrixRows.size : 0;
         const { source } = getCopySourcePayload();
         const matchedCount = copyConfigState.scopePreviewCounts?.selected;
         if (source && typeof matchedCount === 'number') {
             summary.innerText = matchedCount > 0
-                ? `将仅克隆已勾选且匹配当前源的 ${matchedCount} 条知识数据。`
+                ? `将仅克隆已勾选且匹配当前源的 ${matchedCount} 条知识数据${exclusionText}。`
                 : (count > 0 ? '已勾选数据中没有匹配当前源的知识条目。' : '当前未勾选数据，请先在矩阵表格中勾选要克隆的知识条目。');
             summary.style.color = matchedCount > 0 ? '#555' : '#b45309';
             return;
@@ -19842,8 +20932,8 @@ function updateCopyScopeSummary() {
         const matchedCount = copyConfigState.scopePreviewCounts?.filtered;
         if (source && typeof matchedCount === 'number') {
             summary.innerText = labels.length > 0
-                ? `当前筛选与源条件命中 ${matchedCount} 条。筛选条件：${labels.join('；')}。`
-                : `当前没有有效筛选条件，执行时将等同全部源数据；当前源命中 ${matchedCount} 条。`;
+                ? `当前筛选与源条件最终命中 ${matchedCount} 条${exclusionText}。筛选条件：${labels.join('；')}。`
+                : `当前没有有效筛选条件，执行时将等同全部源数据；当前源最终命中 ${matchedCount} 条${exclusionText}。`;
             summary.style.color = matchedCount > 0 ? '#555' : '#b45309';
             return;
         }
@@ -19854,35 +20944,52 @@ function updateCopyScopeSummary() {
         return;
     }
 
-    summary.innerText = '将克隆全部源数据。';
-    summary.style.color = '#555';
+    const allCount = copyConfigState.scopePreviewCounts?.all;
+    summary.innerText = typeof allCount === 'number'
+        ? `将克隆当前源最终命中的 ${allCount} 条知识数据${exclusionText}。`
+        : `将克隆全部源数据${getCopyExcludeTagNames().length ? '，并排除所选标签内的 KB' : ''}。`;
+    summary.style.color = typeof allCount === 'number' && allCount === 0 ? '#b45309' : '#555';
 }
 window.updateCopyScopeSummary = updateCopyScopeSummary;
 
 function buildCopyScopePayload() {
     const scopeMode = getCopyScopeMode();
     if (scopeMode === 'selected') {
-        return {
+        return withCopyExcludeTags({
             mode: 'selected',
             wiki_ids: Array.from(selectedMatrixRows || [])
-        };
+        });
     }
     if (scopeMode === 'filtered') {
-        return {
+        return withCopyExcludeTags({
             mode: 'filtered',
             filters: getMatrixCloneFilterPayload()
-        };
+        });
     }
-    return { mode: 'all' };
+    return withCopyExcludeTags({ mode: 'all' });
 }
 
 async function openCopyConfigModal() {
-    const modal = document.getElementById('copyConfigModal');
-    if (!modal) return;
+    const form = document.getElementById('copyConfigForm');
+    if (!form) return;
+    form.classList.remove('is-reviewing');
     
     // Reset State
     copyConfigState.targets = [];
-    copyConfigState.scopePreviewCounts = { filtered: null, selected: null };
+    copyConfigState.selectedTargetCandidate = '';
+    copyConfigState.cloneOperationId = matrixRandomId();
+    copyConfigState.cloneFailed = false;
+    stopCopyConfigProgressPolling();
+    const progressPanel = document.getElementById('copyConfigProgress');
+    if (progressPanel) progressPanel.hidden = true;
+    copyConfigState.scopePreviewCounts = { all: null, filtered: null, selected: null };
+    copyConfigState.scopeExcludedCounts = { all: null, filtered: null, selected: null };
+    copyConfigState.selectedExcludeTags.clear();
+    closeCopyExcludeTags();
+    const excludeSearch = document.getElementById('copyExcludeTagsSearch');
+    if (excludeSearch) excludeSearch.value = '';
+    renderCopyExcludeTags();
+    loadCopyExcludeTags();
     renderCopyTargets();
     
     // Clear Inputs
@@ -19895,6 +21002,17 @@ async function openCopyConfigModal() {
     const targetInput = document.getElementById('copyTargetInput');
     if (targetInput) targetInput.value = '';
 
+    const reviewEnabled = document.getElementById('copyReviewEnabled');
+    const parameterCheck = document.getElementById('copyReviewParameterCheck');
+    const manualAi = document.getElementById('copyReviewManualAi');
+    const manualText = document.getElementById('copyReviewManualText');
+    if (reviewEnabled) reviewEnabled.checked = true;
+    if (parameterCheck) parameterCheck.checked = true;
+    if (manualAi) manualAi.checked = false;
+    if (manualText) manualText.value = '';
+    const appendStrategy = document.querySelector('input[name="copyStrategy"][value="append"]');
+    if (appendStrategy) appendStrategy.checked = true;
+
     const scopeAll = document.querySelector('input[name="copyScope"][value="all"]');
     if (scopeAll) scopeAll.checked = true;
     
@@ -19905,76 +21023,45 @@ async function openCopyConfigModal() {
     const catStats = document.getElementById('copyCategoryStats');
     if (catStats) catStats.innerText = '请选择源分类...';
     
-    // Show Modal
-    modal.style.display = 'flex';
+    form.classList.add('is-active');
+    document.getElementById('copyConfigFormTitle')?.scrollIntoView({behavior: 'smooth', block: 'start'});
     updateCopyScopeSummary();
     
     // Switch to default mode (this loads sources)
     switchCopyMode('model');
 
-    const updateBtnLabel = () => {
-        const btn = document.querySelector('#copyConfigModal .primary-btn');
-        if (!btn) return;
-        const strategy = document.querySelector('input[name="copyStrategy"]:checked')?.value || 'append';
-        btn.innerText = strategy === 'force_sync' ? '开始替换' : '开始追加';
-    };
-    updateBtnLabel();
+    updateCopySubmitLabel();
     const strategyRadios = document.querySelectorAll('input[name="copyStrategy"]');
     strategyRadios.forEach(r => {
         if (r.dataset.listenerAttached) return;
-        r.addEventListener('change', updateBtnLabel);
+        r.addEventListener('change', updateCopySubmitLabel);
         r.dataset.listenerAttached = 'true';
     });
+    updateCopyReviewControls();
     
     // Setup event listener for input (if not already attached)
     const input = document.getElementById('copyTargetInput');
     if (input && !input.dataset.listenerAttached) {
-        // Enter key
-        input.addEventListener('keypress', (e) => {
+        input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 addCopyTarget();
             }
         });
 
-        // Autocomplete Input
         const suggestions = document.getElementById('targetSuggestions');
-        input.addEventListener('input', (e) => {
-            const val = e.target.value.trim().toLowerCase();
-            if (!val) {
-                suggestions.style.display = 'none';
-                return;
-            }
-            
-            const matches = (copyConfigState.availableTargets || []).filter(t => 
-                t.toLowerCase().includes(val) && !copyConfigState.targets.includes(t)
-            );
-            
-            if (matches.length > 0) {
-                suggestions.innerHTML = matches.map(t => 
-                    `<div class="suggestion-item" style="padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;">${t}</div>`
-                ).join('');
-                suggestions.style.display = 'block';
-                
-                // Add click listeners to items
-                suggestions.querySelectorAll('.suggestion-item').forEach(item => {
-                    item.addEventListener('click', () => {
-                        input.value = item.innerText;
-                        suggestions.style.display = 'none';
-                        input.focus();
-                    });
-                    item.addEventListener('mouseover', () => item.style.backgroundColor = '#f0f0f0');
-                    item.addEventListener('mouseout', () => item.style.backgroundColor = 'white');
-                });
-            } else {
-                suggestions.style.display = 'none';
-            }
+        input.addEventListener('input', () => {
+            copyConfigState.selectedTargetCandidate = '';
+            renderCopyTargetSuggestions();
         });
 
-        // Hide on outside click
         document.addEventListener('click', (e) => {
             if (e.target !== input && !suggestions.contains(e.target)) {
                 suggestions.style.display = 'none';
+                input.setAttribute('aria-expanded', 'false');
+            }
+            if (!document.getElementById('copyExcludeTagsSelector')?.contains(e.target)) {
+                closeCopyExcludeTags();
             }
         });
 
@@ -19983,18 +21070,26 @@ async function openCopyConfigModal() {
 }
 
 function closeCopyConfigModal() {
-    const modal = document.getElementById('copyConfigModal');
-    if (modal) modal.style.display = 'none';
+    stopCopyConfigProgressPolling();
+    document.getElementById('copyConfigForm')?.classList.remove('is-active');
 }
 
 function switchCopyMode(mode) {
     copyConfigState.mode = mode;
+    if (mode !== 'model') {
+        const reviewEnabled = document.getElementById('copyReviewEnabled');
+        if (reviewEnabled?.checked) {
+            reviewEnabled.checked = false;
+            showToast('按分类克隆暂不支持差异校验，已关闭差异校验。', 'info');
+        }
+    }
     
     // Update Tabs UI
     const tabModel = document.getElementById('tab-copy-model');
     const tabCategory = document.getElementById('tab-copy-category');
     
     if (mode === 'model') {
+        if (!tabModel || !tabCategory) return;
         tabModel.classList.add('active');
         tabModel.style.borderBottom = '3px solid #9B59B6';
         tabModel.style.color = '#9B59B6';
@@ -20005,8 +21100,8 @@ function switchCopyMode(mode) {
         tabCategory.style.color = '#666';
         tabCategory.style.fontWeight = 'normal';
         
-        document.getElementById('copy-model-content').style.display = 'block';
-        document.getElementById('copy-category-content').style.display = 'none';
+        document.getElementById('copy-model-content').classList.remove('d-none');
+        document.getElementById('copy-category-content').classList.add('d-none');
     } else {
         tabCategory.classList.add('active');
         tabCategory.style.borderBottom = '3px solid #9B59B6';
@@ -20018,8 +21113,8 @@ function switchCopyMode(mode) {
         tabModel.style.color = '#666';
         tabModel.style.fontWeight = 'normal';
         
-        document.getElementById('copy-model-content').style.display = 'none';
-        document.getElementById('copy-category-content').style.display = 'block';
+        document.getElementById('copy-model-content').classList.add('d-none');
+        document.getElementById('copy-category-content').classList.remove('d-none');
     }
     
     // Reset Stats
@@ -20029,6 +21124,7 @@ function switchCopyMode(mode) {
     // Load sources for the selected mode
     loadCopySources();
     refreshCopyScopeCounts();
+    updateCopyReviewControls();
 }
 
 async function loadCopySources() {
@@ -20047,7 +21143,7 @@ async function loadCopySources() {
             const select = document.getElementById('copySourceModel');
             if (select) {
                 select.innerHTML = '<option value="">请选择...</option>' + 
-                    catalogProducts.map(p => `<option value="${p}">${p}</option>`).join('');
+                    catalogProducts.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
             }
         } else {
             // Fetch Categories for Source Category Select (Use Model Mappings as requested)
@@ -20057,7 +21153,7 @@ async function loadCopySources() {
             const select = document.getElementById('copySourceCategory');
             if (select) {
                 select.innerHTML = '<option value="">请选择...</option>' + 
-                    categories.map(c => `<option value="${c}">${c}</option>`).join('');
+                    categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
             }
         }
         refreshCopyScopeCounts();
@@ -20107,20 +21203,35 @@ async function fetchCopyStats() {
     }
 }
 
-function addCopyTarget() {
+function addCopyTarget(targetCandidate = '') {
     const input = document.getElementById('copyTargetInput');
     if (!input) return;
-    
-    const val = input.value.trim();
-    if (!val) return;
+    const val = String(targetCandidate || copyConfigState.selectedTargetCandidate || '').trim();
+    if (!val) {
+        showToast('请先从下方型号库候选中点选目标型号', 'warning');
+        renderCopyTargetSuggestions();
+        return;
+    }
+    if (!(copyConfigState.availableTargets || []).includes(val)) {
+        showToast('目标型号必须从型号库候选中选择', 'warning');
+        return;
+    }
     
     if (copyConfigState.targets.includes(val)) {
         showToast('该机型已添加', 'warning');
         return;
     }
+    if (getCopyReviewPayload().enabled && copyConfigState.targets.length >= 1) {
+        showToast('第一期差异校验仅支持一个目标机型', 'warning');
+        return;
+    }
     
     copyConfigState.targets.push(val);
     input.value = '';
+    copyConfigState.selectedTargetCandidate = '';
+    const suggestions = document.getElementById('targetSuggestions');
+    if (suggestions) suggestions.style.display = 'none';
+    input.setAttribute('aria-expanded', 'false');
     renderCopyTargets();
 }
 
@@ -20140,10 +21251,13 @@ function renderCopyTargets() {
     
     container.innerHTML = copyConfigState.targets.map(t => `
         <span class="tag" style="background: #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 16px; display: inline-flex; align-items: center; margin: 2px; font-size: 14px;">
-            ${t}
-            <span onclick="removeCopyTarget('${t}')" style="cursor: pointer; margin-left: 8px; font-weight: bold; font-size: 16px; line-height: 1;">&times;</span>
+            ${escapeHtml(t)}
+            <button type="button" data-copy-target="${escapeHtml(t)}" aria-label="移除目标型号 ${escapeHtml(t)}" style="cursor: pointer; margin-left: 8px; font-weight: bold; font-size: 16px; line-height: 1; border: 0; background: transparent; color: inherit;" >&times;</button>
         </span>
     `).join('');
+    container.querySelectorAll('[data-copy-target]').forEach(button => {
+        button.addEventListener('click', () => removeCopyTarget(button.dataset.copyTarget || ''));
+    });
 }
 
 async function executeCopyConfig() {
@@ -20163,6 +21277,26 @@ async function executeCopyConfig() {
     
     if (copyConfigState.targets.length === 0) {
         showToast('请至少添加一个目标机型', 'error');
+        return;
+    }
+
+    const review = getCopyReviewPayload();
+    if (review.enabled && mode !== 'model') {
+        showToast('第一期差异校验仅支持按源机型克隆', 'warning');
+        return;
+    }
+    if (review.enabled && copyConfigState.targets.length !== 1) {
+        showToast('第一期差异校验仅支持一个目标机型', 'warning');
+        return;
+    }
+    if (review.enabled && review.detection_methods.length === 0) {
+        showToast('请至少选择一种差异识别方式', 'warning');
+        updateCopyReviewControls();
+        return;
+    }
+    if (review.enabled && review.detection_methods.includes('manual_difference_ai') && !review.manual_difference_text) {
+        showToast('请输入新旧型号差异', 'warning');
+        updateCopyReviewControls();
         return;
     }
 
@@ -20189,61 +21323,1300 @@ async function executeCopyConfig() {
     }
     
     // UI Loading state
-    const btn = document.querySelector('#copyConfigModal .primary-btn');
-    const originalText = btn.innerText;
+    const btn = document.getElementById('copyConfigSubmitButton');
+    const operationId = copyConfigState.cloneOperationId || (copyConfigState.cloneOperationId = matrixRandomId());
+    copyConfigState.cloneFailed = false;
+    copyConfigState.cloneStartedAt = Date.now();
+    setCopyConfigProgress({ phase: '正在准备', detail: '正在提交处理任务...', elapsed_seconds: 0 });
+    pollCopyConfigProgress(operationId);
     if (btn) {
-        btn.innerText = '正在处理...';
+        btn.innerText = '处理中...';
         btn.disabled = true;
     }
     
     try {
         const res = await api('/matrix/clone_config', 'POST', {
+            operation_id: operationId,
             mode,
             source,
             targets: copyConfigState.targets,
             strategy,
-            scope
+            scope,
+            review
         });
         
         if (res.success) {
+            const isBackgroundReview = !!(
+                res.review_batch_id
+                && (res.background || res.accepted || cloneReviewProcessingStatuses.has(String(res.review_status || res.status || '')))
+            );
+            setCopyConfigProgress({
+                status: isBackgroundReview ? 'running' : 'succeeded',
+                phase: isBackgroundReview ? '批次已创建' : '已完成',
+                detail: isBackgroundReview ? '正在后台生成草稿，已打开复核工作区。' : '处理完成',
+                elapsed_seconds: Math.floor((Date.now() - copyConfigState.cloneStartedAt) / 1000),
+            });
             const removed = res.removed_count || 0;
             const sourceCountText = typeof res.source_count === 'number' ? `，命中源数据 ${res.source_count} 条` : '';
-            showToast(`成功更新 ${res.updated_count} 条记录${removed ? `，移除 ${removed} 条源机型关联` : ''}${sourceCountText}`, 'success');
+            const hasReview = !!res.review_batch_id;
+            if (!hasReview) {
+                showToast(`成功更新 ${res.updated_count} 条记录${removed ? `，移除 ${removed} 条源机型关联` : ''}${sourceCountText}`, 'success');
+            } else if (isBackgroundReview) {
+                showToast(`复核批次已创建${sourceCountText}；后台生成和校验将继续，可先处理已就绪条目`, 'info', 6000);
+            } else {
+                showToast(`目标机型草稿已生成${sourceCountText}，尚未写入矩阵；正在打开克隆后差异校验`, 'info', 6000);
+            }
             const pending = Array.isArray(res.pending_changes) ? res.pending_changes : [];
-            if (pending.length > 0) {
-                pending.forEach(c => recordMatrixPendingChange({
+            if (pending.length > 0 && !hasReview) {
+                recordNewProductPendingChanges(pending.map(c => ({
                     question_wiki_id: c.question_wiki_id,
                     product_name: c.product_name,
                     old_is_configured: !!c.old_is_configured,
                     new_is_configured: !!c.new_is_configured,
                     edit_source: c.edit_source || 'bulk'
-                }));
-                showToast(`已生成待提交修改 ${pending.length} 条，请点击“提交修改”`, 'info', 5000);
+                })));
+                setNewProductEntryPendingSummary(getNewProductPendingChanges().length);
+                document.getElementById('newProductEntrySubmitStatus').textContent = '已生成待提交修改，可正式写入矩阵。';
+                showToast(`已生成待提交修改 ${pending.length} 条，请点击“提交矩阵修改”`, 'info', 5000);
             }
+            document.getElementById('copyConfigFormState').textContent = isBackgroundReview ? '正在后台生成草稿' : (hasReview ? '草稿已生成，等待差异处理' : '草稿已生成');
+            document.getElementById('newProductEntryBatchStatus').textContent = hasReview ? '批次已创建，正在打开差异工作区' : '草稿已生成';
+            document.getElementById('newProductEntryStep-configure')?.classList.add('is-complete');
+            document.getElementById('newProductEntryStep-review')?.classList.add('is-current');
+            document.getElementById('newProductEntryStep-configure')?.classList.remove('is-current');
             closeCopyConfigModal();
             // Refresh matrix view if it's currently active
             if (currentTab === 'matrixView') {
                 loadMatrixData(matrixCurrentPage || 1);
             }
+            if (res.review_batch_id) {
+                await openCloneReviewWorkspace(res.review_batch_id);
+            }
         } else {
-            showToast('操作失败: ' + (res.message || '未知错误'), 'error');
+            const failureReason = getCopyConfigFailureReason(res);
+            copyConfigState.cloneFailed = true;
+            copyConfigState.cloneOperationId = '';
+            setCopyConfigProgress({
+                status: 'failed',
+                phase: '克隆失败',
+                detail: '未创建新品批次，可保留当前配置再次克隆。',
+                error_message: failureReason,
+            });
+            const formState = document.getElementById('copyConfigFormState');
+            if (formState) formState.textContent = '上次克隆失败，可再次尝试';
+            showToast(`克隆失败：${failureReason}`, 'error', 8000);
         }
     } catch (e) {
+        const failureReason = getCopyConfigFailureReason(e, '请求未完成');
+        copyConfigState.cloneFailed = true;
+        setCopyConfigProgress({
+            status: 'failed',
+            phase: '请求失败',
+            detail: '当前请求结果未确认，将使用同一操作标识再次查询或克隆。',
+            error_message: failureReason,
+        });
         console.error('Execute copy config error:', e);
-        showToast('请求错误: ' + e.message, 'error');
+        showToast(`克隆请求失败：${failureReason}`, 'error', 8000);
     } finally {
+        stopCopyConfigProgressPolling();
         if (btn) {
-            btn.innerText = originalText;
             btn.disabled = false;
+            updateCopySubmitLabel();
         }
     }
 }
+
+const cloneReviewRiskLabels = { high: '高', medium: '中', default: '默认' };
+const cloneReviewDecisionLabels = {
+    pending: '待决定', keep: '保留', link_existing: '关联已有', remove_target: '移除目标', defer: '暂缓确认'
+};
+const cloneReviewActionLabels = {
+    keep: '建议保留', link_existing: '建议关联已有', remove_target: '建议移除', defer: '需要确认'
+};
+const cloneReviewAiStatusLabels = {
+    not_required: '未使用',
+    completed_ai: 'AI 已补充规则',
+    completed_ai_no_change: 'AI 已执行，无需补充',
+    completed_ai_fallback: 'AI 调用失败，已使用规则基准',
+    completed_deterministic: '仅使用规则基准',
+    needs_confirmation: '尚未形成可确认规则',
+    parse_failed: '规则解析失败'
+};
+const cloneReviewProcessingStatuses = new Set(['created', 'generating', 'scanning']);
+const cloneReviewBatchStatusLabels = {
+    created: '正在创建批次', generating: '正在生成草稿', reviewing: '人工复核中', scanning: '正在校验差异',
+    applying: '正在执行决定', partial_failed: '部分失败', ready_to_submit: '校验完成，待提交',
+    submitted: '克隆发布成功', cancelled: '已取消'
+};
+
+function cloneReviewItemIsReady(item) {
+    return ['scanned', 'scan_failed'].includes(String(item?.detection_status || ''));
+}
+
+function cloneReviewItemIsSourceRemoved(item) {
+    return String(item?.detection_status || '') === 'source_removed';
+}
+
+function cloneReviewItemAiPending(item) {
+    return ['queued', 'processing'].includes(String(item?.ai_impact_review?.status || ''));
+}
+
+function cloneReviewItemAllowsDecision(item) {
+    return cloneReviewItemIsReady(item) && !cloneReviewItemAiPending(item);
+}
+
+function cloneReviewItemIsSummaryPending(item) {
+    return item?.detection_status === 'scanned'
+        && ['high', 'medium'].includes(String(item?.risk_level || ''))
+        && item?.requires_attention === true;
+}
+
+function summarizeCloneReviewRiskItems(items) {
+    const riskItems = (Array.isArray(items) ? items : []).filter(item => (
+        item?.detection_status === 'scanned'
+        && ['high', 'medium'].includes(String(item?.risk_level || ''))
+    ));
+    const pending = riskItems.filter(cloneReviewItemIsSummaryPending).length;
+    return {
+        total: riskItems.length,
+        pending,
+        processed: riskItems.length - pending,
+    };
+}
+
+function formatCloneReviewProgressUpdatedAt(value) {
+    if (!value) return '';
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const milliseconds = value < 100000000000 ? value * 1000 : value;
+        const date = new Date(milliseconds);
+        return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('zh-CN', { hour12: false });
+    }
+    return String(value);
+}
+
+function stopCloneReviewWorkspacePolling() {
+    if (copyConfigState.reviewWorkspaceTimer) {
+        clearTimeout(copyConfigState.reviewWorkspaceTimer);
+        copyConfigState.reviewWorkspaceTimer = null;
+    }
+}
+
+function scheduleCloneReviewWorkspacePolling(batch) {
+    stopCloneReviewWorkspacePolling();
+    if (!batch || !cloneReviewProcessingStatuses.has(String(batch.status || ''))) return;
+    if (batch.status === 'scanning' && !batch.scan_active) return;
+    const batchId = String(batch.batch_id || copyConfigState.activeReviewBatchId || '');
+    copyConfigState.reviewWorkspaceTimer = setTimeout(() => {
+        if (copyConfigState.activeReviewBatchId === batchId) reloadCloneReviewWorkspace({ background: true });
+    }, 1500);
+}
+
+async function loadNewProductEntryBatches() {
+    const list = document.getElementById('newProductEntryBatches');
+    const status = document.getElementById('newProductEntryBatchStatus');
+    const summaryItems = document.getElementById('newProductEntryStat-items');
+    const summaryPending = document.getElementById('newProductEntryStat-pending');
+    const summaryChanges = document.getElementById('newProductEntryStat-changes');
+    if (!list && !status) return;
+    try {
+        const result = await api('/matrix/clone-review-batches?status=created,generating,reviewing,scanning,applying,partial_failed,ready_to_submit,submitted', 'GET');
+        const batches = Array.isArray(result?.batches) ? result.batches : [];
+        const active = batches.filter(batch => ['created', 'generating', 'reviewing', 'scanning', 'applying', 'partial_failed', 'ready_to_submit'].includes(batch.status));
+        const localPendingCount = getNewProductPendingChanges().length;
+        const activeBatchId = copyConfigState.activeReviewBatchId || '';
+        const visibleBatches = batches.filter(batch => batch.batch_id !== activeBatchId);
+        const title = document.getElementById('newProductEntryBatchesTitle');
+        if (title) title.textContent = activeBatchId ? '其他复核批次' : '最近复核批次';
+        if (status) status.textContent = active.length
+            ? `${active.length} 个批次可继续处理`
+            : (localPendingCount ? `${localPendingCount} 格未复核修改待提交` : '暂无进行中的批次');
+        if (!copyConfigState.reviewBatch) {
+            const focus = active[0];
+            if (summaryItems) summaryItems.textContent = focus ? String(focus.item_count ?? '-') : '-';
+            if (summaryPending) summaryPending.textContent = '-';
+            if (summaryChanges) summaryChanges.textContent = localPendingCount
+                ? String(localPendingCount)
+                : (focus?.status === 'ready_to_submit' ? '待确认' : '-');
+        }
+        if (!list) return;
+        if (!visibleBatches.length) {
+            list.innerHTML = activeBatchId
+                ? '<div class="empty-message">当前批次已在上方工作区打开。</div>'
+                : '<div class="empty-message">暂无复核批次。点击“开始克隆”创建新品录入批次。</div>';
+            return;
+        }
+        list.innerHTML = visibleBatches.slice(0, 6).map(batch => {
+            const batchId = escapeHtml(batch.batch_id || '');
+            const source = escapeHtml(batch.source_value || '未命名源机型');
+            const targets = escapeHtml((batch.target_models || []).join('、') || '未指定目标');
+            const state = escapeHtml(cloneReviewBatchStatusLabels[batch.status] || batch.status || '未知状态');
+            const count = escapeHtml(String(batch.item_count ?? 0));
+            const created = escapeHtml(batch.created_at || '');
+            const action = batch.status === 'ready_to_submit' ? '查看提交清单' : '继续处理';
+            const deleteTitle = batch.status === 'submitted' ? '删除已提交批次记录' : '删除未提交批次';
+            const deleteAction = batch.can_delete
+                ? `<button type="button" class="new-product-entry-batch-delete" data-batch-status="${escapeHtml(batch.status || '')}" title="${deleteTitle}" aria-label="删除 ${source} 到 ${targets} 的复核批次" onclick="deleteCloneReviewBatch('${batchId}', this)"><i class="fas fa-trash-alt" aria-hidden="true"></i></button>`
+                : '';
+            return `<div class="new-product-entry-batch-row"><div class="new-product-entry-batch-main"><strong>${source} → ${targets}</strong><small>${state} · ${count} 条 · ${created}</small></div><div class="new-product-entry-batch-actions"><button type="button" class="action-btn btn-secondary-outline" onclick="openCloneReviewWorkspace('${batchId}')">${action}</button>${deleteAction}</div></div>`;
+        }).join('');
+    } catch (error) {
+        if (status) status.textContent = '批次读取失败';
+        if (list) list.innerHTML = `<div class="empty-message">读取失败：${escapeHtml(error.message || '未知错误')}</div>`;
+    }
+}
+window.loadNewProductEntryBatches = loadNewProductEntryBatches;
+
+async function deleteCloneReviewBatch(batchId, button) {
+    if (!batchId) return;
+    const activeBatch = copyConfigState.activeReviewBatchId === batchId
+        ? copyConfigState.reviewBatch
+        : null;
+    const batchStatus = String(button?.dataset?.batchStatus || activeBatch?.status || '');
+    const message = batchStatus === 'submitted'
+        ? '确认删除这条已提交批次记录？\n只会删除复核批次和复核明细，不会撤销已经写入矩阵的数据，也不会删除正式修改记录。此操作无法恢复。'
+        : '确认删除当前整个批次？\n批次内的差异规则、复核记录和待提交修改将一并删除，且无法恢复。';
+    if (!confirm(message)) return;
+    if (button) button.disabled = true;
+    try {
+        const result = await api(`/matrix/clone-review/${encodeURIComponent(batchId)}`, 'DELETE');
+        if (!result?.success) throw new Error(result?.message || '服务未确认删除结果');
+        clearNewProductPendingChanges(result.removed_changes || activeBatch?.expected_submit_changes || []);
+        if (activeBatch) {
+            closeCloneReviewWorkspace();
+        }
+        showToast('当前批次已全部删除', 'success');
+        await loadNewProductEntryBatches();
+    } catch (error) {
+        showToast(`删除失败：${error.message || '未知错误'}`, 'error', 6000);
+        if (button) button.disabled = false;
+    }
+}
+window.deleteCloneReviewBatch = deleteCloneReviewBatch;
+
+async function submitNewProductEntryMatrixChanges() {
+    if (matrixSubmitInFlight) return;
+    if (cloneReviewProcessingStatuses.has(String(copyConfigState.reviewBatch?.status || ''))) {
+        showToast('草稿仍在生成或校验，完成后才能提交矩阵修改。', 'warning');
+        return;
+    }
+    const status = document.getElementById('newProductEntrySubmitStatus');
+    const button = document.querySelector('#newProductEntryView button[onclick="submitNewProductEntryMatrixChanges()"]');
+    matrixSubmitInFlight = true;
+    if (button) button.disabled = true;
+    try {
+        if (status) status.textContent = '正在读取待提交批次...';
+        const result = await api('/matrix/clone-review-batches?status=ready_to_submit', 'GET');
+        const batches = Array.isArray(result?.batches) ? result.batches : [];
+        const localChanges = getNewProductPendingChanges();
+        const activeBatchId = copyConfigState.reviewBatch?.status === 'ready_to_submit'
+            ? String(copyConfigState.reviewBatch.batch_id || copyConfigState.activeReviewBatchId || '')
+            : '';
+        let batch = activeBatchId
+            ? batches.find(item => item.batch_id === activeBatchId)
+            : null;
+        let changes = [];
+        let operationId = '';
+        let submissionLabel = '';
+        let isLocalSubmission = false;
+
+        if (batch) {
+            const detail = await api(`/matrix/clone-review/${encodeURIComponent(batch.batch_id)}`, 'GET');
+            if (!detail?.success) throw new Error(detail?.message || '待提交批次读取失败');
+            changes = Array.isArray(detail.expected_submit_changes) ? detail.expected_submit_changes : [];
+            operationId = `new-product-${batch.batch_id}`;
+            submissionLabel = `${batch.source_value || '源机型'} → ${(batch.target_models || []).join('、') || '目标机型'}`;
+        } else if (batches.length > 1) {
+            if (localChanges.length > 0 && confirm(`当前还有 ${localChanges.length} 格未启用差异复核的待提交修改。\n点击“确定”提交这些修改；点击“取消”选择一个复核批次。`)) {
+                changes = localChanges;
+                operationId = `new-product-local-${newProductPendingSubmitOperationId || (newProductPendingSubmitOperationId = matrixRandomId())}`;
+                submissionLabel = '未启用差异复核的新品修改';
+                isLocalSubmission = true;
+            } else {
+                if (status) status.textContent = `有 ${batches.length} 个待提交批次，请先打开要提交的批次`;
+                showToast('请从批次列表打开一个待提交批次，再点击“提交矩阵修改”。', 'info');
+                openCloneReviewBatchListModal();
+                return;
+            }
+        } else if (batches.length === 1) {
+            batch = batches[0];
+            if (localChanges.length > 0 && confirm(`当前还有 ${localChanges.length} 格未启用差异复核的待提交修改。\n点击“确定”提交这些修改；点击“取消”提交复核批次。`)) {
+                changes = localChanges;
+                operationId = `new-product-local-${newProductPendingSubmitOperationId || (newProductPendingSubmitOperationId = matrixRandomId())}`;
+                submissionLabel = '未启用差异复核的新品修改';
+                isLocalSubmission = true;
+            } else {
+                const detail = await api(`/matrix/clone-review/${encodeURIComponent(batch.batch_id)}`, 'GET');
+                if (!detail?.success) throw new Error(detail?.message || '待提交批次读取失败');
+                changes = Array.isArray(detail.expected_submit_changes) ? detail.expected_submit_changes : [];
+                operationId = `new-product-${batch.batch_id}`;
+                submissionLabel = `${batch.source_value || '源机型'} → ${(batch.target_models || []).join('、') || '目标机型'}`;
+            }
+        } else if (localChanges.length > 0) {
+            changes = localChanges;
+            operationId = `new-product-local-${newProductPendingSubmitOperationId || (newProductPendingSubmitOperationId = matrixRandomId())}`;
+            submissionLabel = '未启用差异复核的新品修改';
+            isLocalSubmission = true;
+        } else {
+            if (status) status.textContent = '暂无待提交修改';
+            showToast('暂无可提交的新品录入修改，请先完成克隆或差异校验。', 'warning');
+            return;
+        }
+
+        if (!changes.length) {
+            if (status) status.textContent = '该批次没有可提交修改';
+            showToast('该批次没有可提交的矩阵修改。', 'warning');
+            return;
+        }
+        const validation = validateMatrixPendingChanges(changes);
+        if (!validation.ok) throw new Error(validation.errors.join('；'));
+        if (!confirm(`将提交新品录入修改：${submissionLabel}\n共 ${changes.length} 格矩阵修改。\n确认正式写入？`)) return;
+        if (status) status.textContent = '正在提交矩阵修改...';
+        const submitRes = await submitMatrixChangesInBatches(changes, {
+            operationId,
+            sourceCode: 'new_product_entry',
+        });
+        if (isLocalSubmission) {
+            clearNewProductPendingChanges(changes);
+            setNewProductEntryPendingSummary(getNewProductPendingChanges().length);
+        }
+        if (status) status.textContent = `已提交 ${changes.length} 格矩阵修改`;
+        showToast(`新品录入提交完成：${changes.length} 格矩阵修改`, 'success', 6000);
+        if (submitRes?.warnings?.length) showToast(`提交完成，但有告警：${submitRes.warnings[0]}`, 'warning', 6000);
+        if (batch && copyConfigState.activeReviewBatchId === batch.batch_id) await reloadCloneReviewWorkspace();
+        await loadNewProductEntryBatches();
+        switchTab('matrixView');
+        showToast('已进入机型矩阵管理，可查看刚提交的目标机型', 'success', 5000);
+    } catch (error) {
+        if (status) status.textContent = '提交失败，请检查待提交修改或复核批次';
+        showToast(`新品录入提交失败：${escapeHtml(error.message || '未知错误')}`, 'error', 6000);
+    } finally {
+        matrixSubmitInFlight = false;
+        if (button) button.disabled = cloneReviewProcessingStatuses.has(String(copyConfigState.reviewBatch?.status || ''));
+    }
+}
+window.submitNewProductEntryMatrixChanges = submitNewProductEntryMatrixChanges;
+
+async function openCloneReviewWorkspace(batchId) {
+    const modal = document.getElementById('cloneReviewWorkspace');
+    if (!modal || !batchId) return;
+    const mount = document.getElementById('newProductEntryReviewMount');
+    if (mount && !mount.contains(modal)) mount.appendChild(modal);
+    copyConfigState.activeReviewBatchId = batchId;
+    copyConfigState.selectedReviewItemId = '';
+    copyConfigState.reviewCandidateDetail = null;
+    stopCloneReviewWorkspacePolling();
+    modal.classList.add('new-product-entry-review-inline');
+    document.getElementById('copyConfigForm')?.classList.add('is-reviewing');
+    modal.style.display = 'flex';
+    modal.setAttribute('aria-hidden', 'false');
+    await reloadCloneReviewWorkspace();
+    await loadNewProductEntryBatches();
+    mount?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+window.openCloneReviewWorkspace = openCloneReviewWorkspace;
+
+function toggleCopyConfigCompact() {
+    const form = document.getElementById('copyConfigForm');
+    if (!form) return;
+    form.classList.toggle('is-reviewing');
+}
+window.toggleCopyConfigCompact = toggleCopyConfigCompact;
+
+async function openCloneReviewBatchListModal() {
+    const modal = document.getElementById('cloneReviewBatchListModal');
+    const list = document.getElementById('cloneReviewBatchList');
+    if (!modal || !list) return;
+    modal.style.display = 'flex';
+    modal.setAttribute('aria-hidden', 'false');
+    list.textContent = '正在读取批次...';
+    try {
+        const result = await api('/matrix/clone-review-batches?status=created,generating,reviewing,scanning,applying,partial_failed,ready_to_submit,submitted', 'GET');
+        const batches = Array.isArray(result?.batches) ? result.batches : [];
+        if (!batches.length) {
+            list.innerHTML = '<div class="empty-message">暂无差异校验批次</div>';
+            return;
+        }
+        list.innerHTML = batches.map(batch => `
+            <div class="clone-review-batch-row">
+                <div><strong>${escapeHtml(batch.source_value)} → ${escapeHtml((batch.target_models || []).join('、'))}</strong>
+                <small>${escapeHtml(cloneReviewBatchStatusLabels[batch.status] || batch.status)} · ${escapeHtml(batch.item_count)} 条 · ${escapeHtml(batch.created_at || '')}</small></div>
+                <button type="button" class="action-btn btn-secondary-outline" onclick="openCloneReviewBatchFromList('${escapeHtml(batch.batch_id)}')">打开</button>
+            </div>`).join('');
+    } catch (error) {
+        list.textContent = `读取失败：${error.message}`;
+    }
+}
+window.openCloneReviewBatchListModal = openCloneReviewBatchListModal;
+
+function closeCloneReviewBatchListModal() {
+    const modal = document.getElementById('cloneReviewBatchListModal');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.setAttribute('aria-hidden', 'true');
+    }
+}
+window.closeCloneReviewBatchListModal = closeCloneReviewBatchListModal;
+
+async function openCloneReviewBatchFromList(batchId) {
+    closeCloneReviewBatchListModal();
+    await openCloneReviewWorkspace(batchId);
+}
+window.openCloneReviewBatchFromList = openCloneReviewBatchFromList;
+
+function reconcileCloneReviewPendingChanges(batch) {
+    const items = Array.isArray(batch?.items) ? batch.items : [];
+    items.forEach(item => {
+        const key = matrixChangeKey(item.question_wiki_id, item.target_model);
+        matrixPendingChanges.delete(key);
+        newProductPendingChangeKeys.delete(key);
+    });
+    const changes = Array.isArray(batch?.expected_submit_changes) ? batch.expected_submit_changes : [];
+    changes.forEach(change => recordMatrixPendingChange({ ...change, override_old: true }));
+}
+
+function closeCloneReviewWorkspace() {
+    stopCloneReviewWorkspacePolling();
+    const modal = document.getElementById('cloneReviewWorkspace');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.setAttribute('aria-hidden', 'true');
+    }
+    document.getElementById('copyConfigForm')?.classList.remove('is-reviewing');
+    copyConfigState.activeReviewBatchId = '';
+    copyConfigState.reviewBatch = null;
+    copyConfigState.selectedReviewItemId = '';
+    copyConfigState.reviewCandidateDetail = null;
+    loadNewProductEntryBatches();
+}
+window.closeCloneReviewWorkspace = closeCloneReviewWorkspace;
+
+function captureCloneReviewWorkspaceInteraction() {
+    const detail = document.getElementById('cloneReviewDetail');
+    const tableWrap = document.querySelector('.clone-review-table-wrap');
+    const activeField = detail?.contains(document.activeElement) ? document.activeElement : null;
+    return {
+        itemId: copyConfigState.selectedReviewItemId,
+        reason: document.getElementById('cloneReviewDecisionReason')?.value,
+        candidateId: document.querySelector('input[name="cloneReviewCandidate"]:checked')?.value || '',
+        activeFieldId: activeField?.id || '',
+        selectionStart: typeof activeField?.selectionStart === 'number' ? activeField.selectionStart : null,
+        selectionEnd: typeof activeField?.selectionEnd === 'number' ? activeField.selectionEnd : null,
+        detailScrollTop: detail?.scrollTop || 0,
+        tableScrollTop: tableWrap?.scrollTop || 0,
+    };
+}
+
+function restoreCloneReviewWorkspaceInteraction(snapshot) {
+    if (!snapshot || snapshot.itemId !== copyConfigState.selectedReviewItemId) return;
+    const reason = document.getElementById('cloneReviewDecisionReason');
+    if (reason && snapshot.reason !== undefined) reason.value = snapshot.reason;
+    if (snapshot.candidateId) {
+        const candidate = Array.from(document.querySelectorAll('input[name="cloneReviewCandidate"]'))
+            .find(input => input.value === snapshot.candidateId);
+        if (candidate) {
+            document.querySelectorAll('.clone-review-candidate-note.is-selected').forEach(row => row.classList.remove('is-selected'));
+            candidate.checked = true;
+            candidate.closest('.clone-review-candidate-note')?.classList.add('is-selected');
+        }
+    }
+    const detail = document.getElementById('cloneReviewDetail');
+    const tableWrap = document.querySelector('.clone-review-table-wrap');
+    if (detail) detail.scrollTop = snapshot.detailScrollTop;
+    if (tableWrap) tableWrap.scrollTop = snapshot.tableScrollTop;
+    const activeField = snapshot.activeFieldId ? document.getElementById(snapshot.activeFieldId) : null;
+    if (activeField) {
+        activeField.focus({ preventScroll: true });
+        if (snapshot.selectionStart !== null && typeof activeField.setSelectionRange === 'function') {
+            activeField.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+        }
+    }
+}
+
+async function reloadCloneReviewWorkspace(options = {}) {
+    const batchId = copyConfigState.activeReviewBatchId;
+    if (!batchId || copyConfigState.reviewWorkspaceReloading) return;
+    copyConfigState.reviewWorkspaceReloading = true;
+    const interaction = captureCloneReviewWorkspaceInteraction();
+    const runtime = document.getElementById('cloneReviewRuntime');
+    if (runtime && !options.background) runtime.textContent = '正在读取批次数据...';
+    try {
+        const batch = await api(`/matrix/clone-review/${encodeURIComponent(batchId)}`, 'GET');
+        if (copyConfigState.activeReviewBatchId !== batchId) return;
+        if (!batch?.success) throw new Error(batch?.message || '批次读取失败');
+        copyConfigState.reviewBatch = batch;
+        const items = Array.isArray(batch.items) ? batch.items : [];
+        if (!items.some(item => item.item_id === copyConfigState.selectedReviewItemId)) {
+            copyConfigState.selectedReviewItemId = items[0]?.item_id || '';
+        }
+        renderCloneReviewWorkspace({ background: !!options.background });
+        if (!options.background) restoreCloneReviewWorkspaceInteraction(interaction);
+        scheduleCloneReviewWorkspacePolling(batch);
+    } catch (error) {
+        if (runtime) runtime.textContent = `读取失败：${error.message}`;
+        if (copyConfigState.activeReviewBatchId === batchId && cloneReviewProcessingStatuses.has(String(copyConfigState.reviewBatch?.status || ''))) {
+            copyConfigState.reviewWorkspaceTimer = setTimeout(() => reloadCloneReviewWorkspace({ background: true }), 2500);
+        }
+    } finally {
+        copyConfigState.reviewWorkspaceReloading = false;
+    }
+}
+window.reloadCloneReviewWorkspace = reloadCloneReviewWorkspace;
+
+async function exportCloneReviewBackup(button) {
+    const batch = copyConfigState.reviewBatch;
+    const batchId = String(batch?.batch_id || copyConfigState.activeReviewBatchId || '');
+    if (!batchId) {
+        showToast('请先打开要备份的差异校验批次', 'warning');
+        return;
+    }
+    if (['created', 'generating'].includes(String(batch?.status || ''))) {
+        showToast('批次仍在生成草稿，请完成生成后再导出完整备份', 'warning');
+        return;
+    }
+    const target = button || document.getElementById('cloneReviewExportButton');
+    const label = target?.querySelector('span');
+    if (target) target.disabled = true;
+    if (label) label.textContent = '正在生成备份';
+    try {
+        await downloadByUrl(
+            `${API_BASE}/matrix/clone-review/${encodeURIComponent(batchId)}/export.xlsx`,
+            canonicalDownloadName(`clone_review_backup_${batchId.slice(0, 8)}`),
+        );
+    } finally {
+        if (label) label.textContent = '导出完整备份';
+        if (target) {
+            target.disabled = ['created', 'generating'].includes(String(copyConfigState.reviewBatch?.status || ''));
+        }
+    }
+}
+window.exportCloneReviewBackup = exportCloneReviewBackup;
+
+function renderCloneReviewWorkspace(options = {}) {
+    const batch = copyConfigState.reviewBatch;
+    if (!batch) return;
+    const methods = Array.isArray(batch.detection_methods) ? batch.detection_methods : [];
+    const flow = document.getElementById('cloneReviewFlow');
+    if (flow) {
+        const steps = ['clone', 'copy', 'review', 'decide', 'apply', 'complete', 'success', 'submit'];
+        const flowItems = Array.isArray(batch.items) ? batch.items : [];
+        const hasAttention = flowItems.some(item => item.requires_attention);
+        const hasExecutable = flowItems.some(item =>
+            ['link_existing', 'remove_target'].includes(item.decision)
+            && ['not_applied', 'failed'].includes(item.apply_status)
+            && !cloneReviewItemAiPending(item)
+        );
+        const activeIndex = batch.status === 'submitted' ? steps.length
+            : (batch.status === 'ready_to_submit' ? 7
+                : (batch.status === 'applying' || hasExecutable ? 4
+                    : (['created', 'generating'].includes(batch.status) ? 1
+                        : (batch.status === 'scanning' ? 2 : (hasAttention ? 3 : 5)))));
+        flow.querySelectorAll('[data-flow-step]').forEach(step => {
+            const index = steps.indexOf(step.dataset.flowStep);
+            step.classList.toggle('is-complete', index < activeIndex);
+            step.classList.toggle('is-active', activeIndex < steps.length && index === activeIndex);
+        });
+    }
+    const methodLabels = methods.map(method => method === 'parameter_check' ? '最新参数与当前知识校对' : '输入差异分析');
+    const subtitle = document.getElementById('cloneReviewSubtitle');
+    if (subtitle) subtitle.textContent = `${batch.source_value} → ${(batch.target_models || []).join('、')} · ${methodLabels.join(' + ')}`;
+    const runtime = document.getElementById('cloneReviewRuntime');
+    if (runtime) {
+        const progress = batch.progress && typeof batch.progress === 'object' ? batch.progress : {};
+        const runtimeParts = [batch.status === 'scanning' && !batch.scan_active
+            ? '校验已中断，可继续处理等待校验的知识'
+            : (batch.error_message
+                ? `部分检测未完成：${batch.error_message}`
+                : `${cloneReviewBatchStatusLabels[batch.status] || batch.status || '处理中'}${progress.phase ? `：${progress.phase}` : ''}`)];
+        const progressUpdatedAt = formatCloneReviewProgressUpdatedAt(progress.updated_at);
+        if (progressUpdatedAt) runtimeParts.push(`最近更新：${progressUpdatedAt}`);
+        if (batch.parameter_refresh?.source_version) {
+            runtimeParts.push(`参数版本：${batch.parameter_refresh.source_version}`);
+        }
+        if (methods.includes('manual_difference_ai')) {
+            runtimeParts.push(`AI 辅助：${cloneReviewAiStatusLabels[batch.ai_parse_status] || batch.ai_parse_status || '未知'}`);
+        }
+        runtime.textContent = runtimeParts.join(' · ');
+        runtime.classList.toggle('is-error', !!batch.error_message || ['needs_confirmation', 'parse_failed'].includes(batch.ai_parse_status));
+    }
+    const items = Array.isArray(batch.items) ? batch.items : [];
+    const generatedCount = Number(batch.progress?.generated_count ?? items.length) || 0;
+    const scannedCount = Number(batch.progress?.scanned_count ?? items.filter(item => item.detection_status === 'scanned').length) || 0;
+    const totalCount = Number(batch.progress?.generation_total ?? batch.progress?.total ?? batch.source_count ?? batch.item_count ?? items.length) || 0;
+    const waitingCount = items.filter(item => item.detection_status === 'pending_scan').length;
+    const aiPendingCount = items.filter(cloneReviewItemAiPending).length;
+    const detectionErrorCount = items.filter(item => ['scan_failed', 'stale'].includes(item.detection_status)).length;
+    const sourceRemovedCount = items.filter(cloneReviewItemIsSourceRemoved).length;
+    const riskSummary = batch.risk_summary && typeof batch.risk_summary === 'object'
+        ? batch.risk_summary
+        : summarizeCloneReviewRiskItems(items);
+    const attentionCount = riskSummary.pending;
+    const processedCount = riskSummary.processed;
+    const summaryStatus = document.getElementById('newProductEntryBatchStatus');
+    const summaryItems = document.getElementById('newProductEntryStat-items');
+    const summaryPending = document.getElementById('newProductEntryStat-pending');
+    const summaryChanges = document.getElementById('newProductEntryStat-changes');
+    const summaryNote = document.getElementById('newProductEntrySubmitStatus');
+    const summaryState = document.getElementById('copyConfigFormState');
+    if (summaryStatus) summaryStatus.textContent = cloneReviewBatchStatusLabels[batch.status] || batch.status || '处理中';
+    if (summaryItems) summaryItems.textContent = totalCount > generatedCount ? `${generatedCount}/${totalCount}` : String(generatedCount);
+    if (summaryPending) summaryPending.textContent = String(attentionCount);
+    if (summaryChanges) summaryChanges.textContent = String((batch.expected_submit_changes || []).length);
+    if (summaryState) summaryState.textContent = cloneReviewBatchStatusLabels[batch.status] || batch.status || '批次处理中';
+    if (summaryNote) summaryNote.textContent = batch.status === 'ready_to_submit'
+        ? '已满足提交条件，可正式写入矩阵。'
+        : (cloneReviewProcessingStatuses.has(batch.status)
+            ? `已生成 ${generatedCount}/${totalCount || generatedCount}，已校验 ${scannedCount}，可先处理已就绪条目。`
+            : (detectionErrorCount
+                ? `还有 ${detectionErrorCount} 条检测异常，请重新校验或补充资料。`
+                : (attentionCount ? `还有 ${attentionCount} 条高、中风险需要处理。` : '完成校验后才能提交矩阵修改。')));
+    const stepIds = ['newProductEntryStep-configure', 'newProductEntryStep-review', 'newProductEntryStep-decide', 'newProductEntryStep-ready', 'newProductEntryStep-submit'];
+    const stepIndex = batch.status === 'submitted' ? 5 : batch.status === 'ready_to_submit' ? 4 : attentionCount ? 3 : 2;
+    stepIds.forEach((id, index) => { const el = document.getElementById(id); if (!el) return; el.classList.toggle('is-complete', index < stepIndex); el.classList.toggle('is-current', index === stepIndex - 1); });
+    const summary = document.getElementById('cloneReviewSummary');
+    if (summary) {
+        const riskCount = level => items.filter(item => item.detection_status === 'scanned' && item.risk_level === level).length;
+        summary.innerHTML = [
+            ['已生成草稿', totalCount > generatedCount ? `${generatedCount}/${totalCount}` : generatedCount],
+            ['已校验', scannedCount],
+            ['等待校验', waitingCount],
+            ['高风险', riskCount('high')],
+            ['中风险', riskCount('medium')],
+            ['AI 复核中', aiPendingCount],
+            ['源已移除', sourceRemovedCount],
+            ['待处理', attentionCount],
+            ['已处理', processedCount],
+        ].map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('');
+    }
+    const rules = document.getElementById('cloneReviewRules');
+    const ruleList = Array.isArray(batch.rules) ? batch.rules : [];
+    if (rules) {
+        const parameterRules = Array.isArray(batch.parameter_rules) ? batch.parameter_rules : [];
+        const parameterDifferenceRules = parameterRules.filter(rule => rule.difference_type === 'value_changed');
+        const parameterUnavailableRules = parameterRules.filter(rule => rule.difference_type === 'comparison_unavailable');
+        const catalogAudit = batch.parameter_catalog_audit || {};
+        const auditItems = Array.isArray(catalogAudit.items) ? catalogAudit.items : [];
+        const auditLabels = {
+            consistent: '与 8511 一致',
+            catalog_suspected: '8511 疑似不准确',
+            missing_parameter: '8511 缺少参数',
+            comparison_unavailable: '8511 无法唯一比较'
+        };
+        const auditHtml = methods.includes('parameter_check') && methods.includes('manual_difference_ai')
+            ? `<div class="clone-review-catalog-audit">
+                <div class="clone-review-rules-head"><strong>参数清单准确性校对</strong><span>${escapeHtml(catalogAudit.source || 'ParamAggregator 8511')}</span></div>
+                ${catalogAudit.status === 'unavailable'
+                    ? `<div class="clone-review-rule-empty">校对暂不可用：${escapeHtml(catalogAudit.error_message || '参数服务异常')}</div>`
+                    : `<div class="clone-review-rule-list">${auditItems.map(item => `
+                        <div class="clone-review-rule is-${escapeHtml(item.result || 'comparison_unavailable')}">
+                            <span>${escapeHtml(item.feature_name || item.feature_id)}</span>
+                            <b>${escapeHtml(item.target_manual_value || '-')} <i class="fas fa-arrows-left-right" aria-hidden="true"></i> ${escapeHtml(item.target_catalog_value || '8511 无数据')}</b>
+                            <small>${escapeHtml(auditLabels[item.result] || item.result)} · 源型号：${escapeHtml(item.source_manual_value || '-')} / ${escapeHtml(item.source_catalog_value || '8511 无数据')}</small>
+                        </div>`).join('')}</div>`}
+            </div>`
+            : '';
+        const parameterRulesHtml = methods.includes('parameter_check') ? `
+            <div class="clone-review-parameter-rules">
+                <div class="clone-review-rules-head"><strong>参数对比差异规则</strong><span>${parameterDifferenceRules.length} 条值不一致</span></div>
+                ${batch.parameter_rules_error
+                    ? `<div class="clone-review-rule-empty">参数对比暂不可用：${escapeHtml(batch.parameter_rules_error)}</div>`
+                    : (parameterDifferenceRules.length
+                        ? `<div class="clone-review-rule-list">${parameterDifferenceRules.map(rule => `
+                            <div class="clone-review-rule is-parameter-difference">
+                                <span>${escapeHtml(rule.feature_name || rule.feature_id)} · ${escapeHtml(rule.question_wiki_id || '未关联知识')}</span>
+                                <b>${escapeHtml(rule.source_value || '-')} <i class="fas fa-arrow-right" aria-hidden="true"></i> ${escapeHtml(rule.target_value || '-')}</b>
+                                <small>${escapeHtml(rule.feature_description || '8511 已确认的源、目标型号参数值不同')}</small>
+                            </div>`).join('')}</div>`
+                        : `<div class="clone-review-rule-empty">两型号已确认参数未发现值不一致${parameterUnavailableRules.length ? `，另有 ${parameterUnavailableRules.length} 条无法唯一比较` : ''}。</div>`)}
+            </div>` : '';
+        const manualRulesHtml = ruleList.length ? `
+            <div class="clone-review-rules-head"><strong>差异规则</strong><span>版本 ${escapeHtml(batch.difference_rule_version)}</span></div>
+            <div class="clone-review-rule-list">${ruleList.map(rule => `
+                <div class="clone-review-rule ${rule.status === 'source_conflict' ? 'is-conflict' : ''}">
+                    <span>${escapeHtml(rule.feature_name || rule.feature_id)}</span>
+                    <b>${escapeHtml(rule.source_value || '-')} <i class="fas fa-arrow-right" aria-hidden="true"></i> ${escapeHtml(rule.target_value || '-')}</b>
+                    <small>${escapeHtml((rule.evidence_sources || []).join(' + '))} · ${escapeHtml(rule.status)}</small>
+                </div>`).join('')}</div>` : (methods.includes('manual_difference_ai')
+                    ? `<div class="clone-review-rule-empty">尚未形成可用的输入差异规则，条目必须逐项人工确认。</div>`
+                    : '');
+        rules.innerHTML = `${manualRulesHtml}${parameterRulesHtml}${auditHtml}`;
+    }
+    const coverage = document.getElementById('cloneReviewManualCoverageWrap');
+    const manualOnly = methods.length === 1 && methods[0] === 'manual_difference_ai';
+    const coverageInput = document.getElementById('cloneReviewManualCoverage');
+    const needsRuleConfirmation = ruleList.some(rule => rule.status === 'needs_confirmation');
+    if (coverage) coverage.classList.toggle('d-none', !manualOnly && !needsRuleConfirmation);
+    const coverageLabel = coverage?.querySelector('span');
+    if (coverageLabel) coverageLabel.textContent = manualOnly && needsRuleConfirmation
+        ? '已覆盖差异说明，并确认未命中知识的规则'
+        : (needsRuleConfirmation ? '确认未命中知识的差异规则' : '本次输入已覆盖当前已知差异');
+    if (coverageInput) coverageInput.checked = !!batch.manual_scope_confirmed_by;
+    const unresolvedRules = ruleList.some(rule => ['needs_confirmation', 'pending_parse', 'source_conflict', 'parse_failed', 'stale'].includes(rule.status));
+    const footerStatus = document.getElementById('cloneReviewFooterStatus');
+    if (footerStatus) {
+        footerStatus.textContent = batch.status === 'scanning' && !batch.scan_active
+            ? `校验已中断，还有 ${waitingCount} 条等待校验。点击“继续校验”只处理这些条目。`
+            : (cloneReviewProcessingStatuses.has(batch.status)
+            ? `后台仍在处理：已生成 ${generatedCount}/${totalCount || generatedCount}，已校验 ${scannedCount}${aiPendingCount ? `，AI 复核中 ${aiPendingCount}` : ''}；AI 完成的条目可以先复核。`
+            : (batch.status === 'ready_to_submit' && !unresolvedRules
+            ? '校验已完成，可以提交矩阵修改。'
+            : (manualOnly && !batch.manual_scope_confirmed_by
+                ? '请确认本次输入已覆盖当前已知差异。'
+                : (detectionErrorCount
+                    ? `还有 ${detectionErrorCount} 条检测异常，请重新校验或补充资料。`
+                    : (attentionCount ? `还有 ${attentionCount} 条高、中风险需要人工处理。` : '高、中风险均已处理，其余知识默认保留。')))));
+    }
+    const isProcessing = ['created', 'generating'].includes(batch.status)
+        || (batch.status === 'scanning' && !!batch.scan_active);
+    const exportButton = document.getElementById('cloneReviewExportButton');
+    if (exportButton) {
+        const exportReady = !['created', 'generating'].includes(String(batch.status || ''));
+        exportButton.disabled = !exportReady;
+        exportButton.title = exportReady
+            ? '导出当前批次的全部知识、差异规则和批次信息'
+            : '批次草稿全部生成后可导出完整备份';
+    }
+    const pendingScanCount = items.filter(item => item.detection_status === 'pending_scan').length;
+    const staleCount = items.filter(item => item.detection_status === 'stale').length;
+    const deleteButton = document.getElementById('cloneReviewDeleteButton');
+    if (deleteButton) {
+        deleteButton.hidden = !batch.can_delete;
+        deleteButton.disabled = !batch.can_delete;
+        deleteButton.dataset.batchStatus = String(batch.status || '');
+        deleteButton.title = batch.status === 'submitted'
+            ? '删除复核批次记录，不撤销已写入矩阵的数据'
+            : '删除当前批次及其全部复核记录';
+    }
+    const resumeButton = document.getElementById('cloneReviewResumeButton');
+    if (resumeButton) {
+        const resumeAllowed = (pendingScanCount > 0 || staleCount > 0)
+            && !batch.scan_active
+            && !['applying', 'ready_to_submit', 'submitted', 'cancelled'].includes(String(batch.status || ''));
+        resumeButton.hidden = !resumeAllowed;
+        resumeButton.disabled = !resumeAllowed;
+        resumeButton.querySelector('span').textContent = staleCount > 0 ? '更新过期校验' : '继续校验';
+        resumeButton.title = resumeAllowed
+            ? (staleCount > 0 ? `读取最新源知识并更新 ${staleCount} 条过期校验` : `仅校验仍在等待的 ${pendingScanCount} 条知识`)
+            : '当前没有可续跑的待校验条目';
+    }
+    const applyButton = document.getElementById('cloneReviewApplyButton');
+    if (applyButton) {
+        applyButton.disabled = ['created', 'generating'].includes(batch.status) || !items.some(item =>
+            ['link_existing', 'remove_target'].includes(item.decision)
+            && ['not_applied', 'failed'].includes(item.apply_status)
+            && !cloneReviewItemAiPending(item)
+        );
+    }
+    const completeButton = document.getElementById('cloneReviewCompleteButton');
+    if (completeButton) completeButton.disabled = isProcessing || (['ready_to_submit', 'submitted', 'cancelled'].includes(batch.status) && !unresolvedRules);
+    const submitButton = document.querySelector('#newProductEntryView button[onclick="submitNewProductEntryMatrixChanges()"]');
+    if (submitButton) submitButton.disabled = isProcessing || matrixSubmitInFlight;
+    if (batch.status === 'ready_to_submit' || batch.status === 'submitted') reconcileCloneReviewPendingChanges(batch);
+    renderCloneReviewItems({ renderDetail: !options.background });
+}
+
+function renderCloneReviewItems(options = {}) {
+    const batch = copyConfigState.reviewBatch;
+    const body = document.getElementById('cloneReviewItemsBody');
+    if (!batch || !body) return;
+    const idFilter = String(document.getElementById('cloneReviewIdFilter')?.value || '').trim().toLowerCase();
+    const pendingOnlyInput = document.getElementById('cloneReviewPendingOnly');
+    if (pendingOnlyInput) pendingOnlyInput.disabled = !!idFilter;
+    const pendingOnly = !idFilter && !!pendingOnlyInput?.checked;
+    const riskFilter = document.getElementById('cloneReviewRiskFilter')?.value || 'all';
+    const decisionFilterInput = document.getElementById('cloneReviewDecisionFilter');
+    const decisionFilter = decisionFilterInput?.value || 'all';
+    let items = Array.isArray(batch.items) ? batch.items : [];
+    const attentionCount = items.filter(cloneReviewItemIsSummaryPending).length;
+    const attentionOption = decisionFilterInput?.querySelector('option[value="requires_attention"]');
+    if (attentionOption) attentionOption.textContent = `待处理 (${attentionCount})`;
+    if (idFilter) {
+        items = items.filter(item => String(item.question_wiki_id || '').toLowerCase().includes(idFilter));
+    }
+    if (pendingOnly) {
+        items = items.filter(item => item.detection_status === 'pending_scan' || (cloneReviewItemIsReady(item) && item.requires_attention));
+    }
+    if (riskFilter !== 'all') {
+        items = items.filter(item => {
+            const riskKey = item.detection_status === 'pending_scan'
+                ? 'waiting'
+                : (item.detection_status === 'source_removed' ? 'removed' : (item.detection_status === 'scanned' ? item.risk_level : 'error'));
+            return riskKey === riskFilter;
+        });
+    }
+    if (decisionFilter !== 'all') {
+        items = decisionFilter === 'requires_attention'
+            ? items.filter(cloneReviewItemIsSummaryPending)
+            : items.filter(item => item.detection_status !== 'pending_scan' && item.decision === decisionFilter);
+    }
+    if (!items.some(item => item.item_id === copyConfigState.selectedReviewItemId)) {
+        copyConfigState.selectedReviewItemId = items[0]?.item_id || '';
+        copyConfigState.reviewCandidateDetail = null;
+    }
+    if (!items.length) {
+        const hasActiveFilter = !!idFilter || riskFilter !== 'all' || decisionFilter !== 'all';
+        body.innerHTML = `<tr><td colspan="5" class="empty-message">${hasActiveFilter ? '没有符合当前筛选条件的知识' : '高、中风险均已处理；其余知识默认通过'}</td></tr>`;
+    } else {
+        body.innerHTML = items.map(item => {
+            const isWaiting = item.detection_status === 'pending_scan';
+            const isSourceRemoved = cloneReviewItemIsSourceRemoved(item);
+            const riskKey = isWaiting ? 'waiting' : (isSourceRemoved ? 'removed' : (item.detection_status === 'scanned' ? item.risk_level : 'error'));
+            const riskLabel = isWaiting ? '待校验' : (isSourceRemoved ? '源已移除' : (riskKey === 'error' ? '检测异常' : (cloneReviewRiskLabels[riskKey] || riskKey)));
+            return `
+            <tr class="clone-review-item-row ${isWaiting ? 'is-waiting' : ''} ${isSourceRemoved ? 'is-source-removed' : ''} ${item.item_id === copyConfigState.selectedReviewItemId ? 'is-selected' : ''}" onclick="selectCloneReviewItem('${escapeHtml(item.item_id)}')">
+                <td><span class="clone-review-risk is-${escapeHtml(riskKey)}">${escapeHtml(riskLabel)}</span></td>
+                <td><strong>${escapeHtml(item.question_wiki_id)}</strong><span>${escapeHtml(item.question || '未填写问题')}</span></td>
+                <td>${isWaiting ? '等待校验' : (isSourceRemoved ? '已排除' : escapeHtml(cloneReviewActionLabels[item.suggested_action] || item.suggested_action))}</td>
+                <td>${isWaiting ? '不可处理' : (isSourceRemoved ? '已排除' : (cloneReviewItemAiPending(item) ? 'AI 复核中' : escapeHtml(cloneReviewDecisionLabels[item.decision] || item.decision)))}</td>
+                <td>${isWaiting || isSourceRemoved ? '-' : escapeHtml(item.apply_status)}</td>
+            </tr>`;
+        }).join('');
+    }
+    if (options.renderDetail !== false) renderCloneReviewDetail();
+}
+window.renderCloneReviewItems = renderCloneReviewItems;
+
+function handleCloneReviewIdFilter() {
+    const idFilter = String(document.getElementById('cloneReviewIdFilter')?.value || '').trim();
+    const pendingOnly = document.getElementById('cloneReviewPendingOnly');
+    if (pendingOnly) pendingOnly.disabled = !!idFilter;
+    renderCloneReviewItems();
+}
+window.handleCloneReviewIdFilter = handleCloneReviewIdFilter;
+
+function selectCloneReviewItem(itemId) {
+    if (copyConfigState.selectedReviewItemId !== itemId) {
+        copyConfigState.reviewCandidateDetail = null;
+    }
+    copyConfigState.selectedReviewItemId = itemId;
+    renderCloneReviewItems();
+}
+window.selectCloneReviewItem = selectCloneReviewItem;
+
+function getCloneReviewCandidateById(wikiId) {
+    const batch = copyConfigState.reviewBatch;
+    const item = (batch?.items || []).find(row => row.item_id === copyConfigState.selectedReviewItemId);
+    return (item?.reuse_candidates || []).find(candidate => String(candidate?.wiki_id || '') === String(wikiId || '')) || null;
+}
+
+async function loadCloneReviewCandidateDetail(wikiId) {
+    if (!wikiId) return;
+    const radio = [...document.querySelectorAll('input[name="cloneReviewCandidate"]')]
+        .find(input => input.value === String(wikiId));
+    if (radio && !radio.checked) {
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change', { bubbles: true }));
+        return;
+    }
+    const detail = document.getElementById(`cloneReviewCandidateDetail-${wikiId}`);
+    if (!detail) return;
+    const itemId = copyConfigState.selectedReviewItemId;
+    detail.classList.add('is-loading');
+    detail.innerHTML = '<span>正在读取知识详情...</span>';
+    try {
+        const result = await api(`/kb/item?id=${encodeURIComponent(wikiId)}`, 'GET');
+        if (!result?.success || !result.data) throw new Error(result?.message || '知识详情读取失败');
+        const item = result.data;
+        if (itemId !== copyConfigState.selectedReviewItemId || !getCloneReviewCandidateById(wikiId)) return;
+        copyConfigState.reviewCandidateDetail = { itemId, wikiId: String(wikiId), item };
+        renderCloneReviewCandidateDetail(detail, wikiId, item);
+    } catch (error) {
+        if (itemId !== copyConfigState.selectedReviewItemId) return;
+        detail.classList.remove('is-loading');
+        detail.innerHTML = `<span class="is-error">读取失败：${escapeHtml(error.message || error)}</span>`;
+    }
+}
+window.loadCloneReviewCandidateDetail = loadCloneReviewCandidateDetail;
+
+function renderCloneReviewCandidateDetail(detail, wikiId, item) {
+    if (!detail || !item) return;
+    detail.classList.remove('is-loading');
+    detail.innerHTML = `
+            <div class="clone-review-candidate-detail-head">
+                <div><span>已查看知识</span><strong>${escapeHtml(item.question_wiki_id || wikiId)}</strong></div>
+                <button type="button" class="icon-btn" title="关闭详情" aria-label="关闭详情" onclick="closeCloneReviewCandidateDetail()"><i class="fas fa-xmark" aria-hidden="true"></i></button>
+            </div>
+            <dl class="clone-review-candidate-detail-grid">
+                <div><dt>问题</dt><dd>${escapeHtml(item.question || '-')}</dd></div>
+                <div><dt>答案</dt><dd>${escapeHtml(item.answer || '-')}</dd></div>
+                <div><dt>适用型号</dt><dd>${escapeHtml(item.product_name || '未配置')}</dd></div>
+                <div><dt>品类 / 更新时间</dt><dd>${escapeHtml(item.product_category_name || '-')}${item.update_time ? ` · ${escapeHtml(item.update_time)}` : ''}</dd></div>
+            </dl>
+            <div class="clone-review-candidate-detail-actions">
+                <button type="button" class="action-btn btn-secondary-outline" onclick="editCloneReviewCandidate('${escapeHtml(wikiId)}')"><i class="fas fa-pen" aria-hidden="true"></i><span>编辑知识</span></button>
+            </div>`;
+}
+
+function closeCloneReviewCandidateDetail() {
+    copyConfigState.reviewCandidateDetail = null;
+    renderCloneReviewDetail();
+}
+window.closeCloneReviewCandidateDetail = closeCloneReviewCandidateDetail;
+
+async function editCloneReviewCandidate(wikiId) {
+    const candidate = getCloneReviewCandidateById(wikiId);
+    if (!candidate) return;
+    try {
+        const loadedDetail = copyConfigState.reviewCandidateDetail;
+        let item = loadedDetail
+            && loadedDetail.itemId === copyConfigState.selectedReviewItemId
+            && String(loadedDetail.wikiId) === String(wikiId)
+            ? loadedDetail.item
+            : null;
+        if (!item) {
+            const result = await api(`/kb/item?id=${encodeURIComponent(wikiId)}`, 'GET');
+            if (!result?.success || !result.data) throw new Error(result?.message || '知识详情读取失败');
+            item = result.data;
+        }
+        await openKBEditModal(wikiId, { item });
+    } catch (error) {
+        showToast(`打开编辑失败：${error.message || error}`, 'error');
+    }
+}
+window.editCloneReviewCandidate = editCloneReviewCandidate;
+
+function renderCloneReviewDetail() {
+    const batch = copyConfigState.reviewBatch;
+    const detail = document.getElementById('cloneReviewDetail');
+    if (!batch || !detail) return;
+    const item = (batch.items || []).find(row => row.item_id === copyConfigState.selectedReviewItemId);
+    if (!item) {
+        detail.innerHTML = '<div class="empty-message">选择一条知识查看证据和处理动作</div>';
+        return;
+    }
+    if (!cloneReviewItemIsReady(item)) {
+        const isStale = item.detection_status === 'stale';
+        const isSourceRemoved = cloneReviewItemIsSourceRemoved(item);
+        detail.innerHTML = `
+            <div class="clone-review-detail-head">
+                <span class="clone-review-risk is-${isSourceRemoved ? 'waiting' : (isStale ? 'error' : 'waiting')}">${isSourceRemoved ? '源知识已移除' : (isStale ? '内容已变化' : '待校验')}</span>
+                <div><strong>${escapeHtml(item.question_wiki_id)}</strong><small>${escapeHtml(item.source_model)} → ${escapeHtml(item.target_model)}</small></div>
+            </div>
+            <section><h4>知识原文</h4><p class="clone-review-question">${escapeHtml(item.question || '-')}</p><div class="clone-review-answer">${escapeHtml(item.answer || '-')}</div></section>
+            <div class="clone-review-waiting-note" role="status">
+                <strong>${isSourceRemoved ? '源知识已被移除' : (isStale ? '当前校验依据已过期' : '正在等待差异校验')}</strong>
+                <span>${isSourceRemoved ? '当前源机型已不再包含这条知识，本批次已将它排除，不会继续写入目标机型。' : (isStale ? '源知识在扫描后发生了同步或修改。刷新当前条目会读取最新正文并只重新校验这一条，其他条目的判断不受影响。' : '草稿内容已经生成，可以先阅读；校验完成后，这里会自动出现证据和人工决定操作。')}</span>
+                ${isStale ? '<div><button id="cloneReviewRefreshItemButton" type="button" class="action-btn btn-secondary-outline" onclick="refreshCurrentCloneReviewItem()"><i class="fas fa-rotate" aria-hidden="true"></i><span>刷新当前条目</span></button></div>' : ''}
+            </div>`;
+        return;
+    }
+    const ruleIds = new Set(item.difference_rule_ids || []);
+    const rules = [...(batch.rules || []), ...(batch.parameter_rules || [])]
+        .filter(rule => ruleIds.has(rule.rule_id));
+    const candidates = Array.isArray(item.reuse_candidates) ? item.reuse_candidates : [];
+    const riskKey = item.detection_status === 'scanned' ? item.risk_level : 'error';
+    const riskLabel = riskKey === 'error' ? '检测异常' : (cloneReviewRiskLabels[riskKey] || riskKey);
+    const readOnly = ['ready_to_submit', 'submitted', 'cancelled'].includes(batch.status);
+    const decisionBlocked = readOnly || cloneReviewItemAiPending(item);
+    const candidatePriority = candidate => candidate.priority || (candidate.validation === 'exact_reusable' ? 'P1' : 'P2');
+    const candidateEvidence = candidate => {
+        if (candidate.manual_verified) {
+            return '<span class="is-manual">手动 ID 校验通过</span>';
+        }
+        const matches = candidate.evidence_matches || {};
+        return [
+            ['问题/相似问题', matches.question],
+            ['答案', matches.answer],
+            ['功能/目标值', matches.feature_value],
+        ].map(([label, matched]) => `<span class="${matched ? 'is-match' : 'is-miss'}">${matched ? '命中' : '未命中'} ${label}</span>`).join('');
+    };
+    const currentCandidateId = detail.dataset.reviewItemId === String(item.item_id)
+        ? document.querySelector('input[name="cloneReviewCandidate"]:checked')?.value
+        : '';
+    const pendingCandidateId = currentCandidateId || item.selected_existing_wiki_id || '';
+    const savedCandidateDetail = copyConfigState.reviewCandidateDetail;
+    const candidateNotes = candidates.map(candidate => {
+        const candidateWikiId = String(candidate.wiki_id || '');
+        const isSelected = candidateWikiId === String(pendingCandidateId);
+        const hasInlineDetail = savedCandidateDetail
+            && savedCandidateDetail.itemId === copyConfigState.selectedReviewItemId
+            && String(savedCandidateDetail.wikiId) === candidateWikiId;
+        const inlineDetailHtml = `<div id="cloneReviewCandidateDetail-${escapeHtml(candidate.wiki_id)}" class="clone-review-candidate-detail ${hasInlineDetail ? 'is-expanded' : ''}">${hasInlineDetail ? '' : '<span>已选中，可展开查看完整内容</span>'}</div>`;
+        return `
+        <div class="clone-review-candidate-note ${candidate.manual_verified ? 'is-manual' : `is-${escapeHtml(candidatePriority(candidate).toLowerCase())}`} ${isSelected ? 'is-selected' : ''}">
+            <input type="radio" name="cloneReviewCandidate" value="${escapeHtml(candidate.wiki_id)}" ${isSelected ? 'checked' : ''} aria-label="选择 ${escapeHtml(candidate.wiki_id)}">
+            <div class="clone-review-candidate-main">
+                <div class="clone-review-candidate-id-row"><span class="clone-review-candidate-status">${escapeHtml(candidatePriority(candidate))}</span><button type="button" class="clone-review-wiki-link" onclick="event.stopPropagation(); loadCloneReviewCandidateDetail('${escapeHtml(candidate.wiki_id)}')">${escapeHtml(candidate.wiki_id)}</button>${!readOnly ? `<button type="button" class="action-btn btn-secondary-outline clone-review-inline-link" onclick="event.stopPropagation(); associateCloneReviewCandidate('${escapeHtml(candidate.wiki_id)}')" ${decisionBlocked ? 'disabled' : ''}><i class="fas fa-link" aria-hidden="true"></i><span>关联</span></button>` : ''}</div>
+                <div class="clone-review-candidate-evidence">${candidateEvidence(candidate)}</div>
+                <span>${escapeHtml(candidate.match_reason || '同功能但数值表达不同，请人工核对适用场景。')}</span>
+                ${inlineDetailHtml}
+            </div>
+        </div>`;
+    }).join('');
+    const aiImpactReview = item.ai_impact_review && typeof item.ai_impact_review === 'object' && Object.keys(item.ai_impact_review).length ? item.ai_impact_review : null;
+    const aiImpactLabels = { affected: '差异会影响知识结论', unrelated: '差异不影响知识结论', uncertain: '无法确定，保留人工确认' };
+    const aiImpactStatusLabels = { queued: '等待 AI 语义复核', processing: 'AI 语义复核中', unavailable: 'AI 复核不可用，可人工处理' };
+    const aiImpactTitle = aiImpactReview?.risk_effect === 'kept_high_due_to_direct_evidence'
+        ? 'AI 判断不相关，直接冲突仍保留高风险'
+        : (aiImpactStatusLabels[aiImpactReview?.status] || aiImpactLabels[aiImpactReview?.relation] || '复核未完成');
+    const aiImpactClass = cloneReviewItemAiPending(item) ? (aiImpactReview?.status || 'queued') : (aiImpactReview?.relation || 'uncertain');
+    const aiImpactHtml = aiImpactReview ? `<section><h4>AI 语义复核</h4><div class="clone-review-ai-impact is-${escapeHtml(aiImpactClass)}" role="status"><b>${escapeHtml(aiImpactTitle)}</b><p>${escapeHtml(aiImpactReview.reason || '未提供复核说明。')}</p>${aiImpactReview.evidence ? `<small>原文依据：${escapeHtml(aiImpactReview.evidence)}</small>` : ''}</div></section>` : '';
+    detail.innerHTML = `
+        <div class="clone-review-detail-head">
+            <span class="clone-review-risk is-${escapeHtml(riskKey)}">${escapeHtml(riskLabel)}</span>
+            <div><strong>${escapeHtml(item.question_wiki_id)}</strong><small>${escapeHtml(item.source_model)} → ${escapeHtml(item.target_model)}</small></div>
+        </div>
+        <section><h4>知识原文</h4><p class="clone-review-question">${escapeHtml(item.question || '-')}</p><div class="clone-review-answer">${escapeHtml(item.answer || '-')}</div></section>
+        <section><h4>差异证据</h4>${rules.length ? rules.map(rule => {
+            const sourceLabel = (rule.evidence_sources || []).includes('parameter_check') ? '参数对比差异规则' : '输入差异规则';
+            return `<div class="clone-review-evidence"><b>${escapeHtml(rule.feature_name)}</b><span>${escapeHtml(rule.source_value)} → ${escapeHtml(rule.target_value)}</span><p>${escapeHtml(sourceLabel)} · ${escapeHtml(rule.evidence_quote || '无逐字证据')}</p></div>`;
+        }).join('') : `<p class="text-muted">${item.risk_level === 'default' ? '未命中已知差异，系统默认保留；仍可人工改判。' : '未发现逐字冲突证据，请结合功能和意图人工判断。'}</p>`}</section>
+        ${aiImpactHtml}
+        <section><h4>人工决定</h4>
+            <textarea id="cloneReviewDecisionReason" class="form-control" rows="3" placeholder="记录判断依据">${escapeHtml(item.decision_reason || '')}</textarea>
+            <div class="clone-review-decision-actions">
+                <button type="button" class="action-btn btn-secondary-outline" onclick="saveCloneReviewDecision('keep')" ${decisionBlocked ? 'disabled' : ''}>保留目标型号</button>
+                <button type="button" class="action-btn btn-secondary-outline clone-review-remove" onclick="saveCloneReviewDecision('remove_target')" ${decisionBlocked ? 'disabled' : ''}><i class="fas fa-ban" aria-hidden="true"></i><span>不关联目标型号</span></button>
+                <button type="button" class="action-btn" onclick="saveCloneReviewDecision('defer')" ${decisionBlocked ? 'disabled' : ''}>暂待确认</button>
+            </div>
+        </section>
+        <section><h4>全库已有知识</h4>
+            <p class="clone-review-section-hint">P1 命中问题、答案、功能目标值三项；P2 命中两项；P3 仅命中一项。点击 ID 查看完整信息，关联前仍需人工确认适用范围。</p>
+            <div class="clone-review-manual-candidate">
+                <label for="cloneReviewManualWikiId">手动关联知识 ID</label>
+                <div class="clone-review-manual-candidate-controls">
+                    <input id="cloneReviewManualWikiId" class="form-control" type="text" autocomplete="off" placeholder="输入知识 ID" ${readOnly ? 'disabled' : ''}>
+                    <button id="cloneReviewManualWikiVerify" type="button" class="action-btn btn-secondary-outline" onclick="verifyCloneReviewManualCandidate()" ${readOnly ? 'disabled' : ''}><i class="fas fa-magnifying-glass" aria-hidden="true"></i><span>校验并选中</span></button>
+                </div>
+                <span id="cloneReviewManualWikiStatus" class="clone-review-manual-candidate-status">仅可关联已存在、已启用且品类一致的知识。</span>
+            </div>
+            ${candidates.length ? `<div class="clone-review-candidate-notes">${candidateNotes}</div>` : `<p class="text-muted">系统未找到可复用候选，可在上方输入已知知识 ID 进行校验。</p>`}
+        </section>
+        <section class="clone-review-decision-summary"><h4>目标型号最终结果</h4><p id="cloneReviewDecisionSummaryText">${item.decision === 'link_existing' && item.selected_existing_wiki_id ? `将把 <strong>${escapeHtml(item.target_model || '目标型号')}</strong> 关联到 <strong>${escapeHtml(item.selected_existing_wiki_id)}</strong>。当前知识不会自动写入该型号，原知识也不会被删除。` : (pendingCandidateId ? `已选 <strong>${escapeHtml(pendingCandidateId)}</strong>。点击该条右侧“关联”即可关联到${escapeHtml(item.target_model || '目标型号')}。` : '未选择最终关联结果。请选择候选后再保存决定。')}</p></section>
+        `;
+    detail.dataset.reviewItemId = String(item.item_id);
+    if (savedCandidateDetail
+        && savedCandidateDetail.itemId === copyConfigState.selectedReviewItemId
+        && getCloneReviewCandidateById(savedCandidateDetail.wikiId)) {
+        renderCloneReviewCandidateDetail(
+            document.getElementById(`cloneReviewCandidateDetail-${savedCandidateDetail.wikiId}`),
+            savedCandidateDetail.wikiId,
+            savedCandidateDetail.item,
+        );
+    }
+    detail.querySelectorAll('input[name="cloneReviewCandidate"]').forEach(input => {
+        input.addEventListener('change', () => {
+            detail.querySelectorAll('.clone-review-candidate-note').forEach(row => row.classList.remove('is-selected'));
+            input.closest('.clone-review-candidate-note')?.classList.add('is-selected');
+            const summary = document.getElementById('cloneReviewDecisionSummaryText');
+            if (summary) summary.innerHTML = `已选 <strong>${escapeHtml(input.value)}</strong>。点击该条右侧“关联”即可关联到${escapeHtml(item.target_model || '目标型号')}。`;
+            loadCloneReviewCandidateDetail(input.value);
+        });
+    });
+    detail.querySelectorAll('.clone-review-candidate-note').forEach(row => {
+        row.addEventListener('click', event => {
+            if (event.target.closest('button,input')) return;
+            const input = row.querySelector('input[name="cloneReviewCandidate"]');
+            if (!input || input.checked) return;
+            input.checked = true;
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+    });
+    document.getElementById('cloneReviewManualWikiId')?.addEventListener('keydown', event => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        verifyCloneReviewManualCandidate();
+    });
+}
+
+async function associateCloneReviewCandidate(wikiId) {
+    const radio = [...document.querySelectorAll('input[name="cloneReviewCandidate"]')]
+        .find(input => input.value === String(wikiId));
+    if (radio && !radio.checked) {
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    await saveCloneReviewDecision('link_existing');
+}
+window.associateCloneReviewCandidate = associateCloneReviewCandidate;
+
+async function verifyCloneReviewManualCandidate() {
+    const itemId = copyConfigState.selectedReviewItemId;
+    const input = document.getElementById('cloneReviewManualWikiId');
+    const button = document.getElementById('cloneReviewManualWikiVerify');
+    const status = document.getElementById('cloneReviewManualWikiStatus');
+    const wikiId = input?.value.trim() || '';
+    if (!itemId || !wikiId) {
+        showToast('请输入要关联的知识 ID', 'warning');
+        input?.focus();
+        return;
+    }
+    if (button) button.disabled = true;
+    if (status) {
+        status.className = 'clone-review-manual-candidate-status is-loading';
+        status.textContent = '正在校验知识 ID...';
+    }
+    try {
+        const result = await api(`/matrix/clone-review/items/${encodeURIComponent(itemId)}/manual-candidate`, 'POST', { wiki_id: wikiId });
+        if (!result?.success || !result.item) throw new Error(result?.message || '知识 ID 校验失败');
+        const items = copyConfigState.reviewBatch?.items || [];
+        const itemIndex = items.findIndex(row => row.item_id === itemId);
+        if (itemIndex >= 0) items[itemIndex] = result.item;
+        renderCloneReviewDetail();
+        const radio = [...document.querySelectorAll('input[name="cloneReviewCandidate"]')]
+            .find(row => row.value === wikiId);
+        if (radio) {
+            radio.checked = true;
+            radio.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        showToast(`知识 ${wikiId} 已校验并选中`, 'success');
+    } catch (error) {
+        if (status) {
+            status.className = 'clone-review-manual-candidate-status is-error';
+            status.textContent = error.message || '知识 ID 校验失败';
+        }
+        showToast(`校验失败：${error.message || error}`, 'error');
+    } finally {
+        if (button && document.body.contains(button)) button.disabled = false;
+    }
+}
+window.verifyCloneReviewManualCandidate = verifyCloneReviewManualCandidate;
+
+async function saveCloneReviewDecision(decision) {
+    const itemId = copyConfigState.selectedReviewItemId;
+    if (!itemId) return;
+    const reviewItem = (copyConfigState.reviewBatch?.items || []).find(row => row.item_id === itemId);
+    if (!cloneReviewItemAllowsDecision(reviewItem)) {
+        if (cloneReviewItemAiPending(reviewItem)) {
+            showToast('AI 语义复核尚未完成，请等待最终风险结果。', 'warning');
+            return;
+        }
+        showToast('该草稿仍在等待校验，校验完成后才能人工处理。', 'warning');
+        return;
+    }
+    const selectedExisting = document.querySelector('input[name="cloneReviewCandidate"]:checked')?.value || reviewItem?.selected_existing_wiki_id || '';
+    if (decision === 'link_existing' && !selectedExisting) {
+        showToast('请先选择候选，或输入知识 ID 校验并选中', 'warning');
+        return;
+    }
+    try {
+        const result = await api(`/matrix/clone-review/items/${encodeURIComponent(itemId)}/decision`, 'POST', {
+            decision,
+            selected_existing_wiki_id: selectedExisting,
+            decision_reason: document.getElementById('cloneReviewDecisionReason')?.value.trim() || ''
+        });
+        if (result?.code === 'knowledge_revision_stale') {
+            await reloadCloneReviewWorkspace();
+            showToast('源知识已变化，请使用“刷新当前条目”读取最新内容。', 'warning', 6000);
+            return;
+        }
+        if (!result?.success) throw new Error(result?.message || (result?.errors || []).join('；') || '保存失败');
+        showToast('人工决定已保存', 'success');
+        await reloadCloneReviewWorkspace();
+    } catch (error) {
+        showToast(`保存失败：${error.message}`, 'error');
+    }
+}
+window.saveCloneReviewDecision = saveCloneReviewDecision;
+
+async function refreshCurrentCloneReviewItem() {
+    const itemId = copyConfigState.selectedReviewItemId;
+    if (!itemId) return;
+    if (!confirm('刷新会读取最新知识正文，并清空当前条目的旧人工决定和判断依据。其他条目不受影响。是否继续？')) return;
+    const button = document.getElementById('cloneReviewRefreshItemButton');
+    if (button) {
+        button.disabled = true;
+        button.querySelector('span').textContent = '正在刷新';
+    }
+    try {
+        const result = await api(`/matrix/clone-review/items/${encodeURIComponent(itemId)}/refresh`, 'POST', {});
+        if (!result?.success) throw new Error(result?.message || '刷新失败');
+        copyConfigState.reviewCandidateDetail = null;
+        showToast(result.excluded ? '源知识已移除，当前条目已从本批次排除' : '当前条目已按最新知识重新校验', result.excluded ? 'info' : 'success', 5000);
+        await reloadCloneReviewWorkspace();
+    } catch (error) {
+        showToast(`刷新失败：${error.message || error}`, 'error', 6000);
+        const currentButton = document.getElementById('cloneReviewRefreshItemButton');
+        if (currentButton) {
+            currentButton.disabled = false;
+            currentButton.querySelector('span').textContent = '刷新当前条目';
+        }
+    }
+}
+window.refreshCurrentCloneReviewItem = refreshCurrentCloneReviewItem;
+
+async function applyCloneReviewDecisions() {
+    const batchId = copyConfigState.activeReviewBatchId;
+    if (!batchId) return;
+    if (['created', 'generating'].includes(String(copyConfigState.reviewBatch?.status || ''))) {
+        showToast('复核草稿仍在生成，出现已校验条目后即可执行人工决定。', 'warning');
+        return;
+    }
+    try {
+        const result = await api(`/matrix/clone-review/${encodeURIComponent(batchId)}/apply`, 'POST', {});
+        if (!result?.success && !Array.isArray(result?.failed)) throw new Error(result?.message || '执行失败');
+        showToast(`已执行 ${result.applied_count || 0} 条决定`, result.success === false ? 'warning' : 'success');
+        await reloadCloneReviewWorkspace();
+        if (currentTab === 'matrixView') loadMatrixData(matrixCurrentPage || 1);
+    } catch (error) {
+        showToast(`执行失败：${error.message}`, 'error');
+    }
+}
+window.applyCloneReviewDecisions = applyCloneReviewDecisions;
+
+async function resumeCloneReviewScan() {
+    const batchId = copyConfigState.activeReviewBatchId;
+    const batch = copyConfigState.reviewBatch;
+    const pendingCount = (batch?.items || []).filter(item => item.detection_status === 'pending_scan').length;
+    const staleCount = (batch?.items || []).filter(item => item.detection_status === 'stale').length;
+    if (!batchId || (!pendingCount && !staleCount) || batch?.scan_active) return;
+    if (staleCount && !confirm(`将读取最新源知识并重新校验 ${staleCount} 条过期条目；源知识已删除的条目会从本批次排除。是否继续？`)) return;
+    const button = document.getElementById('cloneReviewResumeButton');
+    if (button) {
+        button.disabled = true;
+        button.querySelector('span').textContent = '正在继续校验';
+    }
+    const runtime = document.getElementById('cloneReviewRuntime');
+    if (runtime) runtime.textContent = staleCount ? `正在更新 ${staleCount} 条过期校验...` : `正在继续校验 ${pendingCount} 条待校验知识...`;
+    try {
+        const result = staleCount
+            ? await api(`/matrix/clone-review/${encodeURIComponent(batchId)}/refresh-stale`, 'POST', {})
+            : await api(`/matrix/clone-review/${encodeURIComponent(batchId)}/scan`, 'POST', { pending_only: true });
+        if (!result?.success) throw new Error(result?.message || '继续校验失败');
+        copyConfigState.reviewBatch = result;
+        renderCloneReviewWorkspace();
+        scheduleCloneReviewWorkspacePolling(result);
+        showToast(staleCount
+            ? `已更新 ${result.refreshed_count || 0} 条，排除 ${result.excluded_count || 0} 条已删除源知识`
+            : `已继续校验 ${pendingCount} 条待校验知识`, 'success', 5000);
+    } catch (error) {
+        if (runtime) runtime.textContent = `继续校验失败：${error.message || error}`;
+        showToast(`继续校验失败：${error.message || error}`, 'error', 6000);
+        await reloadCloneReviewWorkspace({ background: true });
+    } finally {
+        const currentButton = document.getElementById('cloneReviewResumeButton');
+        if (currentButton && !staleCount) currentButton.querySelector('span').textContent = '继续校验';
+    }
+}
+window.resumeCloneReviewScan = resumeCloneReviewScan;
+
+async function completeCloneReviewBatch() {
+    const batchId = copyConfigState.activeReviewBatchId;
+    if (!batchId) return;
+    if (cloneReviewProcessingStatuses.has(String(copyConfigState.reviewBatch?.status || ''))) {
+        showToast('后台仍在生成或校验，全部完成后才能完成批次。', 'warning');
+        return;
+    }
+    try {
+        const confirmed = !!document.getElementById('cloneReviewManualCoverage')?.checked;
+        const result = await api(`/matrix/clone-review/${encodeURIComponent(batchId)}/complete`, 'POST', {
+            manual_scope_confirmed: confirmed,
+            rules_confirmed: confirmed
+        });
+        if (!result?.success) throw new Error((result?.errors || []).join('；') || result?.message || '校验未完成');
+        copyConfigState.reviewBatch = result;
+        renderCloneReviewWorkspace();
+        showToast(result.status === 'submitted' ? '克隆发布成功' : '校验完成，待提交矩阵修改', 'success', 6000);
+    } catch (error) {
+        showToast(`尚不能完成：${error.message}`, 'warning', 5000);
+    }
+}
+window.completeCloneReviewBatch = completeCloneReviewBatch;
 
 function exportMatrix() {
     if (!currentMatrixData || currentMatrixData.length === 0) {
         if (!confirm('当前视图无数据，是否导出全量矩阵？')) return;
     }
-    
+
     // Get current filter params
     const id = document.getElementById('matrixSearchId')?.value.trim() || '';
     const q = document.getElementById('matrixSearchQuestion')?.value.trim() || '';
@@ -21468,7 +23841,12 @@ async function openApiConfigModal() {
     try {
         const config = await api('/scoring/config');
         if (config) {
-            document.getElementById('apiKeyInput').value = config.api_key || '';
+            const apiKeyInput = document.getElementById('apiKeyInput');
+            if (apiKeyInput) {
+                apiKeyInput.value = '';
+                apiKeyInput.dataset.storedKeyConfigured = config.api_key_configured ? '1' : '0';
+                apiKeyInput.placeholder = config.api_key_configured ? '已保存，留空则继续使用' : '输入 API Key';
+            }
             document.getElementById('baseUrlInput').value = config.base_url || '';
             document.getElementById('modelNameInput').value = config.model || '';
             updateApiConfigStatus(config);
@@ -21487,16 +23865,14 @@ function updateApiConfigStatus(config, savedAt = '') {
     const apiKey = config && config.api_key ? String(config.api_key) : '';
     const baseUrl = config && config.base_url ? String(config.base_url) : '';
     const model = config && config.model ? String(config.model) : '';
-    const configured = !!apiKey.trim();
+    const configured = !!apiKey.trim() || !!(config && config.api_key_configured);
     const status = config && config.config_status ? config.config_status : (configured ? '已配置' : '未配置');
-    const keyPrefix = config && config.api_key_prefix ? String(config.api_key_prefix) : apiKey.slice(0, 8);
-    const keySuffix = config && config.api_key_suffix ? String(config.api_key_suffix) : (apiKey ? apiKey.slice(-6) : '');
     const suffix = savedAt ? ` | 保存时间: ${savedAt}` : '';
     const titleEl = document.querySelector('#apiConfigModal .modal-header h3');
     const title = titleEl && titleEl.textContent ? titleEl.textContent.trim() : '';
     const scope = title.includes('AI') ? 'AI配置' : '知识库评分配置';
-    const keyHint = configured ? `${keyPrefix}...${keySuffix}` : '未填写';
-    statusEl.textContent = `${scope}：${status} | Key: ${keyHint} | Key长度: ${apiKey.length} | Base URL: ${baseUrl || '未填写'} | Model: ${model || '未填写'}${suffix}`;
+    const keyHint = apiKey ? '已输入新密钥' : (configured ? '使用已保存密钥' : '未填写');
+    statusEl.textContent = `${scope}：${status} | Key: ${keyHint} | Base URL: ${baseUrl || '未填写'} | Model: ${model || '未填写'}${suffix}`;
     statusEl.style.color = configured ? '#166534' : '#b45309';
 }
 
@@ -21583,7 +23959,12 @@ async function openAiConfigModal() {
         };
 
         if (config) {
-            document.getElementById('apiKeyInput').value = config.api_key || '';
+            const apiKeyInput = document.getElementById('apiKeyInput');
+            if (apiKeyInput) {
+                apiKeyInput.value = '';
+                apiKeyInput.dataset.storedKeyConfigured = config.api_key_configured ? '1' : '0';
+                apiKeyInput.placeholder = config.api_key_configured ? '已保存，留空则继续使用' : '输入 API Key';
+            }
             document.getElementById('baseUrlInput').value = config.base_url || '';
             document.getElementById('modelNameInput').value = config.model || '';
             updateApiConfigStatus(config);
@@ -21679,7 +24060,12 @@ async function saveApiConfig() {
 
         if (res.success) {
             if (res.config) {
-                document.getElementById('apiKeyInput').value = res.config.api_key || '';
+                const apiKeyInput = document.getElementById('apiKeyInput');
+                if (apiKeyInput) {
+                    apiKeyInput.value = '';
+                    apiKeyInput.dataset.storedKeyConfigured = res.config.api_key_configured ? '1' : '0';
+                    apiKeyInput.placeholder = res.config.api_key_configured ? '已保存，留空则继续使用' : '输入 API Key';
+                }
                 document.getElementById('baseUrlInput').value = res.config.base_url || '';
                 document.getElementById('modelNameInput').value = res.config.model || '';
                 updateApiConfigStatus(res.config, new Date().toLocaleTimeString());
@@ -21695,7 +24081,9 @@ async function saveApiConfig() {
 }
 
 async function testApiConfig() {
-    const apiKey = document.getElementById('apiKeyInput').value.trim();
+    const apiKeyInput = document.getElementById('apiKeyInput');
+    const apiKey = apiKeyInput.value.trim();
+    const storedKeyConfigured = apiKeyInput.dataset.storedKeyConfigured === '1';
     const baseUrl = document.getElementById('baseUrlInput').value.trim();
     const model = document.getElementById('modelNameInput').value.trim();
     const titleEl = document.querySelector('#apiConfigModal .modal-header h3');
@@ -21703,9 +24091,11 @@ async function testApiConfig() {
     const isAiConfig = title.includes('AI');
     const endpoint = isAiConfig ? '/ai/test_config' : '/scoring/test_config';
 
-    updateApiConfigStatus({ api_key: apiKey, base_url: baseUrl, model, config_status: '测试中' });
+    updateApiConfigStatus({ api_key: apiKey, api_key_configured: storedKeyConfigured, base_url: baseUrl, model, config_status: '测试中' });
     try {
-        const res = await api(endpoint, 'POST', { api_key: apiKey, base_url: baseUrl, model });
+        const payload = { base_url: baseUrl, model };
+        if (apiKey) payload.api_key = apiKey;
+        const res = await api(endpoint, 'POST', payload);
         if (res.config) updateApiConfigStatus({ ...res.config, config_status: res.success ? '测试通过' : '测试失败' });
         const preview = res.config && res.config.response_preview ? `\n返回预览: ${res.config.response_preview}` : '';
         if (res.success) {
@@ -21714,7 +24104,7 @@ async function testApiConfig() {
             openFeedbackModal('测试失败', res.message || 'API 连接测试失败');
         }
     } catch (e) {
-        updateApiConfigStatus({ api_key: apiKey, base_url: baseUrl, model, config_status: '测试异常' });
+        updateApiConfigStatus({ api_key: apiKey, api_key_configured: storedKeyConfigured, base_url: baseUrl, model, config_status: '测试异常' });
         openFeedbackModal('测试异常', e?.message || String(e));
     }
 }
@@ -23507,6 +25897,8 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   const linkImportCloseBtn = document.querySelector('#linkImportModal .link-import-close-btn');
   if (linkImportCloseBtn) linkImportCloseBtn.addEventListener('click', closeLinkImportModal);
+  setupLinkImportAccessibility();
+  setupKeyboardSortableHeaders();
 
   const importFileLink = document.getElementById('importFileLink');
   if (importFileLink) importFileLink.addEventListener('change', async (e) => {
@@ -23666,6 +26058,10 @@ window.addEventListener('DOMContentLoaded', async () => {
           if (!modal) return;
           if (modal.id === 'kbEditModal') {
               closeKBEditModal();
+              return;
+          }
+          if (modal.id === 'linkImportModal') {
+              closeLinkImportModal();
               return;
           }
           if (modal.id === 'bulkDuplicateModal') closeBulkDuplicateModal();

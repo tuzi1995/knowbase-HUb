@@ -1,3 +1,4 @@
+import os
 import time
 import unittest
 import requests
@@ -6,6 +7,10 @@ import requests
 BASE_URL = "http://127.0.0.1:8080"
 
 
+@unittest.skipUnless(
+    str(os.environ.get('KMATRIX_ALLOW_LIVE_WRITE_TESTS') or '').strip().lower() in {'1', 'true', 'yes', 'on'},
+    '在线矩阵写入测试默认禁用；运行前需设置 KMATRIX_ALLOW_LIVE_WRITE_TESTS=1',
+)
 class TestMatrixSubmitChangesAPI(unittest.TestCase):
     def setUp(self):
         self.s = requests.Session()

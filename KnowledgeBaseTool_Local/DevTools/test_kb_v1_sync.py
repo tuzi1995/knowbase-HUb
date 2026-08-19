@@ -35,6 +35,16 @@ class TestKbV1Sync(unittest.TestCase):
         self.assertTrue(Path(snapshot['artifact_path']).is_file())
         self.assertIn('ICWIKI001', Path(snapshot['artifact_path']).read_text(encoding='utf-8'))
 
+    def test_duplicate_wiki_ids_are_rejected_instead_of_silently_overwritten(self):
+        with self.assertRaisesRegex(ValueError, '重复 question_wiki_id'):
+            self.create_snapshot(
+                [],
+                [
+                    {'question_wiki_id': 'ICWIKI-DUP', 'question': '第一条', 'answer': 'A'},
+                    {'question_wiki_id': 'ICWIKI-DUP', 'question': '第二条', 'answer': 'B'},
+                ],
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

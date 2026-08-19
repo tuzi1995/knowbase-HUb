@@ -10,6 +10,7 @@ RUNTIME_FILES = (
     "parameter_check.py",
     "knowledge_graph.py",
     "kb_v1_sync.py",
+    "clone_difference_rules.py",
 )
 
 # These files contain the current product/model definitions but no credentials.
@@ -52,6 +53,7 @@ def package_project():
     included_script_files = [
         "Scripts/migrate_parameter_check_postgres.py",
         "Scripts/primary_db_sync.py",
+        "Scripts/retire_kb_v1_t1.py",
     ]
 
     print(f"Creating deployment package: {zip_filename}")

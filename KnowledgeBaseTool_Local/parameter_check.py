@@ -18,10 +18,11 @@ import psycopg2
 import requests
 from psycopg2.extras import Json, RealDictCursor
 from scoring_logic import LLMScorer, load_ai_config
+from runtime_safety import env_flag, is_test_process
 
 
 PARAMETER_CHECK_SCHEMA_VERSION = "20260724_02"
-DEFAULT_CATALOG_BASE_URL = "http://127.0.0.1:18511"
+DEFAULT_CATALOG_BASE_URL = "http://127.0.0.1:18510"
 HISTORICAL_NUMERIC_RULE_VERSION = "sweeper-numeric-v2"
 HISTORICAL_COMPARE_RULE_VERSION = "sweeper-compare-v2"
 HISTORICAL_AI_CANDIDATE_RULE_VERSION = "sweeper-ai-candidate-v2"
@@ -296,6 +297,15 @@ SCHEMA_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS parameter_ai_scan_lock (
+        category_name TEXT NOT NULL,
+        feature_id TEXT NOT NULL,
+        run_id UUID NOT NULL REFERENCES parameter_check_run(run_id),
+        acquired_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (category_name, feature_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS parameter_ai_candidate_assessment (
         claim_id UUID PRIMARY KEY REFERENCES kb_parameter_claim(claim_id),
         ai_verdict TEXT NOT NULL CHECK (ai_verdict IN ('likely_consistent', 'likely_inconsistent', 'needs_human_review')),
@@ -391,7 +401,7 @@ def _load_local_database_config(config_path: str | None = None) -> dict[str, Any
 
 def connect_main_database(config_path: str | None = None):
     config = _load_local_database_config(config_path)
-    return psycopg2.connect(
+    connection = psycopg2.connect(
         host=config["host"],
         port=config["port"],
         dbname=config["database"],
@@ -399,6 +409,9 @@ def connect_main_database(config_path: str | None = None):
         password=config["password"],
         connect_timeout=5,
     )
+    if is_test_process() and not env_flag('KMATRIX_ALLOW_LIVE_WRITE_TESTS'):
+        connection.set_session(readonly=True)
+    return connection
 
 
 def apply_schema(connection) -> None:
@@ -527,7 +540,6 @@ def refresh_model_bindings(
                     source_wiki_count = EXCLUDED.source_wiki_count,
                     evidence_json = EXCLUDED.evidence_json,
                     updated_at = NOW()
-                WHERE parameter_model_alias_binding.status = 'pending'
                 """,
                 (
                     str(uuid.uuid4()),
@@ -922,9 +934,11 @@ def _read_proposed_numeric_claims(connection, category_name: str) -> list[dict[s
         cursor.execute(
             """
             SELECT claim.claim_id, claim.question_wiki_id, claim.feature_id,
-                   claim.asserted_value, claim.normalized_value, claim.evidence_text
+                   claim.asserted_value, claim.normalized_value, claim.evidence_text,
+                   claim.kb_revision, knowledge.question, knowledge.answer
             FROM kb_parameter_claim AS claim
             JOIN parameter_check_run AS source_run ON source_run.run_id = claim.source_run_id
+            JOIN knowledge_base_v1 AS knowledge ON knowledge.question_wiki_id = claim.question_wiki_id
             WHERE claim.library_type = 'current'
               AND claim.extraction_method = 'rule'
               AND claim.binding_status = 'proposed'
@@ -933,7 +947,14 @@ def _read_proposed_numeric_claims(connection, category_name: str) -> list[dict[s
             """,
             (category_name,),
         )
-        claims = [dict(row) for row in cursor.fetchall()]
+        # A previous extraction is useful only while it still describes the current KB text.
+        # This keeps a comparison run from reporting a value that has since been edited away.
+        claims = [
+            dict(row)
+            for row in cursor.fetchall()
+            if _knowledge_revision(str(row.get("question") or ""), str(row.get("answer") or ""))
+            == str(row.get("kb_revision") or "")
+        ]
         for claim in claims:
             cursor.execute(
                 "SELECT model_id FROM kb_parameter_claim_model WHERE claim_id = %s ORDER BY model_id",
@@ -943,7 +964,14 @@ def _read_proposed_numeric_claims(connection, category_name: str) -> list[dict[s
     return claims
 
 
-def run_historical_numeric_comparison(connection, *, category_name: str, actor: str) -> dict[str, Any]:
+def run_historical_numeric_comparison(
+    connection,
+    *,
+    category_name: str,
+    actor: str,
+    workflow: str | None = None,
+    source_scan_run_id: str | None = None,
+) -> dict[str, Any]:
     snapshot_row = _latest_snapshot(connection, category_name)
     if not snapshot_row:
         raise ValueError(f"没有可用的 {category_name} 参数快照，请先同步快照。")
@@ -956,6 +984,10 @@ def run_historical_numeric_comparison(connection, *, category_name: str, actor: 
         "rule_version": HISTORICAL_COMPARE_RULE_VERSION,
         "proposed_claim_count": len(claims),
     }
+    if workflow:
+        scope_json["workflow"] = workflow
+    if source_scan_run_id:
+        scope_json["source_scan_run_id"] = source_scan_run_id
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -1020,6 +1052,28 @@ def run_historical_numeric_comparison(connection, *, category_name: str, actor: 
             )
         connection.commit()
         raise
+
+
+def run_current_knowledge_parameter_comparison(
+    connection,
+    *,
+    category_name: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Refresh current KB numeric claims, then compare them with the latest parameter snapshot."""
+    scan_result = run_historical_numeric_claim_scan(
+        connection,
+        category_name=category_name,
+        actor=actor,
+    )
+    comparison_result = run_historical_numeric_comparison(
+        connection,
+        category_name=category_name,
+        actor=actor,
+        workflow="current_kb_parameter_comparison",
+        source_scan_run_id=str(scan_result["run_id"]),
+    )
+    return {**comparison_result, "scan_result": scan_result}
 
 
 def _read_scoped_knowledge_rows(connection, wiki_ids: list[str]) -> list[dict[str, Any]]:
@@ -1556,6 +1610,23 @@ def _release_feature_scan_scope(category_name: str, feature_id: str) -> None:
         _AI_FEATURE_SCAN_ACTIVE_SCOPES.discard((category_name, feature_id))
 
 
+def _release_persisted_feature_scan_lock(run_id: str, category_name: str, feature_id: str) -> None:
+    """Release the cross-worker lock without affecting another run's lock."""
+    connection = connect_main_database()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM parameter_ai_scan_lock
+                WHERE run_id = %s AND category_name = %s AND feature_id = %s
+                """,
+                (run_id, category_name, feature_id),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _mark_feature_ai_scan_launch_failed(
     *,
     run_id: str,
@@ -1580,6 +1651,11 @@ def _mark_feature_ai_scan_launch_failed(
         finally:
             connection.close()
     finally:
+        try:
+            _release_persisted_feature_scan_lock(run_id, category_name, feature_id)
+        except Exception:
+            # The run is already marked failed; keep the original launch error.
+            pass
         _release_feature_scan_scope(category_name, feature_id)
 
 
@@ -1658,6 +1734,16 @@ def create_historical_ai_feature_scan(
                     """,
                     (run_id, snapshot_row["snapshot_id"], Json(scope_json), Json(result_counts), actor),
                 )
+                cursor.execute(
+                    """
+                    INSERT INTO parameter_ai_scan_lock (category_name, feature_id, run_id)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (category_name, feature_id) DO NOTHING
+                    """,
+                    (category_name, feature_id, run_id),
+                )
+                if getattr(cursor, "rowcount", 1) != 1:
+                    raise ValueError(f"{feature_rule['name']} 已有一项全量扫描正在后台执行。")
             connection.commit()
             _AI_FEATURE_SCAN_ACTIVE_SCOPES.add(scope_key)
         except Exception:
@@ -1782,6 +1868,10 @@ def run_historical_ai_feature_scan_worker(job: dict[str, Any]) -> None:
         finally:
             connection.close()
     finally:
+        try:
+            _release_persisted_feature_scan_lock(run_id, category_name, feature_id)
+        except Exception:
+            pass
         _release_feature_scan_scope(category_name, feature_id)
 
 
@@ -2657,7 +2747,7 @@ def get_parameter_check_overview(
     model_id: str | None = None,
     feature_id: str | None = None,
     wiki_id: str | None = None,
-    ai_view: str = "queue",
+    ai_view: str = "comparison",
     page: int = 1,
     page_size: int = 50,
 ) -> dict[str, Any]:
@@ -2704,7 +2794,7 @@ def get_parameter_check_overview(
                     if row.get("status") == "completed"
                     and (row.get("scope_json") or {}).get("stage") == "numeric_comparison"
                 ),
-                run_rows[0] if run_rows else None,
+                None,
             )
 
         snapshot_id = selected_run.get("snapshot_id") if selected_run else None
@@ -3017,6 +3107,12 @@ def register_parameter_check_routes(app, login_required, product_catalog_loader)
                         category_name=category_name,
                         actor=actor(),
                     )
+                elif mode == "refresh_compare":
+                    result = run_current_knowledge_parameter_comparison(
+                        connection,
+                        category_name=category_name,
+                        actor=actor(),
+                    )
                 elif mode == "ai_extract":
                     try:
                         batch_size = int(payload.get("batch_size") or AI_CANDIDATE_BATCH_SIZE)
@@ -3039,7 +3135,7 @@ def register_parameter_check_routes(app, login_required, product_catalog_loader)
                         actor=actor(),
                     )
                 else:
-                    raise ValueError("mode 只能是 extract、compare、ai_extract 或 ai_feature_extract。")
+                    raise ValueError("mode 只能是 extract、compare、refresh_compare、ai_extract 或 ai_feature_extract。")
             finally:
                 connection.close()
             if mode == "ai_feature_extract":
@@ -3112,7 +3208,7 @@ def register_parameter_check_routes(app, login_required, product_catalog_loader)
         model_id = str(request.args.get("model_id") or "").strip() or None
         feature_id = str(request.args.get("feature_id") or "").strip() or None
         wiki_id = str(request.args.get("wiki_id") or "").strip() or None
-        ai_view = str(request.args.get("ai_view") or "queue").strip() or "queue"
+        ai_view = str(request.args.get("ai_view") or "comparison").strip() or "comparison"
         try:
             page = int(request.args.get("page") or 1)
             page_size = int(request.args.get("page_size") or 50)
@@ -3124,8 +3220,8 @@ def register_parameter_check_routes(app, login_required, product_catalog_loader)
             return jsonify({"success": False, "message": "比较状态不合法。"}), 422
         if resolution_status and resolution_status not in PARAMETER_CHECK_RESOLUTION_STATUSES:
             return jsonify({"success": False, "message": "人工处理状态不合法。"}), 422
-        if ai_view not in {"queue", "candidates", "audit"}:
-            return jsonify({"success": False, "message": "AI 视图类型不合法。"}), 422
+        if ai_view not in {"comparison", "queue", "candidates", "audit"}:
+            return jsonify({"success": False, "message": "校对视图类型不合法。"}), 422
         try:
             connection = connect_main_database()
             try:

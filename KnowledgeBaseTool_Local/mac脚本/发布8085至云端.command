@@ -241,7 +241,7 @@ runtime_items=()
 for path in \
   server.py scoring_logic.py llm_score_evaluator.py matrix_submit_validation.py \
   parameter_check.py knowledge_graph.py kb_v1_sync.py requirements.txt \
-  product_catalog.json model_mappings.json link_viewer prompt Scripts/migrate_parameter_check_postgres.py Scripts/primary_db_sync.py; do
+  product_catalog.json model_mappings.json link_viewer prompt Scripts/migrate_parameter_check_postgres.py Scripts/primary_db_sync.py Scripts/retire_kb_v1_t1.py; do
   [[ -e "$path" ]] && runtime_items+=("$path")
 done
 (( ${#runtime_items[@]} > 0 ))
@@ -254,6 +254,7 @@ test "$config_hash_before" = "$config_hash_after"
 cp -f "$release_stage/data.db" instance/data.db
 "$python_bin" -c 'import server; server.init_db(); print("RUNTIME_IMPORT_OK")'
 "$python_bin" Scripts/migrate_parameter_check_postgres.py --config supabase_config_local.json
+"$python_bin" Scripts/retire_kb_v1_t1.py --config supabase_config_local.json
 "$python_bin" "$sync_script" import --config supabase_config_local.json --file "$release_stage/primary.ndjson.gz"
 
 "$python_bin" - "$release_stage/sqlite_manifest.json" instance/data.db <<'PY'

@@ -6,32 +6,52 @@ echo "重启 KnowBase Hub 应用"
 echo "=========================================="
 echo ""
 
-# 查找并停止运行在 8085 端口的进程
-echo "🔍 查找运行在端口 8085 的进程..."
-PID=$(lsof -ti:8085)
+# 获取项目路径后再处理端口，避免误杀同端口的其他服务。
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+APP_DIR="$PROJECT_ROOT/KnowledgeBaseTool_Local"
 
-if [ -z "$PID" ]; then
+echo "🔍 查找运行在端口 8085 的进程..."
+PIDS=$(lsof -nP -tiTCP:8085 -sTCP:LISTEN 2>/dev/null || true)
+for PID in $PIDS; do
+    COMMAND=$(ps -p "$PID" -o command= 2>/dev/null || true)
+    CWD=$(lsof -a -p "$PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+    if [ "$CWD" != "$APP_DIR" ]; then
+        echo "❌ 端口进程工作目录不匹配，已停止重启以避免误杀: PID $PID"
+        exit 1
+    fi
+    case " $COMMAND " in
+        *" server.py "*)
+            echo "📌 找到 KnowBase Hub 进程 PID: $PID"
+            echo "🛑 正在优雅停止进程..."
+            kill -TERM "$PID" 2>/dev/null || true
+            for _ in $(seq 1 20); do
+                kill -0 "$PID" 2>/dev/null || break
+                sleep 0.1
+            done
+            if kill -0 "$PID" 2>/dev/null; then
+                echo "⚠️ 进程未在限定时间内退出，执行强制停止: PID $PID"
+                kill -KILL "$PID" 2>/dev/null || true
+            fi
+            ;;
+        *)
+            echo "❌ 8085 已被其他进程占用，未执行停止操作: PID $PID"
+            echo "   命令: $COMMAND"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$PIDS" ]; then
     echo "⚠️  未找到运行在端口 8085 的进程"
-else
-    echo "📌 找到进程 PID: $PID"
-    echo "🛑 正在停止进程..."
-    kill -9 $PID
-    sleep 2
-    echo "✅ 进程已停止"
 fi
 
 echo ""
 echo "🚀 启动 KnowBase Hub..."
 echo ""
 
-# 获取脚本所在目录
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-
-# 进入项目根目录（脚本在 🚀 启动脚本/ 子目录中）
-PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
-
 # 进入 KnowledgeBaseTool_Local 目录
-cd "$PROJECT_ROOT/KnowledgeBaseTool_Local"
+cd "$APP_DIR"
 
 # 启动应用
 echo "正在启动服务器..."

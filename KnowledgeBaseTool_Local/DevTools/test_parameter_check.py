@@ -8,6 +8,7 @@ from flask import Flask
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from parameter_check import (
+    DEFAULT_CATALOG_BASE_URL,
     assess_ai_candidate_against_snapshot,
     _ai_numeric_parameter_prompt,
     _feature_scan_status,
@@ -18,11 +19,17 @@ from parameter_check import (
     extract_numeric_parameter_claims,
     get_parameter_check_overview,
     _knowledge_revision,
+    _read_proposed_numeric_claims,
     normalize_model_name,
     register_parameter_check_routes,
     run_historical_ai_feature_scan_worker,
     select_ai_candidate_source_rows,
 )
+
+
+class ParameterCatalogEndpointTests(unittest.TestCase):
+    def test_default_catalog_url_targets_the_backend_service(self):
+        self.assertEqual(DEFAULT_CATALOG_BASE_URL, "http://127.0.0.1:18510")
 
 
 class _OverviewCursor:
@@ -86,6 +93,60 @@ class _OverviewCursor:
 
 
 class _OverviewConnection:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self, **_kwargs):
+        return self._cursor
+
+
+class _CurrentClaimCursor:
+    def __init__(self):
+        current_question = "最大吸力是多少？"
+        current_answer = "最大吸力为5500Pa。"
+        self.queries = []
+        self._fetchall_results = [
+            [
+                {
+                    "claim_id": "claim-current",
+                    "question_wiki_id": "ICWIKI-CURRENT",
+                    "feature_id": "suction",
+                    "asserted_value": "5500Pa",
+                    "normalized_value": "5500pa",
+                    "evidence_text": current_answer,
+                    "kb_revision": _knowledge_revision(current_question, current_answer),
+                    "question": current_question,
+                    "answer": current_answer,
+                },
+                {
+                    "claim_id": "claim-stale",
+                    "question_wiki_id": "ICWIKI-STALE",
+                    "feature_id": "suction",
+                    "asserted_value": "5400Pa",
+                    "normalized_value": "5400pa",
+                    "evidence_text": "最大吸力为5400Pa。",
+                    "kb_revision": "sha256:stale",
+                    "question": "最大吸力是多少？",
+                    "answer": current_answer,
+                },
+            ],
+            [{"model_id": "model-1"}],
+        ]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def execute(self, query, params=None):
+        self.queries.append(" ".join(str(query).split()))
+
+    def fetchall(self):
+        return self._fetchall_results.pop(0)
+
+
+class _CurrentClaimConnection:
     def __init__(self, cursor):
         self._cursor = cursor
 
@@ -182,6 +243,15 @@ class _QueueOverviewCursor:
 
 
 class ParameterCheckMappingTests(unittest.TestCase):
+    def test_current_comparison_excludes_claims_for_older_kb_revisions(self):
+        cursor = _CurrentClaimCursor()
+
+        claims = _read_proposed_numeric_claims(_CurrentClaimConnection(cursor), "扫地机")
+
+        self.assertEqual([claim["claim_id"] for claim in claims], ["claim-current"])
+        self.assertEqual(claims[0]["model_ids"], ["model-1"])
+        self.assertIn("JOIN knowledge_base_v1 AS knowledge", cursor.queries[0])
+
     def test_normalize_model_name_only_applies_controlled_whitespace_normalization(self):
         self.assertEqual(normalize_model_name(" P20 净立方 "), "p20净立方")
         self.assertEqual(normalize_model_name("P20净立方"), "p20净立方")
@@ -583,6 +653,31 @@ class ParameterCheckMappingTests(unittest.TestCase):
         run_ai.assert_called_once_with(connection, category_name="扫地机", actor="system", batch_size=10)
         connection.close.assert_called_once()
 
+    def test_refresh_compare_route_rebuilds_current_kb_claims_before_comparison(self):
+        app = Flask(__name__)
+        register_parameter_check_routes(app, lambda view: view, lambda: {"扫地机": []})
+        connection = Mock()
+        expected = {
+            "run_id": "run-comparison",
+            "snapshot_id": "snapshot-1",
+            "result_counts": {"finding_count": 3},
+            "scan_result": {"run_id": "run-extraction"},
+        }
+        with patch("flask_login.utils._get_user", return_value=Mock(is_authenticated=False)), patch(
+            "parameter_check.connect_main_database", return_value=connection
+        ), patch(
+            "parameter_check.run_current_knowledge_parameter_comparison", return_value=expected
+        ) as run_current:
+            response = app.test_client().post(
+                "/api/kb/parameter-check/runs",
+                json={"mode": "refresh_compare"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["run_id"], "run-comparison")
+        run_current.assert_called_once_with(connection, category_name="扫地机", actor="system")
+        connection.close.assert_called_once()
+
     def test_feature_scan_route_returns_before_the_background_worker_runs(self):
         app = Flask(__name__)
         register_parameter_check_routes(app, lambda view: view, lambda: {"扫地机": []})
@@ -700,7 +795,7 @@ class ParameterCheckMappingTests(unittest.TestCase):
             model_id=None,
             feature_id=None,
             wiki_id=None,
-            ai_view="queue",
+            ai_view="comparison",
             page=1,
             page_size=50,
         )

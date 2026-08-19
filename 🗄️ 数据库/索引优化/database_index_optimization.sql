@@ -103,28 +103,6 @@ ON knowledge_base_v1 USING gin(to_tsvector('simple', answer));
 COMMENT ON INDEX idx_kb_v1_answer_gin IS '答案全文搜索索引 - 用于答案内容搜索';
 
 -- ==========================================
--- 2. knowledge_base_v1_t1 表索引优化
--- ==========================================
-
--- 2.1 产品名称索引
-CREATE INDEX IF NOT EXISTS idx_kb_v1t1_product_name 
-ON knowledge_base_v1_t1 (product_name);
-
--- 2.2 更新时间索引
-CREATE INDEX IF NOT EXISTS idx_kb_v1t1_update_time 
-ON knowledge_base_v1_t1 (update_time DESC);
-
--- 2.3 产品分类索引
-CREATE INDEX IF NOT EXISTS idx_kb_v1t1_product_category 
-ON knowledge_base_v1_t1 (product_category_name);
-
--- 2.4 组合索引：产品名称 + 更新时间
-CREATE INDEX IF NOT EXISTS idx_kb_v1t1_product_time 
-ON knowledge_base_v1_t1 (product_name, update_time DESC);
-
--- 注意：v1_t1 表没有 review_status 字段，所以不创建相关索引
-
--- ==========================================
 -- 3. knowledge_base_modifications 表索引优化
 -- ==========================================
 
@@ -179,7 +157,7 @@ END $$;
 --     indexname,
 --     pg_size_pretty(pg_relation_size(schemaname||'.'||indexname)) AS index_size
 -- FROM pg_indexes
--- WHERE tablename IN ('knowledge_base_v1', 'knowledge_base_v1_t1')
+-- WHERE tablename = 'knowledge_base_v1'
 -- ORDER BY pg_relation_size(schemaname||'.'||indexname) DESC;
 
 -- ==========================================
@@ -188,7 +166,6 @@ END $$;
 
 -- 5.1 分析表统计信息（更新统计信息以优化查询计划）
 ANALYZE knowledge_base_v1;
-ANALYZE knowledge_base_v1_t1;
 
 -- 只有当表存在时才分析
 DO $$
@@ -207,7 +184,7 @@ END $$;
 --     pg_size_pretty(pg_relation_size(schemaname||'.'||tablename)) AS table_size,
 --     pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename) - pg_relation_size(schemaname||'.'||tablename)) AS indexes_size
 -- FROM pg_tables
--- WHERE tablename IN ('knowledge_base_v1', 'knowledge_base_v1_t1', 'knowledge_base_modifications')
+-- WHERE tablename IN ('knowledge_base_v1', 'knowledge_base_modifications')
 -- ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
 
 -- ==========================================
@@ -270,7 +247,7 @@ END $$;
 --     idx_tup_read AS tuples_read,
 --     idx_tup_fetch AS tuples_fetched
 -- FROM pg_stat_user_indexes
--- WHERE relname IN ('knowledge_base_v1', 'knowledge_base_v1_t1')
+-- WHERE relname = 'knowledge_base_v1'
 -- ORDER BY idx_scan DESC;
 
 -- 7.4 查找未使用的索引（定期检查）
@@ -280,7 +257,7 @@ END $$;
 --     indexrelname AS indexname,
 --     idx_scan
 -- FROM pg_stat_user_indexes
--- WHERE relname IN ('knowledge_base_v1', 'knowledge_base_v1_t1')
+-- WHERE relname = 'knowledge_base_v1'
 --   AND idx_scan = 0
 --   AND indexrelname NOT LIKE '%_pkey'
 -- ORDER BY pg_relation_size(schemaname||'.'||indexrelname) DESC;
@@ -322,17 +299,12 @@ END $$;
 DO $$
 DECLARE
     v1_count INTEGER;
-    v1t1_count INTEGER;
     mod_count INTEGER := 0;
 BEGIN
     -- 统计索引数量
     SELECT COUNT(*) INTO v1_count
     FROM pg_indexes
     WHERE tablename = 'knowledge_base_v1' AND indexname LIKE 'idx_kb_v1_%';
-    
-    SELECT COUNT(*) INTO v1t1_count
-    FROM pg_indexes
-    WHERE tablename = 'knowledge_base_v1_t1' AND indexname LIKE 'idx_kb_v1t1_%';
     
     -- 检查 modifications 表是否存在
     IF EXISTS (SELECT FROM pg_tables WHERE tablename = 'knowledge_base_modifications') THEN
@@ -344,7 +316,6 @@ BEGIN
     RAISE NOTICE '✅ 数据库索引优化完成！';
     RAISE NOTICE '📊 已创建索引：';
     RAISE NOTICE '   - knowledge_base_v1: % 个索引', v1_count;
-    RAISE NOTICE '   - knowledge_base_v1_t1: % 个索引', v1t1_count;
     IF mod_count > 0 THEN
         RAISE NOTICE '   - knowledge_base_modifications: % 个索引', mod_count;
     END IF;

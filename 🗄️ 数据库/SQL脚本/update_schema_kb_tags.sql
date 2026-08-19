@@ -1,5 +1,5 @@
 -- KB Tags: kb_tags + kb_item_tags
--- library_type: current (此刻库 V1) / previous (前刻库 V1T-1)
+-- library_type: current (V1)
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -24,7 +24,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kb_tags TO anon, authenticated;
 
 -- Mapping between KB items and tags
 CREATE TABLE IF NOT EXISTS kb_item_tags (
-    library_type TEXT NOT NULL,
+    library_type TEXT NOT NULL CHECK (library_type = 'current'),
     question_wiki_id TEXT NOT NULL,
     tag_id UUID NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now(),
@@ -44,4 +44,3 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kb_item_tags TO anon, authenticate
 
 CREATE INDEX IF NOT EXISTS idx_kb_item_tags_library_item ON kb_item_tags (library_type, question_wiki_id);
 CREATE INDEX IF NOT EXISTS idx_kb_item_tags_library_tag ON kb_item_tags (library_type, tag_id);
-

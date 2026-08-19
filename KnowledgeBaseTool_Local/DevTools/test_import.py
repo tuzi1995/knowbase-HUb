@@ -1,6 +1,14 @@
 import pandas as pd
 import requests
 import io
+import os
+import unittest
+
+if str(os.environ.get('KMATRIX_ALLOW_LIVE_WRITE_TESTS') or '').strip().lower() not in {'1', 'true', 'yes', 'on'}:
+    message = '在线导入写入测试默认禁用；运行前需设置 KMATRIX_ALLOW_LIVE_WRITE_TESTS=1'
+    if __name__ == '__main__':
+        raise SystemExit(message)
+    raise unittest.SkipTest(message)
 
 # Create a sample DataFrame with NaN
 data = {

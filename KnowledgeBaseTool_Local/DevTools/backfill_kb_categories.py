@@ -40,9 +40,8 @@ def backfill_kb_categories():
         print(f"❌ 加载型号库失败: {e}")
         return
 
-    # 2. 查询所有记录
-    # 我们同时处理 v1 和 v1_t1
-    for table in ['knowledge_base_v1', 'knowledge_base_v1_t1']:
+    # 2. 查询 V1 的所有记录
+    for table in ['knowledge_base_v1']:
         try:
             print(f"\n🔍 正在从 {table} 读取数据...")
             # 获取所有数据（可能较多，select_all 内部已处理分页）

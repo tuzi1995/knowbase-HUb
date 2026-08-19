@@ -12,7 +12,7 @@ DECLARE
     v_dup_count integer;
     v_has_constraint boolean;
 BEGIN
-    FOREACH v_table IN ARRAY ARRAY['knowledge_base_v1', 'knowledge_base_v1_t1']
+    FOREACH v_table IN ARRAY ARRAY['knowledge_base_v1']
     LOOP
         EXECUTE format(
             'SELECT COUNT(*) FROM public.%I WHERE question_wiki_id IS NULL OR btrim(question_wiki_id) = ''''',
