@@ -106,9 +106,38 @@ USER_PROMPT_TEMPLATE = """
 请返回 JSON 结果。
 """
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SCORING_CONFIG_FILE = os.path.join(_BASE_DIR, 'scoring_config.json')
-AI_CONFIG_FILE = os.path.join(_BASE_DIR, 'ai_config.json')
+_CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _runtime_path(value, default, relative_to):
+    path = os.path.expanduser(str(value or '').strip() or default)
+    if not os.path.isabs(path):
+        path = os.path.join(relative_to, path)
+    return os.path.abspath(path)
+
+
+_BASE_DIR = _runtime_path(os.environ.get('KMATRIX_BASE_DIR'), _CODE_DIR, _CODE_DIR)
+_CONFIG_DIR = _runtime_path(
+    os.environ.get('KMATRIX_CONFIG_DIR'), os.path.join(os.path.dirname(_BASE_DIR), '⚙️ 配置文件'), _BASE_DIR,
+)
+
+
+def _config_path(env_name, filename):
+    configured = str(os.environ.get(env_name) or '').strip()
+    if configured:
+        path = os.path.expanduser(configured)
+        return os.path.abspath(path if os.path.isabs(path) else os.path.join(_CONFIG_DIR, path))
+    external_path = os.path.join(_CONFIG_DIR, filename)
+    if os.path.exists(external_path):
+        return external_path
+    legacy_path = os.path.join(_BASE_DIR, filename)
+    if os.path.exists(legacy_path) or not os.environ.get('KMATRIX_CONFIG_DIR'):
+        return legacy_path
+    return external_path
+
+
+SCORING_CONFIG_FILE = _config_path('KMATRIX_SCORING_CONFIG_PATH', 'scoring_config.json')
+AI_CONFIG_FILE = _config_path('KMATRIX_AI_CONFIG_PATH', 'ai_config.json')
 
 def load_scoring_config():
     default_config = {
@@ -135,6 +164,7 @@ def load_scoring_config():
 def save_scoring_config(config):
     tmp_file = f"{SCORING_CONFIG_FILE}.tmp"
     try:
+        os.makedirs(os.path.dirname(SCORING_CONFIG_FILE), exist_ok=True)
         with open(tmp_file, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
             f.flush()
@@ -192,6 +222,7 @@ def load_ai_config():
 def save_ai_config(config):
     tmp_file = f"{AI_CONFIG_FILE}.tmp"
     try:
+        os.makedirs(os.path.dirname(AI_CONFIG_FILE), exist_ok=True)
         with open(tmp_file, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
             f.flush()

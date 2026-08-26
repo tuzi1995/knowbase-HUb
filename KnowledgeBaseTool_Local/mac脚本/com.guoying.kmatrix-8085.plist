@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.guoying.kmatrix-8085</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/guoying/AI建设和学习/One/knowbase_hub_8085/KnowledgeBaseTool_Local/run_server.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/guoying/AI建设和学习/One/knowbase_hub_8085/KnowledgeBaseTool_Local</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>KMATRIX_BASE_DIR</key>
+        <string>/Users/guoying/AI建设和学习/One/knowbase_hub_8085/KnowledgeBaseTool_Local</string>
+        <key>KMATRIX_INSTANCE_DIR</key>
+        <string>/Users/guoying/AI建设和学习/One/knowbase_hub_8085/KnowledgeBaseTool_Local/instance</string>
+        <key>KMATRIX_SQLITE_PATH</key>
+        <string>/Users/guoying/AI建设和学习/One/knowbase_hub_8085/KnowledgeBaseTool_Local/instance/data.db</string>
+        <key>KMATRIX_BACKUP_ROOT</key>
+        <string>/Volumes/ORICO/database/knowbasehub-backups</string>
+        <key>KMATRIX_STATIC_DIR</key>
+        <string>/Users/guoying/AI建设和学习/One/knowbase_hub_8085/KnowledgeBaseTool_Local/link_viewer</string>
+        <key>KMATRIX_CONFIG_DIR</key>
+        <string>/Users/guoying/AI建设和学习/One/knowbase_hub_8085/⚙️ 配置文件</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/knowbasehub-8085.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/knowbasehub-8085.err</string>
+</dict>
+</plist>

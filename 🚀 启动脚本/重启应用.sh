@@ -61,5 +61,5 @@ echo "按 Ctrl+C 停止服务器"
 echo "=========================================="
 echo ""
 
-# 启动 Flask 服务器
-python3 server.py
+# 启动 Flask 服务器；运行器会选择支持 hashlib.scrypt 的 Python。
+exec "$APP_DIR/run_server.sh"

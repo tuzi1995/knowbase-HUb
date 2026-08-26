@@ -32,6 +32,7 @@ AI_FEATURE_SCAN_CHUNK_SIZE = 10
 MODEL_SCOPE_LOOKBACK_CHARS = 20
 MODEL_SCOPE_LOOKAHEAD_CHARS = 48
 AI_CANDIDATE_PREFILTER_VERSION = "ai-numeric-prefilter-v2"
+PARAMETER_CHECK_HISTORY_RETENTION_DAYS = 30
 
 
 # These rules deliberately require both an explicit feature name and a matching
@@ -477,7 +478,7 @@ def _latest_snapshot(connection, category_name: str) -> dict[str, Any] | None:
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute(
             """
-            SELECT snapshot_id, content_json
+            SELECT snapshot_id, source_version, content_hash, synced_at, content_json
             FROM parameter_snapshot
             WHERE sync_status = 'ready'
               AND content_json @> %s::jsonb
@@ -487,6 +488,94 @@ def _latest_snapshot(connection, category_name: str) -> dict[str, Any] | None:
             (Json({"categories": [{"name": category_name}]}),),
         )
         return cursor.fetchone()
+
+
+def _current_knowledge_fingerprint(connection, category_name: str) -> str:
+    """Hash the current scoped knowledge revisions used by numeric comparison."""
+    scope_by_wiki, _scope_counts = resolve_confirmed_model_scope(connection, category_name)
+    rows = _read_scoped_knowledge_rows(connection, sorted(scope_by_wiki))
+    entries = [
+        {
+            "question_wiki_id": str(row.get("question_wiki_id") or ""),
+            "kb_revision": _knowledge_revision(
+                str(row.get("question") or ""),
+                str(row.get("answer") or ""),
+            ),
+            "model_ids": sorted(str(model_id) for model_id in scope_by_wiki.get(str(row.get("question_wiki_id") or ""), set())),
+        }
+        for row in rows
+    ]
+    entries.sort(key=lambda item: (item["question_wiki_id"], item["kb_revision"], item["model_ids"]))
+    return hashlib.sha256(
+        json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _find_reusable_numeric_comparison_run(
+    connection,
+    *,
+    category_name: str,
+    snapshot: dict[str, Any],
+    knowledge_fingerprint: str,
+) -> dict[str, Any] | None:
+    snapshot_hash = str(snapshot.get("content_hash") or "")
+    with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute(
+            """
+            SELECT run_id, snapshot_id, result_counts_json, created_at, completed_at
+            FROM parameter_check_run
+            WHERE status = 'completed'
+              AND scope_json ->> 'category_name' = %s
+              AND scope_json ->> 'stage' = 'numeric_comparison'
+              AND scope_json ->> 'rule_version' = %s
+              AND scope_json ->> 'knowledge_fingerprint' = %s
+              AND (
+                  snapshot_id = %s
+                  OR scope_json ->> 'snapshot_content_hash' = %s
+              )
+              AND created_at >= NOW() - (%s * INTERVAL '1 day')
+            ORDER BY completed_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            """,
+            (
+                category_name,
+                HISTORICAL_COMPARE_RULE_VERSION,
+                knowledge_fingerprint,
+                snapshot.get("snapshot_id"),
+                snapshot_hash,
+                PARAMETER_CHECK_HISTORY_RETENTION_DAYS,
+            ),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        reusable = dict(row)
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM parameter_check_run
+            WHERE status = 'completed'
+              AND scope_json ->> 'category_name' = %s
+              AND scope_json ->> 'stage' = 'numeric_comparison'
+              AND scope_json ->> 'rule_version' = %s
+              AND scope_json ->> 'knowledge_fingerprint' = %s
+              AND (
+                  snapshot_id = %s
+                  OR scope_json ->> 'snapshot_content_hash' = %s
+              )
+              AND created_at >= NOW() - (%s * INTERVAL '1 day')
+            """,
+            (
+                category_name,
+                HISTORICAL_COMPARE_RULE_VERSION,
+                knowledge_fingerprint,
+                snapshot.get("snapshot_id"),
+                snapshot_hash,
+                PARAMETER_CHECK_HISTORY_RETENTION_DAYS,
+            ),
+        )
+        reusable["reuse_count"] = int((cursor.fetchone() or {}).get("count") or 1)
+        return reusable
 
 
 def _source_models(connection, category_name: str, catalog_models: list[str]) -> list[dict[str, Any]]:
@@ -975,6 +1064,21 @@ def run_historical_numeric_comparison(
     snapshot_row = _latest_snapshot(connection, category_name)
     if not snapshot_row:
         raise ValueError(f"没有可用的 {category_name} 参数快照，请先同步快照。")
+    knowledge_fingerprint = _current_knowledge_fingerprint(connection, category_name)
+    reusable = _find_reusable_numeric_comparison_run(
+        connection,
+        category_name=category_name,
+        snapshot=snapshot_row,
+        knowledge_fingerprint=knowledge_fingerprint,
+    )
+    if reusable:
+        return {
+            "run_id": str(reusable["run_id"]),
+            "snapshot_id": str(reusable["snapshot_id"]),
+            "result_counts": reusable.get("result_counts_json") or {},
+            "reused": True,
+            "reuse_count": int(reusable.get("reuse_count") or 1),
+        }
     claims = _read_proposed_numeric_claims(connection, category_name)
     run_id = str(uuid.uuid4())
     scope_json = {
@@ -983,6 +1087,8 @@ def run_historical_numeric_comparison(
         "stage": "numeric_comparison",
         "rule_version": HISTORICAL_COMPARE_RULE_VERSION,
         "proposed_claim_count": len(claims),
+        "knowledge_fingerprint": knowledge_fingerprint,
+        "snapshot_content_hash": str(snapshot_row.get("content_hash") or ""),
     }
     if workflow:
         scope_json["workflow"] = workflow
@@ -1061,6 +1167,25 @@ def run_current_knowledge_parameter_comparison(
     actor: str,
 ) -> dict[str, Any]:
     """Refresh current KB numeric claims, then compare them with the latest parameter snapshot."""
+    snapshot_row = _latest_snapshot(connection, category_name)
+    if not snapshot_row:
+        raise ValueError(f"没有可用的 {category_name} 参数快照，请先同步快照。")
+    knowledge_fingerprint = _current_knowledge_fingerprint(connection, category_name)
+    reusable = _find_reusable_numeric_comparison_run(
+        connection,
+        category_name=category_name,
+        snapshot=snapshot_row,
+        knowledge_fingerprint=knowledge_fingerprint,
+    )
+    if reusable:
+        return {
+            "run_id": str(reusable["run_id"]),
+            "snapshot_id": str(reusable["snapshot_id"]),
+            "result_counts": reusable.get("result_counts_json") or {},
+            "reused": True,
+            "reuse_count": int(reusable.get("reuse_count") or 1),
+            "scan_result": None,
+        }
     scan_result = run_historical_numeric_claim_scan(
         connection,
         category_name=category_name,
@@ -2298,8 +2423,12 @@ def _parameter_check_run_payload(row: dict[str, Any]) -> dict[str, Any]:
         "run_type": row.get("run_type"),
         "snapshot_id": row.get("snapshot_id"),
         "stage": scope.get("stage"),
+        "rule_version": scope.get("rule_version"),
         "feature_id": scope.get("feature_id"),
         "feature_name": scope.get("feature_name"),
+        "knowledge_fingerprint": scope.get("knowledge_fingerprint"),
+        "snapshot_content_hash": scope.get("snapshot_content_hash"),
+        "proposed_claim_count": scope.get("proposed_claim_count"),
         "internal_chunk_size": scope.get("internal_chunk_size"),
         "ai_config_source": scope.get("ai_config_source"),
         "ai_model": scope.get("ai_model"),
@@ -2758,10 +2887,10 @@ def get_parameter_check_overview(
                    created_by, created_at, completed_at
             FROM parameter_check_run
             WHERE scope_json ->> 'category_name' = %s
+              AND created_at >= NOW() - (%s * INTERVAL '1 day')
             ORDER BY created_at DESC
-            LIMIT 20
             """,
-            (category_name,),
+            (category_name, PARAMETER_CHECK_HISTORY_RETENTION_DAYS),
         )
         run_rows = [dict(row) for row in cursor.fetchall()]
 
@@ -2778,9 +2907,11 @@ def get_parameter_check_overview(
                     SELECT run_id, run_type, snapshot_id, scope_json, status, result_counts_json,
                            created_by, created_at, completed_at
                     FROM parameter_check_run
-                    WHERE run_id = %s AND scope_json ->> 'category_name' = %s
+                    WHERE run_id = %s
+                      AND scope_json ->> 'category_name' = %s
+                      AND created_at >= NOW() - (%s * INTERVAL '1 day')
                     """,
-                    (run_id, category_name),
+                    (run_id, category_name, PARAMETER_CHECK_HISTORY_RETENTION_DAYS),
                 )
                 row = cursor.fetchone()
                 selected_run = dict(row) if row else None

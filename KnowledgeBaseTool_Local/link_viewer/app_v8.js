@@ -2852,14 +2852,98 @@ function renderParameterCheckRunOptions(overview) {
     if (!select) return;
     const selectedRunId = overview?.selected_run?.run_id || parameterCheckState.runId || '';
     const options = (Array.isArray(overview?.runs) ? overview.runs : [])
-        .filter(run => run.stage === 'numeric_comparison');
-    select.innerHTML = `<option value="">最新校对结果</option>${options.length ? `<optgroup label="历史校对批次">${options.map(run => {
-            const count = Number(run.result_counts?.finding_count || 0);
-            const completedAt = formatParameterCheckTime(run.completed_at || run.created_at);
-            const workflow = run.result_counts?.proposed_claim_count ? `已比对 ${count} 条` : `${count} 条结果`;
-            return `<option value="${escapeHtml(run.run_id)}">${escapeHtml(`${workflow} · ${completedAt}`)}</option>`;
-        }).join('')}</optgroup>` : ''}`;
-    select.value = options.some(run => run.run_id === selectedRunId) ? selectedRunId : '';
+        .filter(run => run.stage === 'numeric_comparison' && run.status === 'completed')
+        .sort((left, right) => new Date(right.completed_at || right.created_at || 0) - new Date(left.completed_at || left.created_at || 0));
+    const latest = options[0];
+    const selected = options.find(run => run.run_id === selectedRunId) || latest;
+    if (!selected) {
+        select.innerHTML = '<option value="">暂无已完成校对</option>';
+        select.value = '';
+        return;
+    }
+    const count = Number(selected.result_counts?.finding_count || 0);
+    const completedAt = formatParameterCheckTime(selected.completed_at || selected.created_at);
+    const label = selected.run_id === latest?.run_id ? `最新校对结果 · ${completedAt}` : `当前查看历史 · ${completedAt}`;
+    select.innerHTML = `<option value="${escapeHtml(selected.run_id)}">${escapeHtml(`${label} · ${count} 条结果`)}</option>`;
+    select.value = selected.run_id;
+}
+
+function getParameterCheckHistoryRuns() {
+    return (Array.isArray(parameterCheckState.overview?.runs) ? parameterCheckState.overview.runs : [])
+        .filter(run => run.stage === 'numeric_comparison' && run.status === 'completed')
+        .sort((left, right) => new Date(right.completed_at || right.created_at || 0) - new Date(left.completed_at || left.created_at || 0));
+}
+
+function groupParameterCheckHistoryRuns(runs) {
+    const groups = new Map();
+    runs.forEach(run => {
+        const resultCounts = run.result_counts || {};
+        const fingerprint = String(run.knowledge_fingerprint || '').trim();
+        const legacySummary = JSON.stringify({
+            snapshot_id: run.snapshot_id || '',
+            snapshot_content_hash: run.snapshot_content_hash || '',
+            rule_version: run.rule_version || '',
+            proposed_claim_count: run.proposed_claim_count ?? resultCounts.proposed_claim_count ?? null,
+            finding_count: resultCounts.finding_count ?? null,
+            consistent: resultCounts.consistent ?? null,
+            conflict: resultCounts.conflict ?? null,
+            needs_parameter_data: resultCounts.needs_parameter_data ?? null,
+        });
+        const key = fingerprint ? `fingerprint:${fingerprint}` : `legacy:${legacySummary}`;
+        const group = groups.get(key) || { latest: run, count: 0 };
+        group.count += 1;
+        groups.set(key, group);
+    });
+    return [...groups.values()];
+}
+
+function renderParameterCheckHistory() {
+    const body = document.getElementById('parameterCheckHistoryBody');
+    if (!body) return;
+    const runs = groupParameterCheckHistoryRuns(getParameterCheckHistoryRuns());
+    if (!runs.length) {
+        body.innerHTML = '<div class="parameter-check-history-empty">最近 30 天没有已完成的数值校对批次。</div>';
+        return;
+    }
+    body.innerHTML = `
+        <table class="parameter-check-history-table">
+          <thead><tr><th>完成时间</th><th>校对结果</th><th>参数快照</th><th>操作</th></tr></thead>
+          <tbody>${runs.map(group => {
+              const run = group.latest;
+              const count = Number(run.result_counts?.finding_count || 0);
+              const consistent = Number(run.result_counts?.consistent || 0);
+              const conflict = Number(run.result_counts?.conflict || 0);
+              const pending = Number(run.result_counts?.needs_parameter_data || 0);
+              const time = formatParameterCheckTime(run.completed_at || run.created_at);
+              return `<tr>
+                <td>${escapeHtml(time)}</td>
+                <td>${escapeHtml(`${count} 条，${consistent} 一致，${conflict} 冲突，${pending} 待补`)}${group.count > 1 ? `<span class="parameter-check-history-repeat">最近检查过 ${group.count} 次</span>` : ''}</td>
+                <td><code>${escapeHtml(run.snapshot_id || '-')}</code></td>
+                <td><button type="button" class="action-btn btn-secondary-outline btn-sm" data-run-id="${escapeHtml(run.run_id)}" onclick="selectParameterCheckHistoryRun(this.dataset.runId)">查看结果</button></td>
+              </tr>`;
+          }).join('')}</tbody>
+        </table>`;
+}
+
+async function openParameterCheckHistory() {
+    const dialog = document.getElementById('parameterCheckHistoryDialog');
+    if (!dialog) return;
+    if (!parameterCheckState.loaded) await loadParameterCheckOverview({ force: true });
+    renderParameterCheckHistory();
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+}
+
+function closeParameterCheckHistory() {
+    const dialog = document.getElementById('parameterCheckHistoryDialog');
+    if (!dialog) return;
+    if (typeof dialog.close === 'function') dialog.close();
+    else dialog.removeAttribute('open');
+}
+
+function selectParameterCheckHistoryRun(runId) {
+    closeParameterCheckHistory();
+    changeParameterCheckRun(runId);
 }
 
 function renderParameterCheckFilterOptions(overview) {
@@ -3441,12 +3525,18 @@ async function runParameterCheckCurrentKnowledgeComparison() {
             mode: 'refresh_compare',
         });
         if (!result?.success) throw new Error(result?.message || '当前知识库校对失败。');
+        if (status && result.reused) {
+            status.textContent = `当前知识库、参数快照和校对规则均未变化，已复用最近结果。最近检查过 ${Number(result.reuse_count || 1)} 次。`;
+        }
         parameterCheckState.loaded = false;
         parameterCheckState.runId = String(result.run_id || '');
         parameterCheckState.aiView = 'comparison';
         parameterCheckState.page = 1;
         parameterCheckState.selectedFindingId = '';
         await loadParameterCheckOverview({ runId: parameterCheckState.runId, aiView: 'comparison', page: 1, force: true });
+        if (status && result.reused) {
+            status.textContent = `当前知识库、参数快照和校对规则均未变化，已复用最近结果。最近检查过 ${Number(result.reuse_count || 1)} 次。`;
+        }
     } catch (error) {
         if (status) status.textContent = error?.message || '当前知识库校对失败。';
     } finally {

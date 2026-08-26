@@ -1068,11 +1068,14 @@
             </div>
             <div class="parameter-check-command-actions">
               <label class="parameter-check-run-select" for="parameterCheckRunSelect">
-                <span>校对批次</span>
+                <span>当前结果</span>
                 <select id="parameterCheckRunSelect" class="input-modern" onchange="changeParameterCheckRun(this.value)" aria-label="选择校对运行">
                   <option value="">正在加载运行记录</option>
                 </select>
               </label>
+              <button type="button" class="action-btn btn-secondary-outline parameter-check-refresh-btn" onclick="openParameterCheckHistory()" title="查看最近 30 天的已完成校对记录">
+                <i class="fas fa-clock-rotate-left" aria-hidden="true"></i><span>查看历史</span>
+              </button>
               <button type="button" id="parameterCheckRunCurrentBtn" class="primary-btn parameter-check-refresh-btn" onclick="runParameterCheckCurrentKnowledgeComparison()" title="重新提取当前知识库中的参数声明，并与智能参数汇总进行比较">
                 <i class="fas fa-check-double" aria-hidden="true"></i><span>校对当前知识库</span>
               </button>
@@ -1158,6 +1161,21 @@
           </section>
         </div>
       </div>
+
+      <dialog id="parameterCheckHistoryDialog" class="parameter-check-history-dialog" aria-labelledby="parameterCheckHistoryTitle" onclick="if (event.target === this) closeParameterCheckHistory()">
+        <div class="parameter-check-history-head">
+          <div>
+            <h3 id="parameterCheckHistoryTitle">校对历史</h3>
+            <p>仅显示最近 30 天的已完成数值校对批次，当前页面默认使用最新结果。</p>
+          </div>
+          <button type="button" class="btn-ghost" onclick="closeParameterCheckHistory()" title="关闭" aria-label="关闭">
+            <i class="fas fa-times" aria-hidden="true"></i>
+          </button>
+        </div>
+        <div id="parameterCheckHistoryBody" class="parameter-check-history-body">
+          <div class="parameter-check-history-empty">正在读取历史记录...</div>
+        </div>
+      </dialog>
 
       <!-- Tab Content: Knowledge Graph -->
       <div id="knowledgeGraphView" class="d-none">

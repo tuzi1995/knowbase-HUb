@@ -42,6 +42,12 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from scoring_logic import LLMScorer, calculate_product_overlap, load_scoring_config, save_scoring_config, load_ai_config, save_ai_config
+from prompt_runtime import (
+    PromptRuntimeError,
+    record_prompt_receipts,
+    render_published_template,
+    resolve_published_prompt,
+)
 from clone_difference_rules import (
     difference_feature_terms,
     merge_difference_rules,
@@ -100,7 +106,69 @@ try:
 except ImportError:
     HAS_PSYCOPG2 = False
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+_AI_EDITOR_PROMPT_IDS = {
+    'question': 'knowbase_hub_8085.ai_editor.question',
+    'answer': 'knowbase_hub_8085.ai_editor.answer',
+    'answer_structure': 'knowbase_hub_8085.ai_editor.answer_structure',
+    'answer_fault': 'knowbase_hub_8085.ai_editor.answer_fault',
+    'answer_usage': 'knowbase_hub_8085.ai_editor.answer_usage',
+    'answer_feature': 'knowbase_hub_8085.ai_editor.answer_feature',
+    'answer_requirement': 'knowbase_hub_8085.ai_editor.answer_requirement',
+    'similar': 'knowbase_hub_8085.ai_editor.similar',
+}
+
+
+def _resolve_ai_editor_runtime(area, task, values, request_override=None, *, execution_ref=''):
+    """Resolve published editor content while preserving explicit request overrides."""
+    key = area
+    if area == 'answer':
+        key = {
+            'structure': 'answer_structure',
+            'fault': 'answer_fault',
+            'usage': 'answer_usage',
+            'feature': 'answer_feature',
+            'requirement': 'answer_requirement',
+        }.get((task or '').strip(), 'answer')
+    prompt_id = _AI_EDITOR_PROMPT_IDS.get(key)
+    if not prompt_id:
+        return None
+    prompt = resolve_published_prompt(prompt_id, execution_ref=execution_ref)
+    bundle = prompt['content_bundle']
+    user_prompt = render_published_template(bundle['user_prompt_template'], values)
+    # A request-level system_prompt is a deliberate, ephemeral override.  It
+    # may run for compatibility, but it is never presented as a production
+    # Prompt runtime receipt.
+    override = str(request_override or '').strip()
+    system_prompt = override or bundle['system_prompt']
+    if override:
+        prompt = dict(prompt)
+        prompt['resolution_source'] = 'request_override'
+    else:
+        record_prompt_receipts(prompt, execution_ref=execution_ref)
+    return system_prompt, user_prompt, prompt
+
+
+def _resolve_runtime_path(env_name, default_path, *, relative_to=None):
+    configured = str(os.environ.get(env_name) or '').strip()
+    path = os.path.expanduser(configured or default_path)
+    if not os.path.isabs(path):
+        path = os.path.join(relative_to or _CODE_DIR, path)
+    return os.path.abspath(path)
+
+
+_BASE_DIR = _resolve_runtime_path('KMATRIX_BASE_DIR', _CODE_DIR)
+_INSTANCE_DIR = _resolve_runtime_path(
+    'KMATRIX_INSTANCE_DIR', os.path.join(_BASE_DIR, 'instance'), relative_to=_BASE_DIR,
+)
+_STATIC_DIR = _resolve_runtime_path(
+    'KMATRIX_STATIC_DIR', os.path.join(_BASE_DIR, 'link_viewer'), relative_to=_BASE_DIR,
+)
+_CONFIG_DIR = _resolve_runtime_path(
+    'KMATRIX_CONFIG_DIR', os.path.join(os.path.dirname(_BASE_DIR), '⚙️ 配置文件'), relative_to=_BASE_DIR,
+)
 
 
 def _env_flag(name):
@@ -120,10 +188,11 @@ def _is_temporary_path(path):
 
 
 def _resolve_sqlite_database_path():
-    instance_dir = os.path.join(_BASE_DIR, 'instance')
     configured = str(os.environ.get('KMATRIX_SQLITE_PATH') or '').strip()
     if not _is_test_process():
-        return configured or os.path.join(instance_dir, 'data.db')
+        return _resolve_runtime_path(
+            'KMATRIX_SQLITE_PATH', os.path.join(_INSTANCE_DIR, 'data.db'), relative_to=_INSTANCE_DIR,
+        )
 
     return _shared_resolve_test_sqlite_path(_BASE_DIR, configured)
 
@@ -189,19 +258,17 @@ def _get_matrix_clone_progress(operation_id):
     if progress:
         progress['elapsed_seconds'] = max(0, int(time.time() - progress['started_at']))
     return progress
-_INSTANCE_DIR = os.path.join(_BASE_DIR, 'instance')
 _DEFAULT_BACKUP_ROOT = '/Volumes/ORICO/database/knowbasehub-backups'
 
 
 def _resolve_backup_root():
-    configured = str(os.environ.get('KMATRIX_BACKUP_ROOT') or '').strip()
-    return os.path.abspath(os.path.expanduser(configured or _DEFAULT_BACKUP_ROOT))
+    return _resolve_runtime_path('KMATRIX_BACKUP_ROOT', _DEFAULT_BACKUP_ROOT, relative_to=_BASE_DIR)
 
 
 _BACKUP_ROOT = _resolve_backup_root()
 app = Flask(
     __name__,
-    static_folder=os.path.join(_BASE_DIR, 'link_viewer'),
+    static_folder=_STATIC_DIR,
     static_url_path='',
     instance_path=_INSTANCE_DIR,
 )
@@ -1409,9 +1476,29 @@ class QualityImportJob(db.Model):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
+
+def _password_hash_requires_scrypt(password_hash):
+    return str(password_hash or '').strip().lower().startswith('scrypt:')
+
+
+def _ensure_password_hash_runtime():
+    """Fail at startup when the runtime cannot verify the stored hashes."""
+    if callable(getattr(hashlib, 'scrypt', None)):
+        return
+    stored_hash = User.query.with_entities(User.password_hash).filter(
+        User.password_hash.like('scrypt:%')
+    ).first()
+    if stored_hash and _password_hash_requires_scrypt(stored_hash[0]):
+        raise RuntimeError(
+            '当前 Python 运行时缺少 hashlib.scrypt，无法验证现有管理员密码；'
+            '请使用支持 scrypt 的 Python 3.10+ 运行服务。'
+        )
+
+
 def init_db():
     with app.app_context():
         db.create_all()
+        _ensure_password_hash_runtime()
         init_knowledge_graph_schema(_DB_PATH)
         cur_con = None
         legacy_con = None
@@ -1585,12 +1672,12 @@ def init_db():
 # Routes
 @app.route('/')
 def index():
-    return send_from_directory(os.path.join(_BASE_DIR, 'link_viewer'), 'index.html')
+    return send_from_directory(_STATIC_DIR, 'index.html')
 
 
 @app.route('/platform-intro')
 def platform_intro():
-    return send_from_directory(os.path.join(_BASE_DIR, 'link_viewer'), 'platform_intro.html')
+    return send_from_directory(_STATIC_DIR, 'platform_intro.html')
 
 
 @app.route('/api/embed/validate')
@@ -2448,15 +2535,17 @@ from scoring_logic import LLMScorer, calculate_product_overlap, DEFAULT_SYSTEM_P
 
 # Configuration File for Scoring
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# 优先检查 ⚙️ 配置文件 目录
-_EXTERNAL_CONFIG_DIR = os.path.join(os.path.dirname(BASE_DIR), '⚙️ 配置文件')
+BASE_DIR = _BASE_DIR
 
 def _get_config_path(filename):
-    ext_path = os.path.join(_EXTERNAL_CONFIG_DIR, filename)
+    explicit_config_dir = str(os.environ.get('KMATRIX_CONFIG_DIR') or '').strip()
+    ext_path = os.path.join(_CONFIG_DIR, filename)
     if os.path.exists(ext_path):
         return ext_path
-    return os.path.join(BASE_DIR, filename)
+    legacy_path = os.path.join(BASE_DIR, filename)
+    if os.path.exists(legacy_path) or not explicit_config_dir:
+        return legacy_path
+    return ext_path
 
 PRODUCT_CATALOG_FILE = _get_config_path('product_catalog.json')
 MODEL_MAPPINGS_FILE = _get_config_path('model_mappings.json')
@@ -4119,11 +4208,6 @@ def ai_optimize_stream():
                 yield _ai_ndjson({"type": "error", "message": "Invalid area"})
                 return
 
-            cfg = load_ai_config() or {}
-            prompts = (cfg.get('ai_prompts') or {}) if isinstance(cfg.get('ai_prompts'), dict) else {}
-            defaults = _ai_default_prompts()
-            tpl = _ai_pick_prompt(area, task, prompts, defaults)
-
             vars_map = {
                 'task': task,
                 'question': question,
@@ -4136,11 +4220,18 @@ def ai_optimize_stream():
                 'count_max': payload.get('count_max', 5),
                 'difficulty': payload.get('difficulty')
             }
-            user_prompt = _ai_render_template(tpl, vars_map)
-
-            system_prompt = payload.get('system_prompt')
-            if system_prompt is None:
-                system_prompt = "你是一个严谨的编辑助手，输出必须为严格 JSON，不要输出任何额外文本。"
+            cfg = load_ai_config() or {}
+            runtime = _resolve_ai_editor_runtime(
+                area, task, vars_map, payload.get('system_prompt'),
+                execution_ref=str(request.headers.get('X-Request-ID') or uuid.uuid4()),
+            )
+            if runtime is None:
+                prompts = (cfg.get('ai_prompts') or {}) if isinstance(cfg.get('ai_prompts'), dict) else {}
+                tpl = _ai_pick_prompt(area, task, prompts, _ai_default_prompts())
+                user_prompt = _ai_render_template(tpl, vars_map)
+                system_prompt = payload.get('system_prompt') or "你是一个严谨的编辑助手，输出必须为严格 JSON，不要输出任何额外文本。"
+            else:
+                system_prompt, user_prompt, _runtime_prompt = runtime
 
             # Stream once; validate at end (no retries in streaming mode)
             full_text_parts = []
@@ -13589,7 +13680,7 @@ class LocalPostgreSQLClient:
         norm_path = os.path.normpath(object_path)
         if not norm_path or norm_path == '.' or norm_path.startswith('..') or os.path.isabs(norm_path):
             raise ValueError('Invalid storage object path')
-        root = os.path.abspath(os.path.join(_BASE_DIR, 'instance', 'storage', bucket))
+        root = os.path.abspath(os.path.join(_INSTANCE_DIR, 'storage', bucket))
         abs_path = os.path.abspath(os.path.join(root, norm_path))
         if abs_path != root and not abs_path.startswith(root + os.sep):
             raise ValueError('Storage path escapes bucket root')
@@ -16805,7 +16896,7 @@ _SM_EMBEDDING_TRANSIENT_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
 def _sm_embedding_config_path():
-    return os.path.join(_BASE_DIR, 'smart_mapping_embedding_config.json')
+    return _get_config_path('smart_mapping_embedding_config.json')
 
 
 def _sm_embedding_bool(value, default=False):
@@ -16999,10 +17090,14 @@ def _sm_save_embedding_config(payload):
     path = _sm_embedding_config_path()
     temp_path = ''
     try:
-        with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=_BASE_DIR, delete=False) as handle:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            'w', encoding='utf-8', dir=os.path.dirname(path), delete=False
+        ) as handle:
             json.dump(stored, handle, ensure_ascii=False, indent=2)
             handle.write('\n')
             temp_path = handle.name
+        os.chmod(temp_path, 0o600)
         os.replace(temp_path, path)
     finally:
         if temp_path and os.path.exists(temp_path):

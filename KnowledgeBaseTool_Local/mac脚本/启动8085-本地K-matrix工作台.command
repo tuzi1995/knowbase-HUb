@@ -6,15 +6,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVER_PY="$PROJECT_DIR/server.py"
 REQ_FILE="$PROJECT_DIR/requirements.txt"
-CONFIG_FILE="$PROJECT_DIR/supabase_config_local.json"
+export KMATRIX_BASE_DIR="${KMATRIX_BASE_DIR:-$PROJECT_DIR}"
+export KMATRIX_INSTANCE_DIR="${KMATRIX_INSTANCE_DIR:-$PROJECT_DIR/instance}"
+export KMATRIX_SQLITE_PATH="${KMATRIX_SQLITE_PATH:-$PROJECT_DIR/instance/data.db}"
+export KMATRIX_BACKUP_ROOT="${KMATRIX_BACKUP_ROOT:-/Volumes/ORICO/database/knowbasehub-backups}"
+export KMATRIX_STATIC_DIR="${KMATRIX_STATIC_DIR:-$PROJECT_DIR/link_viewer}"
+export KMATRIX_CONFIG_DIR="${KMATRIX_CONFIG_DIR:-$PROJECT_DIR/../⚙️ 配置文件}"
+if [[ -f "$KMATRIX_CONFIG_DIR/supabase_config_local.json" ]]; then
+  CONFIG_FILE="$KMATRIX_CONFIG_DIR/supabase_config_local.json"
+else
+  CONFIG_FILE="$PROJECT_DIR/supabase_config_local.json"
+fi
 
 echo "🚀 启动 KnowBase Hub 本地版..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-if command -v python3 >/dev/null 2>&1; then
-  PYEXE="python3"
-elif command -v python >/dev/null 2>&1; then
-  PYEXE="python"
+if [[ -x "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3" ]]; then
+  PYEXE="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
+elif command -v python3 >/dev/null 2>&1; then
+  PYEXE="$(command -v python3)"
 else
   echo "❌ ERROR: Missing python3/python in PATH." >&2
   read -r -p "Press Enter to close..." || true
@@ -143,7 +153,7 @@ echo ""
 echo "💡 提示: 按 Ctrl+C 停止服务器"
 echo ""
 
-"$PYEXE" "$SERVER_PY" 2>&1 | tee -a "$LOG_FILE"
+"$PROJECT_DIR/run_server.sh" 2>&1 | tee -a "$LOG_FILE"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -157,4 +167,3 @@ if command -v open >/dev/null 2>&1; then
 fi
 
 read -r -p "按 Enter 键关闭..." || true
-

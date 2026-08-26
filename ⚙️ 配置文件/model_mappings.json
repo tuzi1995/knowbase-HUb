@@ -23,7 +23,8 @@
     "A30 Pro Steam 智享版",
     "A30 Pro Steam 2.0",
     "A30 Pro Steam 2.0 尊享版",
-    "A30 Pro Steam 2.0 5合1版"
+    "A30 Pro Steam 2.0 5合1版",
+    "A30 Pro Steam 3.0"
   ],
   "A30 pure同内部名Morph Lite C": [
     "A30 Lite",
@@ -87,7 +88,10 @@
     "智净",
     "A30 超能版",
     "A30 Pro Steam 2.0 5合1版",
-    "A30 Pro Combo 2.0"
+    "A30 Pro Combo 2.0",
+    "A30 Pro Steam 3.0",
+    "A30 Pro Ultra 3.0",
+    "A30 Pro 3.0"
   ],
   "A30 系列（带拓界系列）": [
     "A30 Pro",
@@ -124,7 +128,10 @@
     "智净",
     "A30 超能版",
     "A30 Pro Steam 2.0 5合1版",
-    "A30 Pro Combo 2.0"
+    "A30 Pro Combo 2.0",
+    "A30 Pro Ultra 3.0",
+    "A30 Pro Steam 3.0",
+    "A30 Pro 3.0"
   ],
   "A30系列支持联网的": [
     "A30 Pro",
@@ -136,7 +143,10 @@
     "A30 Pro 2.0",
     "A30 Pro Steam 2.0 尊享版",
     "A30 Pro Steam 2.0 5合1版",
-    "A30 Pro Combo 2.0"
+    "A30 Pro Combo 2.0",
+    "A30 Pro Ultra 3.0",
+    "A30 Pro Steam 3.0",
+    "A30 Pro 3.0"
   ],
   "G20S Ultra同内部名": [
     "G30 U",
@@ -295,8 +305,8 @@
     "洗衣机Z1 Max",
     "洗衣机Z1 Max银盾版",
     "洗衣机Z1 Max智控版",
-    "Z1 Ultra 超水解",
-    "HOPE Pro"
+    "HOPE Pro",
+    "Z1 Ultra"
   ],
   "小洗": [
     "M1",
@@ -410,7 +420,6 @@
     "U10",
     "V20",
     "Z1 Max Ultra",
-    "Z1 Ultra 超水解",
     "分子筛干衣机Z1 Max",
     "套装Z1 Max",
     "拓界 Aura",
@@ -442,7 +451,13 @@
     "A30 Pro Steam 2.0 5合1版",
     "A30 Pro Combo 2.0",
     "P30 Pro",
-    "G30S Ultra"
+    "G30S Ultra",
+    "A30 Pro Ultra 3.0",
+    "A30 Pro 3.0",
+    "A30 Pro Steam 3.0",
+    "Z1 mini",
+    "Z1 Ultra",
+    "Z1 mini Pro"
   ],
   "所有扫地机": [
     "P5",
@@ -532,7 +547,11 @@
     "A30 超能版",
     "拓界 Tech",
     "智净",
-    "A30 Pro Steam 2.0 5合1版"
+    "A30 Pro Steam 2.0 5合1版",
+    "A30 Pro Ultra 3.0",
+    "A30 Pro Combo 2.0",
+    "A30 Pro 3.0",
+    "A30 Pro Steam 3.0"
   ],
   "所有洗衣机": [
     "H1",
@@ -557,11 +576,13 @@
     "Z1 Max Pro",
     "Z1 Max Ultra",
     "Q1 Hello Kitty",
-    "Z1 Ultra 超水解",
     "M1S Ultra",
     "Q1 Plus",
     "Q1 Plus 贴贴版",
-    "HOPE Pro"
+    "HOPE Pro",
+    "Z1 Ultra",
+    "Z1 mini",
+    "Z1 mini Pro"
   ],
   "拓界-抖音专供": [
     "拓界 Mist",
@@ -641,7 +662,13 @@
     "A30 Pro Steam",
     "A30 Pro Steam 5合1版",
     "A30 Pro 2.0",
-    "A30 Pro Steam 2.0 尊享版"
+    "A30 Pro Steam 2.0 尊享版",
+    "A30 Pro 3.0",
+    "A30 Pro Steam 2.0 5合1版",
+    "A30 Pro Steam 2.0",
+    "A30 Pro Combo 2.0",
+    "A30 Pro Steam 3.0",
+    "A30 Pro Ultra 3.0"
   ],
   "洗烘套装": [
     "套装Z1 Max",
@@ -684,7 +711,9 @@
     "P20活水版",
     "P20 Ultra活水版",
     "P20 MAX",
-    "P20 净立方"
+    "P20 净立方",
+    "G30S Ultra",
+    "P30 Pro"
   ],
   "滚筒拖布，无纯拖，先扫后拖在快捷指令里": [
     "P20活水版",

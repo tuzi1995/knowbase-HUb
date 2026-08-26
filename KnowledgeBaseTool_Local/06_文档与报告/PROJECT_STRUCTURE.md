@@ -51,7 +51,7 @@
 ## 6. 部署与打包 (Deployment)
 用于项目打包和部署。
 - **`package_deploy.py`**: 自动打包脚本。
-- **`README_DEPLOY.txt`**: 部署说明文档。
+- **`../../🚀 启动脚本/README_DEPLOY.txt`**: 部署说明文档（本文件迁入 `06_文档与报告` 后的相对路径）。
 - **`KnowledgeBaseTool_Deploy_*.zip`**: 生成的部署包。
 
 ## 7. 其他辅助脚本 (Scripts)
