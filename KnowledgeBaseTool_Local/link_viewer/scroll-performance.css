@@ -3,9 +3,10 @@
    只保留最关键的优化，避免过度优化
    ============================================ */
 
-/* 1. 平滑滚动 */
+/* 1. Keep programmatic navigation immediate. Smooth scrolling queues work
+   while the user is dragging a large table in Chrome. */
 html {
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 /* 2. 优化表格容器滚动 - 最关键 */
@@ -16,11 +17,20 @@ html {
   -webkit-overflow-scrolling: touch;
   /* 只优化滚动容器 */
   overflow: auto;
+  contain: layout paint;
 }
 
 /* 3. 固定表格布局 - 防止重排 */
 .kb-table {
   table-layout: fixed;
+}
+
+/* Large workbench tables can contain thousands of cells. Let Chrome skip
+   rows outside the viewport while preserving native table layout and scroll
+   height. This is especially important for the wide model matrix. */
+#mainContent .table-container > table > tbody > tr {
+  content-visibility: auto;
+  contain-intrinsic-size: 40px;
 }
 
 /* 4. 优化文本渲染 */

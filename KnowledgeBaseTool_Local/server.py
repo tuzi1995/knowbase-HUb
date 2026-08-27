@@ -6667,11 +6667,19 @@ def _mod_source_match(source_val, wanted):
     w = str(wanted or '').strip()
     if not w:
         return True
-    if w in s:
+    # Source labels are user-facing values and may contain one another (for
+    # example, "知识库管理" is part of "知识库内容检测工具").  Substring
+    # matching therefore leaks records across source filters; only an exact
+    # label or an explicitly known source code should match.
+    if s == w:
         return True
+    known_w = w in SOURCE_CODE_LABELS or w in SOURCE_CODE_BY_LEGACY_LABEL
+    known_s = s in SOURCE_CODE_LABELS or s in SOURCE_CODE_BY_LEGACY_LABEL
+    if not known_w or not known_s:
+        return False
     wanted_code = _normalize_source_code(w)
     source_code = _normalize_source_code(s)
-    return wanted_code == source_code and (w in SOURCE_CODE_LABELS or w in SOURCE_CODE_BY_LEGACY_LABEL)
+    return wanted_code == source_code
 
 def _mod_operation_match(op_val, wanted):
     if not wanted:

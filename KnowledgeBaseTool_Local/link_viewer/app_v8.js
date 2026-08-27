@@ -146,8 +146,9 @@ function appendSearchableKbIds(container, rawValue) {
         control.className = 'clickable-id';
         control.title = '点击搜索此ID';
         control.setAttribute('aria-label', `按 KB ID ${wikiId} 搜索`);
+        control.dataset.kbAction = 'search-id';
+        control.dataset.kbValue = wikiId;
         control.textContent = wikiId;
-        control.addEventListener('click', () => searchKBById(wikiId));
         row.appendChild(control);
         container.appendChild(row);
     });
@@ -165,15 +166,17 @@ function appendKbUrlRow(container, rawValue) {
     copyButton.className = 'kb-mini-action-btn kb-mini-action-btn-icon';
     copyButton.title = '复制链接';
     copyButton.setAttribute('aria-label', '复制链接');
+    copyButton.dataset.kbAction = 'copy-url';
+    copyButton.dataset.kbValue = displayUrl;
     copyButton.innerHTML = '<i class="fas fa-copy" aria-hidden="true"></i>';
-    copyButton.addEventListener('click', () => copyToClipboard(displayUrl));
 
     const searchButton = document.createElement('button');
     searchButton.type = 'button';
     searchButton.className = 'kb-url-link';
     searchButton.title = `点击搜索: ${displayUrl}`;
+    searchButton.dataset.kbAction = 'search-url';
+    searchButton.dataset.kbValue = displayUrl;
     searchButton.textContent = displayUrl;
-    searchButton.addEventListener('click', () => searchKBByUrl(displayUrl));
 
     row.append(copyButton, searchButton);
     if (safeUrl) {
@@ -1187,7 +1190,9 @@ function makeTableResizable(tableId) {
     const ths = table.querySelectorAll('th');
     
     ths.forEach((th, index) => {
-        if (th.querySelector('.resizer')) return;
+        // Dynamic tables may already use the newer .col-resizer handler.
+        // Avoid stacking two mousedown listeners on the same header cell.
+        if (th.querySelector('.resizer, .col-resizer')) return;
         
         // Skip checkbox column for resizing if desired
         // if (th.classList.contains('col-checkbox')) return;
@@ -1198,6 +1203,8 @@ function makeTableResizable(tableId) {
         
         let x = 0;
         let w = 0;
+        let resizeFrame = 0;
+        let latestClientX = 0;
         
         const mouseDownHandler = function(e) {
             e.stopPropagation();
@@ -1211,25 +1218,30 @@ function makeTableResizable(tableId) {
         };
         
         const mouseMoveHandler = function(e) {
-            const dx = e.clientX - x;
-            // 不限制最短列宽，支持自定义拖拽
-            const newWidth = Math.max(20, w + dx); 
-            th.style.width = `${newWidth}px`;
-            th.style.minWidth = '0'; 
-            const colKey = th.dataset.colKey;
-            if (isLinkTable && colKey) {
-                linkTableWidths[colKey] = newWidth;
-                const col = table.querySelector(`col[data-col-key="${colKey}"]`);
-                if (col) col.style.width = `${newWidth}px`;
-                th.style.minWidth = `${newWidth}px`;
-            }
-            
-            if (isKBTable) {
-                // updateStickyColumns();
-            }
+            latestClientX = e.clientX;
+            if (resizeFrame) return;
+            resizeFrame = requestAnimationFrame(() => {
+                resizeFrame = 0;
+                const dx = latestClientX - x;
+                // 不限制最短列宽，支持自定义拖拽
+                const newWidth = Math.max(20, w + dx);
+                th.style.width = `${newWidth}px`;
+                th.style.minWidth = '0';
+                const colKey = th.dataset.colKey;
+                if (isLinkTable && colKey) {
+                    linkTableWidths[colKey] = newWidth;
+                    const col = table.querySelector(`col[data-col-key="${colKey}"]`);
+                    if (col) col.style.width = `${newWidth}px`;
+                    th.style.minWidth = `${newWidth}px`;
+                }
+            });
         };
         
         const mouseUpHandler = function() {
+            if (resizeFrame) {
+                cancelAnimationFrame(resizeFrame);
+                resizeFrame = 0;
+            }
             document.removeEventListener('mousemove', mouseMoveHandler);
             document.removeEventListener('mouseup', mouseUpHandler);
             resizer.classList.remove('resizing');
@@ -1260,7 +1272,9 @@ let currentMatrixData = [];
 let matrixColumns = [];
 let matrixTotal = 0;
 let matrixCurrentPage = 1;
-let matrixPageSize = 50;
+// Keep the wide matrix responsive by default; larger pages remain available
+// from the existing page-size selector when a bulk view is needed.
+let matrixPageSize = 20;
 let selectedMatrixRows = new Set();
 let matrixFilteredTotal = null;
 let matrixFilteredTotalRequestSeq = 0;
@@ -1480,6 +1494,7 @@ function updateWorkbenchHeader(tabId) {
 let workbenchSidebarHeightRaf = null;
 const WORKBENCH_SIDEBAR_STORAGE_KEY = 'link_viewer_workbench_sidebar_collapsed_v1';
 let workbenchSidebarCollapsed = false;
+let activeWorkbenchTabButton = null;
 
 function getWorkbenchSidebarElements() {
     return {
@@ -1611,8 +1626,9 @@ function normalizeWorkbenchViews() {
 
 function switchTab(tabId) {
     normalizeWorkbenchViews();
-    const tabs = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'activityArchiveView', 'smartMappingView', 'newProductEntryView'];
     const viewsWrap = document.querySelector('.workbench-views');
+    const activeView = document.getElementById(tabId);
+    if (!viewsWrap || !activeView) return;
     const isQualityControlCenter = tabId === 'controlCenterView';
     [
         document.getElementById('workbenchLayout'),
@@ -1623,38 +1639,28 @@ function switchTab(tabId) {
         if (el) el.classList.toggle('qc-active-workbench', isQualityControlCenter);
     });
     
-    tabs.forEach(id => {
-        const el = document.getElementById(id);
-        if (el) {
-            el.classList.remove('is-active-view');
-            
-            if (id === tabId) {
-                el.classList.remove('d-none');
-                el.classList.add('is-active-view');
-                el.style.display = '';
-                const section = el.querySelector('.kb-section');
-                if (section) section.style.display = '';
-            } else {
-                el.classList.add('d-none');
-                el.style.display = 'none';
-            }
-        }
+    // currentTab can become stale after async initialization or DOM moves.
+    // Enforce the actual invariant: exactly one workbench view is visible.
+    Array.from(viewsWrap.children).forEach(view => {
+        const isActive = view === activeView;
+        view.classList.toggle('d-none', !isActive);
+        view.classList.toggle('is-active-view', isActive);
+        view.style.removeProperty('display');
     });
+    const section = activeView.querySelector('.kb-section');
+    if (section) section.classList.remove('d-none');
     
-    // Update buttons - 支持新旧两种class
-    document.querySelectorAll('.tab-btn, .tab-modern').forEach(btn => {
-        btn.classList.remove('active');
-        btn.removeAttribute('aria-current');
-        // 移除旧样式
-        btn.style.borderBottom = '';
-        btn.style.color = '';
-    });
-
     const activeBtn = document.getElementById('tab-' + tabId);
+    document.querySelectorAll('.workbench-nav-btn').forEach(button => {
+        const isActive = button === activeBtn;
+        button.classList.toggle('active', isActive);
+        if (isActive) button.setAttribute('aria-current', 'page');
+        else button.removeAttribute('aria-current');
+    });
     if (activeBtn) {
-        activeBtn.classList.add('active');
-        activeBtn.setAttribute('aria-current', 'page');
-        // 不再需要内联样式，CSS会处理
+        activeWorkbenchTabButton = activeBtn;
+    } else {
+        activeWorkbenchTabButton = null;
     }
     
     currentTab = tabId;
@@ -7071,6 +7077,67 @@ function clearGovernanceViewState() {
     updateGovPagination();
 }
 
+function _updateGovSelectionUi() {
+    const button = document.getElementById('btnDeleteSelectedGov');
+    if (button) {
+        button.classList.toggle('d-none', selectedGovRows.size === 0);
+        button.disabled = selectedGovRows.size === 0;
+    }
+    const visibleIds = new Set(
+        Array.from(document.querySelectorAll('#govTableBody input[data-gov-id]'))
+            .map(input => String(input.dataset.govId || ''))
+    );
+    const selectAll = document.getElementById('govSelectAll');
+    if (selectAll) {
+        const selectedVisible = Array.from(visibleIds).filter(id => selectedGovRows.has(id)).length;
+        selectAll.checked = visibleIds.size > 0 && selectedVisible === visibleIds.size;
+        selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleIds.size;
+    }
+}
+
+function toggleGovRowSelection(id, checked) {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) return;
+    if (checked) selectedGovRows.add(normalizedId);
+    else selectedGovRows.delete(normalizedId);
+    _updateGovSelectionUi();
+}
+
+function toggleGovSelectAll(checked) {
+    document.querySelectorAll('#govTableBody input[data-gov-id]').forEach(input => {
+        const id = String(input.dataset.govId || '').trim();
+        input.checked = !!checked;
+        if (id) {
+            if (checked) selectedGovRows.add(id);
+            else selectedGovRows.delete(id);
+        }
+    });
+    _updateGovSelectionUi();
+}
+
+async function deleteSelectedGovItems() {
+    const ids = Array.from(selectedGovRows);
+    const months = Array.isArray(currentGovMonths) ? currentGovMonths.filter(Boolean) : [];
+    if (!ids.length || !months.length) {
+        _updateGovSelectionUi();
+        return;
+    }
+    if (!confirm(`确认删除选中的 ${ids.length} 条知识在当前月份范围内的治理数据吗？此操作不可恢复。`)) return;
+    const button = document.getElementById('btnDeleteSelectedGov');
+    if (button) button.disabled = true;
+    try {
+        const res = await api('/governance/delete_items', 'POST', { ids, months });
+        if (!res.success) throw new Error(res.message || '批量删除失败');
+        selectedGovRows.clear();
+        await loadGovernanceData();
+        alert(`已删除 ${res.deleted ?? res.local_deleted ?? 0} 条治理数据。`);
+    } catch (error) {
+        alert(`批量删除失败: ${error?.message || error}`);
+    } finally {
+        _updateGovSelectionUi();
+    }
+}
+
 function _govReadDashboardRange() {
     try {
         return JSON.parse(localStorage.getItem(GOV_DASHBOARD_RANGE_STORAGE_KEY) || '{}') || {};
@@ -7826,7 +7893,15 @@ function renderGovTable() {
     // Row 1
     const tr1 = document.createElement('tr');
     
-    // Fixed Columns (WikiID, Question, AI Score)
+    // Selection plus fixed columns (WikiID, Question, AI Score)
+    const selectTh = document.createElement('th');
+    selectTh.rowSpan = 2;
+    selectTh.className = 'col-checkbox';
+    selectTh.style.verticalAlign = 'middle';
+    selectTh.innerHTML = '<input type="checkbox" id="govSelectAll" aria-label="全选当前页治理数据">';
+    selectTh.querySelector('input').addEventListener('change', event => toggleGovSelectAll(event.target.checked));
+    tr1.appendChild(selectTh);
+
     ['WikiID', '问题', 'AI评分'].forEach(text => {
         const th = document.createElement('th');
         th.rowSpan = 2;
@@ -7922,7 +7997,7 @@ function renderGovTable() {
     if (pageData.length === 0) {
          // Calculate colspan: 3 (fixed) + months * 5 + 5 (weighted summary) + 1 (status)
          const totalCols = 3 + (currentGovMonths.length * 5) + 5 + 1;
-         tbody.innerHTML = `<tr><td colspan="${totalCols}" class="empty-message">暂无数据</td></tr>`;
+         tbody.innerHTML = `<tr><td colspan="${totalCols + 1}" class="empty-message">暂无数据</td></tr>`;
          document.getElementById('govPageInfo').innerText = '共 0 条';
          document.getElementById('prevGovPageBtn').disabled = true;
          document.getElementById('nextGovPageBtn').disabled = true;
@@ -7932,8 +8007,12 @@ function renderGovTable() {
     pageData.forEach(item => {
         const tr = document.createElement('tr');
         
+        const id = String(item.id || '');
+        const selected = selectedGovRows.has(id);
+        tr.innerHTML += `<td class="text-center"><input type="checkbox" data-gov-id="${escapeHtml(id)}" aria-label="选择 ${escapeHtml(id)}" ${selected ? 'checked' : ''}></td>`;
+
         // ID
-        tr.innerHTML += `<td>${item.id}</td>`;
+        tr.innerHTML += `<td>${escapeHtml(id)}</td>`;
         
         // Question
         tr.innerHTML += `<td class="gov-question-cell" title="${escapeHtml(item.question)}">${escapeHtml(item.question)}</td>`;
@@ -7981,10 +8060,15 @@ function renderGovTable() {
         tbody.appendChild(tr);
     });
 
+    tbody.querySelectorAll('input[data-gov-id]').forEach(input => {
+        input.addEventListener('change', event => toggleGovRowSelection(event.target.dataset.govId, event.target.checked));
+    });
+
     document.getElementById('govPageInfo').innerText = `共 ${data.length} 条`;
     document.getElementById('prevGovPageBtn').disabled = govCurrentPage === 1;
     document.getElementById('nextGovPageBtn').disabled = end >= data.length;
     makeTableResizable('govTable');
+    _updateGovSelectionUi();
 }
 
 
@@ -9672,6 +9756,18 @@ function kbBindCompactTableInteractions() {
     const table = document.getElementById('kbTable');
     if (!table || table.dataset.compactBound === '1') return;
     table.dataset.compactBound = '1';
+    table.addEventListener('click', event => {
+        const actionEl = event.target?.closest?.('[data-kb-action]');
+        if (!actionEl || !table.contains(actionEl)) return;
+        const action = actionEl.dataset.kbAction || '';
+        const value = actionEl.dataset.kbValue || '';
+        if (!value) return;
+        event.preventDefault();
+        if (action === 'search-id') searchKBById(value);
+        else if (action === 'copy-id' || action === 'copy-url') copyToClipboard(value);
+        else if (action === 'search-url') searchKBByUrl(value);
+        else if (action === 'edit-id') openKBEditModal(value);
+    });
     table.addEventListener('dblclick', event => {
         if (event.target.closest('button, a, input, .col-resizer, .resizer')) return;
         const td = event.target.closest('td.kb-compact-cell');
@@ -9687,6 +9783,22 @@ function matrixBindCompactTableInteractions() {
         if (event.target.closest('button, a, input, .col-resizer, .resizer')) return;
         const td = event.target.closest('td.matrix-detail-cell');
         if (td) kbOpenCellDetail(td);
+    });
+}
+
+function matrixBindConfigInteractions() {
+    const tbody = document.getElementById('matrixTableBody');
+    if (!tbody || tbody.dataset.configClickBound === '1') return;
+    tbody.dataset.configClickBound = '1';
+    tbody.addEventListener('click', event => {
+        const cell = event.target?.closest?.('td.matrix-config-cell[data-question-wiki-id][data-product]');
+        if (!cell || !tbody.contains(cell)) return;
+        const wikiId = cell.dataset.questionWikiId || '';
+        const product = cell.dataset.product || '';
+        const row = currentMatrixData.find(item => String(item?.question_wiki_id || '') === wikiId);
+        if (!wikiId || !product || !row) return;
+        event.preventDefault();
+        toggleMatrixConfig(wikiId, product, !getMatrixProductConfigured(row, product), cell);
     });
 }
 
@@ -11749,15 +11861,17 @@ function renderKBTable() {
                  copyButton.className = 'kb-mini-action-btn kb-mini-action-btn-icon';
                  copyButton.title = '复制ID';
                  copyButton.setAttribute('aria-label', '复制 KB ID');
+                 copyButton.dataset.kbAction = 'copy-id';
+                 copyButton.dataset.kbValue = rawId;
                  copyButton.innerHTML = '<i class="fas fa-copy" aria-hidden="true"></i>';
-                 copyButton.addEventListener('click', () => copyToClipboard(rawId));
                  const editButton = document.createElement('button');
                  editButton.type = 'button';
                  editButton.className = 'kb-mini-action-btn kb-mini-action-btn-edit kb-mini-action-btn-icon';
                  editButton.title = '编辑';
                  editButton.setAttribute('aria-label', `编辑 ${rawId}`);
+                 editButton.dataset.kbAction = 'edit-id';
+                 editButton.dataset.kbValue = rawId;
                  editButton.innerHTML = '<i class="fas fa-edit" aria-hidden="true"></i>';
-                 editButton.addEventListener('click', () => openKBEditModal(rawId));
                  actions.append(copyButton, editButton);
                  wrap.append(idList, actions);
                  td.appendChild(wrap);
@@ -19899,6 +20013,7 @@ function renderMatrixTable() {
     `;
     
     const columnsToRender = diffCompareActive ? diffCompareModels : matrixColumns;
+    matrixBindConfigInteractions();
     columnsToRender.forEach(prod => {
         let hasCellEdit = false;
         let hasBulkEdit = false;
@@ -19994,6 +20109,8 @@ function renderMatrixTable() {
             td.className = 'matrix-config-cell';
             td.style.textAlign = 'center';
             const prodKey = (prod ?? '').toString().trim();
+            td.dataset.questionWikiId = String(row.question_wiki_id || '');
+            td.dataset.product = prodKey;
             const cellData = row.products[prodKey];
             const isConfigured = getMatrixProductConfigured(row, prodKey);
             const sourceAvailable = Array.isArray(row.source_products);
@@ -20006,7 +20123,6 @@ function renderMatrixTable() {
             
             td.innerHTML = renderMatrixCellHtml(!!isConfigured, editSource);
             td.title = isConfigured ? "已配置 (点击取消)" : "未配置 (点击启用)";
-            td.onclick = () => toggleMatrixConfig(row.question_wiki_id, prod, !isConfigured, td);
             tr.appendChild(td);
         });
         
@@ -23309,6 +23425,11 @@ async function clearScoringCache() {
     }
 }
 
+function closeKBDetailModal() {
+    const modal = document.getElementById('kbDetailModal');
+    if (modal) modal.style.display = 'none';
+}
+
 function isScoringInProgress() {
     return !!(scoringRunState && scoringRunState.active);
 }
@@ -25303,6 +25424,20 @@ function enableDragScrollInElement(el) {
     let startScrollTop = 0;
     let activePointerId = null;
     let suppressClickUntil = 0;
+    let pendingScrollTop = null;
+    let dragScrollRaf = 0;
+
+    const flushDragScroll = () => {
+        dragScrollRaf = 0;
+        if (!isDragging || pendingScrollTop === null) return;
+        el.scrollTop = pendingScrollTop;
+        pendingScrollTop = null;
+    };
+
+    const scheduleDragScroll = (scrollTop) => {
+        pendingScrollTop = scrollTop;
+        if (!dragScrollRaf) dragScrollRaf = requestAnimationFrame(flushDragScroll);
+    };
     
     el.addEventListener('pointerdown', (e) => {
         if (e.target && e.target.closest && e.target.closest('input, label, button, a, textarea, select, option')) return;
@@ -25324,12 +25459,21 @@ function enableDragScrollInElement(el) {
             suppressClickUntil = performance.now() + 250;
         }
         if (!isDragging) return;
-        el.scrollTop = startScrollTop - dy;
+        // Coalesce high-frequency pointer events to one layout write per frame.
+        scheduleDragScroll(startScrollTop - dy);
         e.preventDefault();
     }, { passive: false });
     
     const end = (e) => {
         if (e && activePointerId !== null && e.pointerId !== activePointerId) return;
+        if (pendingScrollTop !== null) {
+            el.scrollTop = pendingScrollTop;
+            pendingScrollTop = null;
+        }
+        if (dragScrollRaf) {
+            cancelAnimationFrame(dragScrollRaf);
+            dragScrollRaf = 0;
+        }
         isDown = false;
         activePointerId = null;
         setTimeout(() => { isDragging = false; }, 0);

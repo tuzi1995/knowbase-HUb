@@ -9,7 +9,7 @@ export KMATRIX_INSTANCE_DIR="${KMATRIX_INSTANCE_DIR:-$SCRIPT_DIR/instance}"
 export KMATRIX_SQLITE_PATH="${KMATRIX_SQLITE_PATH:-$SCRIPT_DIR/instance/data.db}"
 export KMATRIX_BACKUP_ROOT="${KMATRIX_BACKUP_ROOT:-/Volumes/ORICO/database/knowbasehub-backups}"
 export KMATRIX_STATIC_DIR="${KMATRIX_STATIC_DIR:-$SCRIPT_DIR/link_viewer}"
-export KMATRIX_CONFIG_DIR="${KMATRIX_CONFIG_DIR:-$SCRIPT_DIR/../⚙️ 配置文件}"
+export KMATRIX_CONFIG_DIR="$SCRIPT_DIR"
 
 if [[ -x "$SCRIPT_DIR/venv/bin/python" ]]; then
   CANDIDATES=("$SCRIPT_DIR/venv/bin/python")

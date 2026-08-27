@@ -26,7 +26,7 @@ BASE_URL = (os.environ.get("TOOLHUB_PROMPT_CENTER_URL") or "http://127.0.0.1:800
 TOKEN_ENV = "KNOWBASE_HUB_TOOLHUB_TOKEN"
 TIMEOUT_SECONDS = float(os.environ.get("KNOWBASE_HUB_PROMPT_TIMEOUT_SECONDS") or 5)
 ROOT = Path(__file__).resolve().parent
-TOOLHUB_ROOT = ROOT.parents[2] / "toolhub"
+TOOLHUB_ROOT = ROOT.parents[1] / "toolhub"
 DB_PATH = Path(os.environ.get("KNOWBASE_HUB_PROMPT_CENTER_DB_PATH") or TOOLHUB_ROOT / ".cache" / "prompt_version_center.db")
 CACHE_DIR = ROOT / ".prompt_runtime_cache"
 
@@ -199,4 +199,3 @@ def render_published_template(template: str, values: dict[str, Any]) -> str:
     if "{{runtime_expression:" in rendered:
         raise PromptRuntimeError("8085 Prompt 含未支持的运行时表达式")
     return rendered
-
