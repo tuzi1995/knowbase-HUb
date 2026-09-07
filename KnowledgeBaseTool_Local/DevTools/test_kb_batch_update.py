@@ -150,7 +150,7 @@ class KBBatchUpdateApiTests(unittest.TestCase):
         self.models_patch.stop()
         self.client_patch.stop()
 
-    def test_applies_list_set_and_tag_rules_with_tag_audit_field(self):
+    def test_applies_list_set_and_tag_rules_without_auditing_tags(self):
         response = self.client.post('/api/kb/batch-update', json={
             'table': 'knowledge_base_v1',
             'ids': ['KB-001', 'KB-002'],
@@ -197,10 +197,10 @@ class KBBatchUpdateApiTests(unittest.TestCase):
         operation_ids = {json.loads(item['change_meta'])['operation_id'] for item in modifications}
         self.assertEqual(len(operation_ids), 1)
         changed_fields = json.loads(modifications[0]['change_meta'])['changed_fields']
-        self.assertIn('kb_tags', changed_fields)
+        self.assertNotIn('kb_tags', changed_fields)
         self.assertIn('question_type', changed_fields)
 
-    def test_tag_only_batch_update_saves_tags_with_modification_record(self):
+    def test_tag_only_batch_update_saves_tags_without_modification_record(self):
         before_update_time = self.remote.tables['knowledge_base_v1'][0]['update_time']
         response = self.client.post('/api/kb/batch-update', json={
             'ids': ['KB-001'],
@@ -215,11 +215,7 @@ class KBBatchUpdateApiTests(unittest.TestCase):
         self.assertEqual(payload['skipped_ids'], [])
         self.assertTrue(payload['mod_log_ok'])
         modifications = self.remote.tables['knowledge_base_modifications']
-        self.assertEqual(len(modifications), 1)
-        change_meta = json.loads(modifications[0]['change_meta'])
-        self.assertEqual(change_meta['changed_fields'], ['kb_tags'])
-        self.assertEqual(change_meta['before']['kb_tags'], ['维护'])
-        self.assertEqual(change_meta['after']['kb_tags'], ['维护', '标签调整'])
+        self.assertEqual(modifications, [])
         self.assertEqual(self.remote.tables['knowledge_base_v1'][0]['review_status'], 'unadjusted')
         self.assertEqual(self.remote.tables['knowledge_base_v1'][0]['update_time'], before_update_time)
 

@@ -4411,6 +4411,13 @@ select.form-control {
     line-height: 1.55 !important;
 }
 
+#kbEditModal .kb-edit-side-pane textarea {
+    max-width: 100%;
+    max-height: 168px !important;
+    resize: vertical;
+    overflow-y: auto;
+}
+
 #kbEditModal .kb-edit-side-pane #productCheckboxes.product-checkbox-container {
     max-height: 238px !important;
     border-radius: 8px;
@@ -5721,23 +5728,24 @@ body.kb-embed-blocked {
 }
 
 .legend-dot {
-    width: 8px;
-    height: 8px;
+    width: 9px;
+    height: 9px;
     border-radius: 999px;
+    flex: 0 0 auto;
 }
 
 .legend-dot.is-shared,
 .kb-compare-value-chip.is-shared {
-    background: #E0F2FE;
-    border: 1px solid #BAE6FD;
-    color: #075985;
+    background: #DBEAFE;
+    border: 1px solid #93C5FD;
+    color: #1E40AF;
 }
 
 .legend-dot.is-partial,
 .kb-compare-value-chip.is-partial {
-    background: #EEF2FF;
-    border: 1px solid #C7D2FE;
-    color: #3730A3;
+    background: #EDE9FE;
+    border: 1px solid #C4B5FD;
+    color: #6D28D9;
 }
 
 .legend-dot.is-unique,

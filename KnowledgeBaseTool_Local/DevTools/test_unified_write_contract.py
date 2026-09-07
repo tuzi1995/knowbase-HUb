@@ -123,6 +123,34 @@ def test_unified_update_reads_back_version_by_wiki_id_without_id_column():
     assert response.get_json()['content_version'] == 8
 
 
+def test_unified_update_ignores_product_separator_formatting():
+    client = _VersionedKnowledgeClient()
+    client.row['product_name'] = 'A20 Air,A30'
+    payload = {
+        'question_wiki_id': 'KB-VERSIONED',
+        'product_name': 'A20 Air, A30',
+        'base_version': 7,
+        'changed_fields': ['product_name'],
+        'operation_id': 'kb-product-format-only',
+    }
+
+    with patch.object(server, 'get_supabase_client', return_value=client), patch.object(
+        server,
+        'get_all_valid_models',
+        return_value=({'a20air': 'A20 Air', 'a30': 'A30'}, {'A20 Air', 'A30'}),
+    ), patch.object(server, '_supabase_insert_drop_unknown_columns') as insert_modification, (
+        server.app.test_request_context('/api/kb/update', method='POST', json=payload)
+    ):
+        response = server.update_kb_item.__wrapped__()
+
+    result = response.get_json()
+    assert result['success'] is True
+    assert result['no_change'] is True
+    assert result['content_version'] == 7
+    assert client.row['product_name'] == 'A20 Air,A30'
+    insert_modification.assert_not_called()
+
+
 def test_atomic_update_reads_version_by_wiki_id_without_id_column():
     client = _VersionedKnowledgeClient()
 

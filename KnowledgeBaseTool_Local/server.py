@@ -6036,8 +6036,16 @@ def _snapshot_mod_fields(row):
 def _compute_mod_changed_fields(before_obj, after_obj):
     changed = []
     for k in _MOD_DIFF_FIELDS:
-        b = _normalize_mod_diff_value((before_obj or {}).get(k))
-        a = _normalize_mod_diff_value((after_obj or {}).get(k))
+        before_value = (before_obj or {}).get(k)
+        after_value = (after_obj or {}).get(k)
+        if k == 'products':
+            # Product scope is a set. Separator spacing and display order are
+            # formatting details and must not create modification records.
+            b = _normalize_product_names_for_current(before_value)
+            a = _normalize_product_names_for_current(after_value)
+        else:
+            b = _normalize_mod_diff_value(before_value)
+            a = _normalize_mod_diff_value(after_value)
         if b != a:
             changed.append(k)
     return changed
@@ -7428,7 +7436,7 @@ def batch_update_kb_items():
             if tags_changed:
                 pending_tag_updates[wiki_id] = after_row['kb_tags']
 
-            if changed_fields:
+            if content_changed_fields:
                 modification_record = {
                     field: after_row.get(field)
                     for field in _kb_all_fields_allowlist()
@@ -7443,7 +7451,7 @@ def batch_update_kb_items():
                     'source': _resolve_kb_change_source(payload),
                     'before': before_obj,
                     'after': after_obj,
-                    'changed_fields': changed_fields,
+                    'changed_fields': content_changed_fields,
                     'operation_id': operation_id,
                     'batch_operation': True
                 })
@@ -7999,23 +8007,7 @@ def put_kb_item_tags():
     normalized = normalized[:200]
 
     try:
-        # Tags are stored in kb_item_tags, so capture their old value before
-        # replacing the association. This makes tag-only edits auditable.
         before_tags = _kb_batch_fetch_tags_by_id(client, [wiki_id]).get(wiki_id, []) if library_type == 'current' else []
-        before_row = None
-        try:
-            rows = client.select_all(
-                'knowledge_base_v1',
-                filters={'question_wiki_id': f'eq.{wiki_id}'},
-                columns='*',
-                page_size=1,
-            ) or []
-            if rows and isinstance(rows[0], dict):
-                before_row = dict(rows[0])
-        except Exception:
-            before_row = None
-        before_obj = _snapshot_mod_fields({**(before_row or {}), 'kb_tags': before_tags})
-        after_obj = _snapshot_mod_fields({**before_obj, 'kb_tags': normalized})
         tags_changed = _normalize_mod_diff_value(before_tags) != _normalize_mod_diff_value(normalized)
 
         # Always replace mapping for this item/library_type
@@ -8068,38 +8060,8 @@ def put_kb_item_tags():
                     return jsonify({'success': False, 'message': getattr(resp, 'text', 'insert failed')}), 500
                 time.sleep(0.05)
 
-        mod_log_ok = True
-        mod_log_error = ''
-        if tags_changed and library_type == 'current':
-            try:
-                mod_record = {
-                    field: before_row.get(field)
-                    for field in _kb_all_fields_allowlist()
-                    if isinstance(before_row, dict) and field in before_row and field != 'review_status'
-                }
-                mod_record['kb_id'] = wiki_id
-                mod_record['question_wiki_id'] = wiki_id
-                mod_record['modifier'] = current_user.username if current_user.is_authenticated else 'system'
-                mod_record['modification_time'] = _now_iso_with_tz()
-                mod_record['change_type'] = 'edit'
-                _attach_change_meta(mod_record, {
-                    'source': _resolve_kb_change_source(data),
-                    'before': before_obj,
-                    'after': after_obj,
-                    'changed_fields': ['kb_tags'],
-                    'action_kind': 'tag_edit',
-                })
-                _convert_array_fields_to_json(mod_record)
-                log_response = _supabase_insert_drop_unknown_columns(client, 'knowledge_base_modifications', mod_record)
-                if log_response is not None and getattr(log_response, 'status_code', 500) >= 400:
-                    mod_log_ok = False
-                    mod_log_error = getattr(log_response, 'text', '修改记录保存失败')
-            except Exception as exc:
-                mod_log_ok = False
-                mod_log_error = str(exc)
-
         return jsonify({'success': True, 'count': len(tag_ids), 'changed': tags_changed,
-                        'mod_log_ok': mod_log_ok, 'mod_log_error': mod_log_error})
+                        'mod_log_ok': True, 'mod_log_error': ''})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
