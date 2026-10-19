@@ -181,6 +181,11 @@ elif [[ -f "$HOME/.ssh/id_ed25519" ]]; then
   SSH_IDENTITY="$HOME/.ssh/id_ed25519"
 elif [[ -f "$HOME/.ssh/id_rsa" ]]; then
   SSH_IDENTITY="$HOME/.ssh/id_rsa"
+else
+  SHARED_DEPLOY_IDENTITY="$(cd "$PROJECT_DIR/../.." && pwd)/param_aggregator/.deploy_keys/paramaggregator_aliyun_ed25519"
+  if [[ -f "$SHARED_DEPLOY_IDENTITY" ]]; then
+    SSH_IDENTITY="$SHARED_DEPLOY_IDENTITY"
+  fi
 fi
 if [[ -n "$SSH_IDENTITY" ]]; then
   SSH_OPTS+=(-i "$SSH_IDENTITY" -o IdentitiesOnly=yes)
