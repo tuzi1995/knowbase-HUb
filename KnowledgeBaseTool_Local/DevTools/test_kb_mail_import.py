@@ -235,6 +235,44 @@ class KBMailImportTests(unittest.TestCase):
         self.assertEqual(config['email'], 'kb@example.com')
         self.assertEqual(config['password'], 'keychain-secret')
 
+    def test_config_reads_legacy_feishu_environment_names(self):
+        with patch.dict(os.environ, {
+            'FEISHU_IMAP_EMAIL': 'legacy@example.com',
+            'FEISHU_IMAP_PASSWORD': 'legacy-secret',
+            'FEISHU_IMAP_HOST': 'legacy.imap.example.com',
+            'FEISHU_IMAP_PORT': '1993',
+            'FEISHU_IMAP_KEYWORD': '用户问题与反馈',
+            'FEISHU_IMAP_SCAN_DAYS': '14',
+        }, clear=True):
+            config = server._kb_mail_config()
+
+        self.assertEqual(config, {
+            'email': 'legacy@example.com',
+            'password': 'legacy-secret',
+            'host': 'legacy.imap.example.com',
+            'port': 1993,
+            'keyword': '用户问题与反馈',
+            'scan_days': 14,
+        })
+
+    def test_config_reads_legacy_keychain_password_for_legacy_email(self):
+        with patch.dict(os.environ, {
+            'FEISHU_IMAP_EMAIL': 'legacy@example.com',
+        }, clear=True), patch.object(
+            server,
+            '_read_kb_mail_keychain_value',
+            return_value='',
+        ), patch.object(
+            server,
+            '_read_kb_mail_legacy_keychain_password',
+            return_value='legacy-keychain-secret',
+        ) as read_legacy:
+            config = server._kb_mail_config()
+
+        self.assertEqual(config['email'], 'legacy@example.com')
+        self.assertEqual(config['password'], 'legacy-keychain-secret')
+        read_legacy.assert_called_once_with('legacy@example.com')
+
     @patch.object(server.imaplib, 'IMAP4_SSL', FakeIMAP)
     def test_endpoint_returns_attachment_without_importing_it(self):
         FakeIMAP.messages = {

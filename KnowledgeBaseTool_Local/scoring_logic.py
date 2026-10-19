@@ -531,6 +531,25 @@ def calculate_product_overlap(all_items):
             
     return overlap_counts
 
+def normalize_chat_completions_url(base_url):
+    """把 base_url 归一化为完整的 chat/completions 接口地址。
+
+    兼容三种写法：
+      - 已是完整接口地址：.../chat/completions（原样返回）
+      - 带版本号的 base：.../v1、.../v3（如火山 Ark coding 端点 .../api/coding/v3，
+        直接追加 /chat/completions，不能再插一层 /v1，否则 404）
+      - 不带版本号的 base：如 https://api.deepseek.com（自动补 /v1/chat/completions）
+    """
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        return base
+    if base.endswith("/chat/completions"):
+        return base
+    if re.search(r"/v\d+$", base):
+        return base + "/chat/completions"
+    return base + "/v1/chat/completions"
+
+
 class LLMScorer:
     def __init__(self, api_key, base_url, model, system_prompt=None):
         self.api_key = api_key
@@ -539,12 +558,7 @@ class LLMScorer:
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
 
     def _chat_completions(self, messages, temperature=0.1, response_format=None, timeout=60):
-        base = (self.base_url or "").strip().rstrip("/")
-        if base.endswith("/v1"):
-            base_v1 = base
-        else:
-            base_v1 = base + "/v1"
-        url = base_v1 + "/chat/completions"
+        url = normalize_chat_completions_url(self.base_url)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

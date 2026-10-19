@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 # Store Feishu IMAP credentials in macOS Keychain without exposing them in
 # shell history, process arguments, project files, or service logs.
 set -euo pipefail

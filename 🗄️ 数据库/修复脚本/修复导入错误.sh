@@ -1,4 +1,6 @@
 #!/bin/bash
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 # 快速修复导入错误脚本
 
 echo "=========================================="

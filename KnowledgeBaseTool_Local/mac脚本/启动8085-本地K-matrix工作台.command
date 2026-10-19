@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 # macOS-friendly server starter for KnowBase Hub Local
 set -u
 

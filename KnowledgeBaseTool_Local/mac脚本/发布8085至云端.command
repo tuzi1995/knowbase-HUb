@@ -1,4 +1,6 @@
 #!/bin/zsh
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 # 8085 云端发布：代码、SQLite 运行态与 PostgreSQL 主库合并同步。
 # 默认仅预检；只有传入 --apply 才会写入云端。
 
@@ -241,6 +243,9 @@ runtime_items=()
 for path in \
   server.py scoring_logic.py llm_score_evaluator.py matrix_submit_validation.py \
   parameter_check.py knowledge_graph.py kb_v1_sync.py requirements.txt \
+  clone_difference_rules.py prompt_runtime.py runtime_safety.py \
+  new_product_release.py product_categories.py business_config.py \
+  comparison_matrix.py comparison_matrix_migration.py \
   product_catalog.json model_mappings.json link_viewer prompt Scripts/migrate_parameter_check_postgres.py Scripts/primary_db_sync.py Scripts/retire_kb_v1_t1.py; do
   [[ -e "$path" ]] && runtime_items+=("$path")
 done

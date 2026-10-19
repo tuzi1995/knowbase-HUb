@@ -243,24 +243,29 @@ class _QueueOverviewCursor:
 
 
 class ParameterCheckMappingTests(unittest.TestCase):
-    def test_current_comparison_excludes_claims_for_older_kb_revisions(self):
+    def test_current_comparison_uses_current_matrix_scope_for_reused_claims(self):
         cursor = _CurrentClaimCursor()
 
-        claims = _read_proposed_numeric_claims(_CurrentClaimConnection(cursor), "扫地机")
+        with patch(
+            "parameter_check.resolve_confirmed_model_scope",
+            return_value=({"ICWIKI-CURRENT": {"model-current"}}, {}),
+        ):
+            claims = _read_proposed_numeric_claims(_CurrentClaimConnection(cursor), "扫地机")
 
         self.assertEqual([claim["claim_id"] for claim in claims], ["claim-current"])
-        self.assertEqual(claims[0]["model_ids"], ["model-1"])
+        self.assertEqual(claims[0]["model_ids"], ["model-current"])
         self.assertIn("JOIN knowledge_base_v1 AS knowledge", cursor.queries[0])
 
     def test_normalize_model_name_only_applies_controlled_whitespace_normalization(self):
         self.assertEqual(normalize_model_name(" P20 净立方 "), "p20净立方")
         self.assertEqual(normalize_model_name("P20净立方"), "p20净立方")
 
-    def test_exact_matches_are_confirmed_and_normalized_matches_remain_pending(self):
+    def test_exact_and_whitespace_only_matches_are_confirmed(self):
         candidates = build_model_mapping_candidates(
             [
                 {"source_name": "P20", "source_wiki_count": 20},
                 {"source_name": "P20 净立方", "source_wiki_count": 10},
+                {"source_name": "p20", "source_wiki_count": 5},
                 {"source_name": "不存在", "source_wiki_count": 0},
             ],
             [
@@ -271,16 +276,34 @@ class ParameterCheckMappingTests(unittest.TestCase):
         self.assertEqual(candidates[0]["mapping_type"], "exact")
         self.assertEqual(candidates[0]["status"], "confirmed")
         self.assertEqual(candidates[1]["mapping_type"], "normalized")
-        self.assertEqual(candidates[1]["status"], "pending")
-        self.assertEqual(candidates[2]["mapping_type"], "manual")
-        self.assertEqual(candidates[2]["model_id"], "")
+        self.assertEqual(candidates[1]["status"], "confirmed")
+        self.assertEqual(candidates[1]["auto_confirmation"], "whitespace")
+        self.assertEqual(candidates[2]["mapping_type"], "normalized")
+        self.assertEqual(candidates[2]["status"], "pending")
+        self.assertIsNone(candidates[2]["auto_confirmation"])
+        self.assertEqual(candidates[3]["mapping_type"], "manual")
+        self.assertEqual(candidates[3]["model_id"], "")
+
+    def test_whitespace_only_match_stays_pending_when_candidate_is_not_unique(self):
+        candidates = build_model_mapping_candidates(
+            [{"source_name": "拓界 Tech", "source_wiki_count": 10}],
+            [
+                {"id": "model-1", "model_code": "拓界Tech", "model_name": "拓界Tech"},
+                {"id": "model-2", "model_code": "拓界  Tech", "model_name": "拓界  Tech"},
+            ],
+        )
+
+        self.assertEqual(candidates[0]["mapping_type"], "manual")
+        self.assertEqual(candidates[0]["status"], "pending")
+        self.assertEqual(candidates[0]["candidate_count"], 2)
 
     def test_confirmed_scope_resolves_the_user_confirmed_whitespace_alias(self):
         scopes, summary = build_confirmed_model_scope(
             [
-                {"question_wiki_id": "ICWIKI1", "product_name": "P20净立方"},
+                {"question_wiki_id": "ICWIKI1", "product_name": "P20净立方", "is_configured": True},
                 {"question_wiki_id": "ICWIKI2", "product_name": "G10"},
                 {"question_wiki_id": "ICWIKI3", "product_name": "未映射型号"},
+                {"question_wiki_id": "ICWIKI4", "product_name": "G10", "is_configured": False},
             ],
             [
                 {"source_name": "P20 净立方", "model_id": "cube", "status": "confirmed"},
@@ -291,6 +314,7 @@ class ParameterCheckMappingTests(unittest.TestCase):
         self.assertEqual(scopes["ICWIKI1"], {"cube"})
         self.assertEqual(scopes["ICWIKI2"], {"g10"})
         self.assertNotIn("ICWIKI3", scopes)
+        self.assertNotIn("ICWIKI4", scopes)
         self.assertEqual(summary["matched_matrix_row_count"], 2)
 
     def test_numeric_claim_extraction_requires_an_explicit_feature_and_one_value(self):

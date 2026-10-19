@@ -1,4 +1,6 @@
 #!/bin/bash
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 # -*- coding: utf-8 -*-
 # 快速验证知识库标签API修复
 

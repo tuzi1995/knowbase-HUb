@@ -1,4 +1,6 @@
 #!/bin/bash
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 
 # 脚本文件整理
 # 将根目录的脚本文件移动到合适的目录

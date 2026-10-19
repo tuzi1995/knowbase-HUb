@@ -183,9 +183,8 @@ def calculate_months_diff(update_time_str, baseline_str="2026-02-01"):
         return 999
 
 def _chat_completions(api_key, base_url, model, messages, temperature=0.1, response_format=None, timeout=60):
-    base = (base_url or "").strip().rstrip("/")
-    base_v1 = base if base.endswith("/v1") else (base + "/v1")
-    url = base_v1 + "/chat/completions"
+    from scoring_logic import normalize_chat_completions_url
+    url = normalize_chat_completions_url(base_url)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",

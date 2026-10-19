@@ -24,7 +24,7 @@ from runtime_safety import env_flag, is_test_process
 PARAMETER_CHECK_SCHEMA_VERSION = "20260724_02"
 DEFAULT_CATALOG_BASE_URL = "http://127.0.0.1:18510"
 HISTORICAL_NUMERIC_RULE_VERSION = "sweeper-numeric-v2"
-HISTORICAL_COMPARE_RULE_VERSION = "sweeper-compare-v2"
+HISTORICAL_COMPARE_RULE_VERSION = "sweeper-compare-v3"
 HISTORICAL_AI_CANDIDATE_RULE_VERSION = "sweeper-ai-candidate-v2"
 AI_CANDIDATE_BATCH_SIZE = 10
 AI_CANDIDATE_BATCH_MAX = 20
@@ -334,6 +334,22 @@ def normalize_model_name(value: str) -> str:
     return re.sub(r"\s+", "", text).casefold()
 
 
+def _model_names_differ_only_by_whitespace(source_name: str, model: dict[str, Any]) -> bool:
+    source = str(source_name or "").strip()
+    if not source:
+        return False
+    source_without_whitespace = re.sub(r"\s+", "", source)
+    return any(
+        source != candidate
+        and source_without_whitespace == re.sub(r"\s+", "", candidate)
+        for candidate in (
+            str(model.get("model_code") or "").strip(),
+            str(model.get("model_name") or "").strip(),
+        )
+        if candidate
+    )
+
+
 def build_model_mapping_candidates(
     source_models: list[dict[str, Any]],
     parameter_models: list[dict[str, Any]],
@@ -359,12 +375,17 @@ def build_model_mapping_candidates(
         if len(matches) == 1:
             target = next(iter(matches.values()))
             mapping_type = "exact" if exact_matches else "normalized"
+            whitespace_only_match = (
+                mapping_type == "normalized"
+                and _model_names_differ_only_by_whitespace(source_name, target)
+            )
             candidates.append({
                 **source,
                 "model_id": target["id"],
                 "model_name": target["model_name"],
                 "mapping_type": mapping_type,
-                "status": "confirmed" if mapping_type == "exact" else "pending",
+                "status": "confirmed" if mapping_type == "exact" or whitespace_only_match else "pending",
+                "auto_confirmation": "whitespace" if whitespace_only_match else ("exact" if mapping_type == "exact" else None),
                 "candidate_count": 1,
             })
             continue
@@ -413,6 +434,41 @@ def connect_main_database(config_path: str | None = None):
     if is_test_process() and not env_flag('KMATRIX_ALLOW_LIVE_WRITE_TESTS'):
         connection.set_session(readonly=True)
     return connection
+
+
+_FORMAL_READ_RELATIONS = {
+    "product_matrix": "formal_product_matrix",
+    "knowledge_base_v1": "formal_knowledge_base_v1",
+    "knowledge_base_modifications": "formal_knowledge_base_modifications",
+}
+
+
+def _formal_read_relation(connection, table: str) -> str:
+    """Use the migration's formal-read view when it is installed.
+
+    The fallback keeps parameter checks usable before the additive migration has
+    been applied. The returned names come only from the constant map above.
+    """
+    source = str(table or "").strip()
+    formal = _FORMAL_READ_RELATIONS.get(source)
+    if not formal:
+        raise ValueError(f"unsupported formal read relation: {source}")
+    if not hasattr(connection, "info"):
+        return source
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (f"public.{formal}",))
+        try:
+            row = cursor.fetchone()
+        except (AttributeError, KeyError, IndexError, TypeError):
+            # Small test doubles and legacy adapters may not implement the
+            # tuple-returning probe cursor. Their normal query remains on the
+            # pre-migration base table.
+            return source
+        if isinstance(row, dict):
+            installed = bool(next(iter(row.values()), False))
+        else:
+            installed = bool(row[0]) if row else False
+    return formal if installed else source
 
 
 def apply_schema(connection) -> None:
@@ -581,11 +637,12 @@ def _find_reusable_numeric_comparison_run(
 def _source_models(connection, category_name: str, catalog_models: list[str]) -> list[dict[str, Any]]:
     if not catalog_models:
         return []
+    matrix_relation = _formal_read_relation(connection, "product_matrix")
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute(
-            """
+            f"""
             SELECT product_name AS source_name, COUNT(DISTINCT question_wiki_id) AS source_wiki_count
-            FROM product_matrix
+            FROM {matrix_relation}
             WHERE product_name = ANY(%s)
             GROUP BY product_name
             """,
@@ -625,9 +682,33 @@ def refresh_model_bindings(
                     evidence_json, confirmed_by, confirmed_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (source_name, category_id, model_id) DO UPDATE SET
+                    mapping_type = CASE
+                        WHEN parameter_model_alias_binding.status = 'pending'
+                             AND EXCLUDED.status = 'confirmed'
+                        THEN EXCLUDED.mapping_type
+                        ELSE parameter_model_alias_binding.mapping_type
+                    END,
+                    status = CASE
+                        WHEN parameter_model_alias_binding.status = 'pending'
+                             AND EXCLUDED.status = 'confirmed'
+                        THEN EXCLUDED.status
+                        ELSE parameter_model_alias_binding.status
+                    END,
                     source_snapshot_id = EXCLUDED.source_snapshot_id,
                     source_wiki_count = EXCLUDED.source_wiki_count,
                     evidence_json = EXCLUDED.evidence_json,
+                    confirmed_by = CASE
+                        WHEN parameter_model_alias_binding.status = 'pending'
+                             AND EXCLUDED.status = 'confirmed'
+                        THEN EXCLUDED.confirmed_by
+                        ELSE parameter_model_alias_binding.confirmed_by
+                    END,
+                    confirmed_at = CASE
+                        WHEN parameter_model_alias_binding.status = 'pending'
+                             AND EXCLUDED.status = 'confirmed'
+                        THEN EXCLUDED.confirmed_at
+                        ELSE parameter_model_alias_binding.confirmed_at
+                    END,
                     updated_at = NOW()
                 """,
                 (
@@ -646,7 +727,11 @@ def refresh_model_bindings(
                         "candidate_count": candidate["candidate_count"],
                         "normalization": normalize_model_name(candidate["source_name"]),
                     }),
-                    "system:exact-match" if status == "confirmed" else None,
+                    (
+                        "system:whitespace-normalized"
+                        if candidate.get("auto_confirmation") == "whitespace"
+                        else ("system:exact-match" if status == "confirmed" else None)
+                    ),
                     datetime.now(timezone.utc) if status == "confirmed" else None,
                 ),
             )
@@ -654,7 +739,11 @@ def refresh_model_bindings(
     return {
         "source_count": len(candidates),
         "exact_confirmed": sum(item["mapping_type"] == "exact" for item in candidates),
-        "pending_normalized": sum(item["mapping_type"] == "normalized" for item in candidates),
+        "whitespace_confirmed": sum(item.get("auto_confirmation") == "whitespace" for item in candidates),
+        "pending_normalized": sum(
+            item["mapping_type"] == "normalized" and item["status"] == "pending"
+            for item in candidates
+        ),
         "pending_manual": sum(item["mapping_type"] == "manual" for item in candidates),
     }
 
@@ -717,6 +806,8 @@ def build_confirmed_model_scope(
     scope_by_wiki: dict[str, set[str]] = {}
     matched_matrix_rows = 0
     for row in matrix_rows:
+        if not bool(row.get("is_configured", True)):
+            continue
         wiki_id = str(row.get("question_wiki_id") or "").strip()
         source_name = normalize_model_name(str(row.get("product_name") or ""))
         targets = targets_by_name.get(source_name)
@@ -732,6 +823,7 @@ def build_confirmed_model_scope(
 
 
 def resolve_confirmed_model_scope(connection, category_name: str) -> tuple[dict[str, set[str]], dict[str, int]]:
+    matrix_relation = _formal_read_relation(connection, "product_matrix")
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute(
             """
@@ -742,7 +834,13 @@ def resolve_confirmed_model_scope(connection, category_name: str) -> tuple[dict[
             (category_name,),
         )
         bindings = [dict(row) for row in cursor.fetchall()]
-        cursor.execute("SELECT DISTINCT question_wiki_id, product_name FROM product_matrix")
+        cursor.execute(
+            f"""
+            SELECT DISTINCT question_wiki_id, product_name, is_configured
+            FROM {matrix_relation}
+            WHERE is_configured = TRUE
+            """
+        )
         matrix_rows = [dict(row) for row in cursor.fetchall()]
     return build_confirmed_model_scope(matrix_rows, bindings)
 
@@ -1019,15 +1117,17 @@ def compare_proposed_numeric_claims(
 
 
 def _read_proposed_numeric_claims(connection, category_name: str) -> list[dict[str, Any]]:
+    knowledge_relation = _formal_read_relation(connection, "knowledge_base_v1")
+    scope_by_wiki, _scope_counts = resolve_confirmed_model_scope(connection, category_name)
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute(
-            """
+            f"""
             SELECT claim.claim_id, claim.question_wiki_id, claim.feature_id,
                    claim.asserted_value, claim.normalized_value, claim.evidence_text,
                    claim.kb_revision, knowledge.question, knowledge.answer
             FROM kb_parameter_claim AS claim
             JOIN parameter_check_run AS source_run ON source_run.run_id = claim.source_run_id
-            JOIN knowledge_base_v1 AS knowledge ON knowledge.question_wiki_id = claim.question_wiki_id
+            JOIN {knowledge_relation} AS knowledge ON knowledge.question_wiki_id = claim.question_wiki_id
             WHERE claim.library_type = 'current'
               AND claim.extraction_method = 'rule'
               AND claim.binding_status = 'proposed'
@@ -1041,15 +1141,14 @@ def _read_proposed_numeric_claims(connection, category_name: str) -> list[dict[s
         claims = [
             dict(row)
             for row in cursor.fetchall()
-            if _knowledge_revision(str(row.get("question") or ""), str(row.get("answer") or ""))
-            == str(row.get("kb_revision") or "")
+            if (
+                _knowledge_revision(str(row.get("question") or ""), str(row.get("answer") or ""))
+                == str(row.get("kb_revision") or "")
+                and scope_by_wiki.get(str(row.get("question_wiki_id") or ""))
+            )
         ]
         for claim in claims:
-            cursor.execute(
-                "SELECT model_id FROM kb_parameter_claim_model WHERE claim_id = %s ORDER BY model_id",
-                (claim["claim_id"],),
-            )
-            claim["model_ids"] = [str(row["model_id"]) for row in cursor.fetchall()]
+            claim["model_ids"] = sorted(scope_by_wiki[str(claim["question_wiki_id"])])
     return claims
 
 
@@ -1204,11 +1303,12 @@ def run_current_knowledge_parameter_comparison(
 def _read_scoped_knowledge_rows(connection, wiki_ids: list[str]) -> list[dict[str, Any]]:
     if not wiki_ids:
         return []
+    knowledge_relation = _formal_read_relation(connection, "knowledge_base_v1")
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute(
-            """
+            f"""
             SELECT question_wiki_id, question, answer
-            FROM knowledge_base_v1
+            FROM {knowledge_relation}
             WHERE question_wiki_id = ANY(%s)
             ORDER BY question_wiki_id
             """,
@@ -2678,6 +2778,7 @@ def _get_ai_scan_audit_overview(
 def _get_ai_candidate_overview(
     cursor,
     *,
+    knowledge_relation: str,
     category_name: str,
     snapshot: dict[str, Any] | None,
     model_names: dict[str, str],
@@ -2781,7 +2882,7 @@ def _get_ai_candidate_overview(
         FROM kb_parameter_claim AS claim
         JOIN parameter_check_run AS source_run ON source_run.run_id = claim.source_run_id
         LEFT JOIN parameter_snapshot AS source_snapshot ON source_snapshot.snapshot_id = source_run.snapshot_id
-        LEFT JOIN knowledge_base_v1 AS knowledge ON knowledge.question_wiki_id = claim.question_wiki_id
+        LEFT JOIN {knowledge_relation} AS knowledge ON knowledge.question_wiki_id = claim.question_wiki_id
         JOIN kb_parameter_claim_model AS model ON model.claim_id = claim.claim_id
         LEFT JOIN parameter_ai_candidate_assessment AS assessment ON assessment.claim_id = claim.claim_id
         WHERE {where_clause}
@@ -2880,6 +2981,7 @@ def get_parameter_check_overview(
     page: int = 1,
     page_size: int = 50,
 ) -> dict[str, Any]:
+    knowledge_relation = _formal_read_relation(connection, "knowledge_base_v1")
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute(
             """
@@ -2959,6 +3061,7 @@ def get_parameter_check_overview(
         if ai_view == "queue":
             return _get_ai_candidate_overview(
                 cursor,
+                knowledge_relation=knowledge_relation,
                 category_name=category_name,
                 snapshot=snapshot,
                 model_names=model_names,
@@ -2987,6 +3090,7 @@ def get_parameter_check_overview(
                 )
             return _get_ai_candidate_overview(
                 cursor,
+                knowledge_relation=knowledge_relation,
                 category_name=category_name,
                 snapshot=snapshot,
                 model_names=model_names,
@@ -3083,7 +3187,7 @@ def get_parameter_check_overview(
                    knowledge.question AS knowledge_question, knowledge.answer AS knowledge_answer
             FROM parameter_check_finding AS finding
             LEFT JOIN kb_parameter_claim AS claim ON claim.claim_id = finding.claim_id
-            LEFT JOIN knowledge_base_v1 AS knowledge ON knowledge.question_wiki_id = finding.question_wiki_id
+            LEFT JOIN {knowledge_relation} AS knowledge ON knowledge.question_wiki_id = finding.question_wiki_id
             WHERE {where_clause}
             ORDER BY CASE finding.severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
                      finding.question_wiki_id, finding.feature_id, finding.model_id

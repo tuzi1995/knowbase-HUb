@@ -7257,6 +7257,32 @@ button[type="submit"],
   box-shadow: inset 0 0 0 1px rgba(0, 82, 255, 0.05);
 }
 
+.workbench-nav-group {
+  --nav-group-accent: #2563eb;
+}
+
+.workbench-nav-group[data-nav-group="知识维护 · 编"] {
+  --nav-group-accent: #0d9488;
+}
+
+.workbench-nav-group[data-nav-group="更新处理 · 流转"] {
+  --nav-group-accent: #ea580c;
+}
+
+.workbench-nav-group[data-nav-group="平台维护 · 管系统"] {
+  --nav-group-accent: #475569;
+}
+
+.workbench-nav-group-title {
+  color: var(--nav-group-accent);
+}
+
+.workbench-nav-btn.active {
+  border-left: 3px solid var(--nav-group-accent);
+  color: var(--nav-group-accent);
+  background: color-mix(in srgb, var(--nav-group-accent) 9%, white);
+}
+
 .workbench-main {
   min-width: 0;
   align-self: start;
@@ -7601,7 +7627,7 @@ button[type="submit"],
   min-height: 34px;
 }
 
-.kb-tag-filter-inline #kbTagFilterModalBtn {
+.kb-tag-filter-inline #kbTagFilterBtn {
   min-height: 34px !important;
   padding: 6px 11px !important;
   display: inline-flex !important;
@@ -9045,14 +9071,14 @@ main {
 }
 
 .kb-tag-filter-inline,
-.kb-tag-filter-inline #kbTagFilterModalBtn,
+.kb-tag-filter-inline #kbTagFilterBtn,
 #kbView .kb-filter-actions-inline .primary-btn,
 #kbView .kb-filter-actions-inline .action-btn {
   min-height: 30px !important;
   height: 30px !important;
 }
 
-#kbView .kb-tag-filter-inline #kbTagFilterModalBtn,
+#kbView .kb-tag-filter-inline #kbTagFilterBtn,
 #kbView .kb-filter-actions-inline .primary-btn,
 #kbView .kb-filter-actions-inline .action-btn {
   padding: 0 10px !important;
@@ -9062,7 +9088,7 @@ main {
 }
 
 /* Keep the tag trigger inside the compact filter row so its border is not clipped. */
-#kbView .kb-tag-filter-inline #kbTagFilterModalBtn {
+#kbView .kb-tag-filter-inline #kbTagFilterBtn {
   height: 30px !important;
   min-height: 30px !important;
 }
@@ -10514,4 +10540,223 @@ main {
   min-height: 36px;
   color: #667085;
   font-size: 13px;
+}
+
+/* Knowledge base tag filter: anchored multi-select dropdown. */
+#kbView .kb-tag-filter-trigger {
+  max-width: 280px;
+  justify-content: flex-start !important;
+}
+.kb-tag-filter-value {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #64748b;
+  font-weight: 400;
+}
+.kb-tag-filter-count {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #2563eb;
+  font-size: 11px;
+}
+.kb-tag-filter-arrow {
+  font-size: 10px;
+  transition: transform .2s;
+}
+.kb-tag-filter-trigger[aria-expanded="true"] .kb-tag-filter-arrow {
+  transform: rotate(180deg);
+}
+#kbView .kb-tag-filter-trigger.is-active {
+  border-color: #93c5fd !important;
+  color: #2563eb !important;
+  background: #eff6ff !important;
+}
+.kb-tag-filter-dropdown {
+  position: fixed;
+  z-index: 1050;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: 14px;
+  gap: 12px;
+  border: 1px solid #d7e2f0;
+  border-radius: 14px;
+  background: #fff;
+  color: #334155;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, .16);
+  overflow: auto;
+  font-size: 12px;
+}
+.kb-tag-filter-dropdown[hidden], .kb-tag-filter-count[hidden] {
+  display: none !important;
+}
+.kb-tag-filter-heading,
+.kb-tag-filter-mode,
+.kb-tag-filter-footer,
+.kb-tag-filter-footer > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.kb-tag-filter-heading,
+.kb-tag-filter-footer {
+  justify-content: space-between;
+}
+.kb-tag-filter-heading strong {
+  font-size: 14px;
+}
+.kb-tag-filter-heading > span {
+  color: #64748b;
+}
+.kb-tag-filter-mode {
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.kb-tag-filter-mode label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.kb-tag-filter-dropdown input[type="checkbox"],
+.kb-tag-filter-dropdown input[type="radio"] {
+  accent-color: #2563eb;
+  margin: 0;
+  flex-shrink: 0;
+}
+.kb-tag-filter-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid #d7e2f0;
+  border-radius: 8px;
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+.kb-tag-filter-search:focus-within {
+  border-color: #93c5fd;
+}
+.kb-tag-filter-search input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font: inherit;
+  color: #334155;
+}
+.kb-tag-filter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+  min-height: 72px;
+  max-height: 240px;
+  scrollbar-width: thin;
+}
+.kb-tag-filter-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.kb-tag-filter-option:hover,
+.kb-tag-filter-option:focus-within {
+  background: #f1f5f9;
+}
+.kb-tag-filter-option.is-selected {
+  background: #eff6ff;
+  color: #2563eb;
+}
+.kb-tag-filter-footer {
+  padding-top: 10px;
+  border-top: 1px solid #edf2f7;
+}
+.kb-tag-filter-footer button {
+  min-height: 30px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* Shared tag maintenance dialog, reached from settings and the filter. */
+.kb-tag-manage-link, .kb-tag-manager-delete {
+  border: 0;
+  background: transparent;
+  color: #2563eb;
+  padding: 5px 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.kb-tag-manage-link:hover, .kb-tag-manager-delete:hover { text-decoration: underline; }
+.kb-tag-manager-delete { color: #b91c1c; margin-left: 10px; }
+.kb-tag-manager {
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  box-sizing: border-box;
+  border: 1px solid #d7e2f0;
+  border-radius: 16px;
+  padding: 22px;
+  color: #334155;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, .22);
+  background: #fff;
+  overflow: auto;
+}
+.kb-tag-manager::backdrop { background: rgba(15, 23, 42, .35); }
+.kb-tag-manager-head, .kb-tag-manager-toolbar, .kb-tag-manager-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.kb-tag-manager-head { align-items: flex-start; justify-content: space-between; }
+.kb-tag-manager-head h3 { margin: 0 0 8px; font-size: 19px; color: #1e293b; }
+.kb-tag-manager-head p { margin: 0; color: #64748b; font-size: 13px; line-height: 1.7; }
+.kb-tag-manager-toolbar { margin: 20px 0 10px; flex-wrap: wrap; }
+.kb-tag-manager-toolbar label {
+  flex: 1 1 180px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #d7e2f0;
+  border-radius: 9px;
+  padding: 8px 10px;
+  color: #94a3b8;
+}
+.kb-tag-manager-toolbar input { width: 100%; min-width: 0; outline: 0; border: 0; font: inherit; font-size: 13px; }
+#kbTagManagerCount { color: #64748b; font-size: 12px; }
+.kb-tag-manager-note { margin: 10px 0; color: #64748b; font-size: 12px; line-height: 1.6; }
+.kb-tag-manager-status { color: #64748b; font-size: 13px; margin: 8px 0; }
+.kb-tag-manager-status:empty { display: none; }
+.kb-tag-manager-status.is-error { color: #b91c1c; }
+.kb-tag-manager-table-wrap { max-height: 340px; overflow: auto; border: 1px solid #e2e8f0; border-radius: 9px; }
+.kb-tag-manager-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.kb-tag-manager-table th, .kb-tag-manager-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #edf2f7; }
+.kb-tag-manager-table th { position: sticky; top: 0; z-index: 1; background: #f8fafc; color: #64748b; font-size: 12px; }
+.kb-tag-manager-table th:first-child { width: 50%; }
+.kb-tag-manager-table td:first-child { overflow-wrap: anywhere; }
+.kb-tag-manager-table td:last-child { white-space: nowrap; }
+.kb-tag-manager-table tr:last-child td { border-bottom: 0; }
+.kb-tag-manager-table .kb-tag-manager-empty { text-align: center; padding: 32px 10px; color: #64748b; }
+.kb-tag-manager-action { margin-top: 16px; padding: 14px; background: #f8fafc; border: 1px solid #d7e2f0; border-radius: 10px; }
+.kb-tag-manager-action[hidden], #kbTagManagerNameField[hidden] { display: none !important; }
+.kb-tag-manager-action strong { font-size: 14px; overflow-wrap: anywhere; }
+.kb-tag-manager-action p { color: #64748b; font-size: 12px; line-height: 1.7; margin: 8px 0 12px; }
+.kb-tag-manager-action label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.kb-tag-manager-action input { min-width: 0; padding: 9px 10px; border: 1px solid #cbd5e1; border-radius: 8px; font: inherit; font-size: 14px; }
+.kb-tag-manager-action-buttons { margin-top: 12px; justify-content: flex-end; }
+.kb-tag-manager-action.is-delete { background: #fff7f7; border-color: #fecaca; }
+.kb-tag-manager-action.is-delete #kbTagManagerSubmit { background: #b91c1c; border-color: #b91c1c; }
+.kb-tag-manager button:disabled { opacity: .5; cursor: wait; }
+@media (max-width: 520px) {
+  .kb-tag-manager { padding: 16px; }
+  .kb-tag-manager-table th, .kb-tag-manager-table td { padding: 8px 6px; }
+  .kb-tag-manager-table th:first-child { width: auto; }
 }

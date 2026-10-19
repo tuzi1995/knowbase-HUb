@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>型号管理 · 空白布局改版方案预览</title>
+<style>
+  :root {
+    --primary: #2563eb;
+    --ink: #1e293b;
+    --ink-2: #475569;
+    --ink-3: #94a3b8;
+    --line: #e2e8f0;
+    --panel: #f8fafc;
+    --bg: #f1f5f9;
+    --ok: #16a34a;
+    --warn: #d97706;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    padding: 32px 40px 64px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: var(--ink-3); font-size: 13px; margin-bottom: 24px; }
+  h2 { font-size: 16px; margin: 36px 0 12px; display: flex; align-items: center; gap: 8px; }
+  h2 .no {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 6px;
+    background: var(--primary); color: #fff; font-size: 13px; flex: none;
+  }
+  .card {
+    background: #fff; border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px 24px; margin-bottom: 16px;
+  }
+  .cause { font-size: 13.5px; color: var(--ink-2); }
+  .cause code {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+    padding: 1px 6px; font-size: 12px; color: #b91c1c;
+  }
+
+  /* ===== 线框示意通用 ===== */
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .shot { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #fff; }
+  .shot-label {
+    font-size: 12px; font-weight: 600; padding: 8px 14px;
+    border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 6px;
+  }
+  .shot-label.bad { color: #b91c1c; background: #fef2f2; }
+  .shot-label.good { color: #166534; background: #f0fdf4; }
+  .vp { height: 340px; display: flex; flex-direction: column; padding: 8px; gap: 6px; background: #eef2f7; }
+  .bar { background: #fff; border: 1px solid var(--line); border-radius: 6px; flex: none;
+         display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 10px; color: var(--ink-3); }
+  .bar .dot { width: 7px; height: 7px; border-radius: 50%; background: #cbd5e1; flex: none; }
+  .btn { display: inline-block; border-radius: 4px; padding: 2px 8px; font-size: 9.5px; line-height: 1.5; flex: none; }
+  .btn.pri { background: var(--primary); color: #fff; }
+  .btn.gho { border: 1px solid var(--line); color: var(--ink-2); background: #fff; }
+  .btn.save { background: #0d9488; color: #fff; }
+  .btn.add  { background: var(--primary); color: #fff; }
+  .void { flex: 1; border-radius: 6px; position: relative;
+          background: repeating-linear-gradient(45deg, #e8edf3, #e8edf3 10px, #eef2f7 10px, #eef2f7 20px);
+          display: flex; align-items: center; justify-content: center; }
+  .void span { color: var(--ink-3); font-size: 11px; background: rgba(255,255,255,.7); padding: 3px 10px; border-radius: 10px; }
+  .grow { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+
+  /* 型号列表（页面一）线框 */
+  .pm { background: #fff; border: 1px solid var(--line); border-radius: 6px; display: flex; overflow: hidden; }
+  .pm-side { width: 96px; flex: none; border-right: 1px solid var(--line); background: var(--panel);
+             padding: 8px; font-size: 9.5px; color: var(--ink-2); display: flex; flex-direction: column; gap: 5px; }
+  .pm-side .cat { padding: 3px 6px; border-radius: 4px; }
+  .pm-side .cat.on { background: #dbeafe; color: var(--primary); font-weight: 600; }
+  .pm-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .pm-tools { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 9.5px; color: var(--ink-3); }
+  .pm-tools .sp { flex: 1; }
+  .search { border: 1px solid var(--line); border-radius: 4px; padding: 2px 8px; color: var(--ink-3); }
+  .chipzone { flex: 1; min-height: 0; overflow: hidden; padding: 8px 10px; position: relative; }
+  .chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .chip { border: 1px solid var(--line); border-radius: 5px; padding: 5px 7px; font-size: 9.5px;
+          display: flex; justify-content: space-between; align-items: center; color: var(--ink-2); background: #fff; }
+  .chip b { font-weight: 600; color: var(--ink); }
+  .chip i { font-style: normal; font-size: 8.5px; color: var(--ok); background: #f0fdf4; border-radius: 3px; padding: 0 4px; }
+  .fade { position: absolute; left: 0; right: 0; bottom: 0; height: 34px;
+          background: linear-gradient(transparent, #fff); display: flex; align-items: flex-end; justify-content: center; }
+  .fade span { font-size: 8.5px; color: var(--ink-3); background: var(--panel); border: 1px solid var(--line);
+               border-radius: 8px; padding: 1px 8px; margin-bottom: 4px; }
+  .pm-actions { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-top: 1px solid var(--line);
+                background: var(--panel); font-size: 9.5px; color: var(--ink-3); }
+  .pm-actions .sp { flex: 1; }
+  .input { border: 1px solid var(--line); border-radius: 4px; padding: 2px 8px; background: #fff; color: var(--ink-3); width: 130px; }
+
+  /* 分类群组（页面二）线框 */
+  .tb { background: #fff; border: 1px solid var(--line); border-radius: 6px; display: flex; flex-direction: column; overflow: hidden; }
+  .tb-tools { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 9.5px; color: var(--ink-3); }
+  .tb-tools .sp { flex: 1; }
+  .stats { display: flex; gap: 12px; padding: 5px 10px; font-size: 9.5px; color: var(--ink-2); border-bottom: 1px solid var(--line); background: var(--panel); }
+  .stats b { color: var(--ink); }
+  .row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #f1f5f9; font-size: 9.5px; }
+  .row .name { width: 110px; flex: none; color: var(--ink); font-weight: 600; }
+  .tag { background: #eef2ff; color: #4f46e5; border-radius: 3px; padding: 0 5px; font-size: 8.5px; }
+  .row .num { margin-left: auto; color: var(--ink-3); }
+  .st { flex: none; width: 44px; text-align: center; border-radius: 3px; font-size: 8.5px; padding: 0 4px; }
+  .st.multi { background: #fef9c3; color: #a16207; }
+  .st.none { background: #f1f5f9; color: var(--ink-3); }
+  .thead { font-size: 9px; color: var(--ink-3); background: #fbfdff; border-bottom: 1px solid var(--line); }
+
+  .note { font-size: 12.5px; color: var(--ink-2); }
+  .note li { margin: 4px 0 4px 18px; }
+  .tagchip { display: inline-block; background: #eff6ff; color: var(--primary); border: 1px solid #bfdbfe;
+             border-radius: 999px; padding: 1px 10px; font-size: 12px; margin-right: 6px; }
+  .opt-tag { display: inline-block; border-radius: 999px; padding: 2px 12px; font-size: 12px; font-weight: 600; margin-left: 8px; }
+  .opt-tag.recommend { background: #dcfce7; color: #166534; }
+  .opt-tag.backup { background: var(--panel); color: var(--ink-3); border: 1px solid var(--line); }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>型号管理 · 空白布局改版方案</h1>
+  <div class="sub">仅视觉层调整 · 不改交互架构与功能 · 2026-10-08</div>
+
+  <div class="card">
+    <h2 style="margin-top:0"><span class="no">?</span>空白是怎么来的</h2>
+    <p class="cause">
+      <code>extra_styles.css:1088-1118</code> 把型号管理整层强制成了「内容自适应」：
+      <code>height:auto !important</code>、<code>max-height:none !important</code>、<code>overflow:visible !important</code>。
+      结果是：面板高度完全跟随内容——数据少的时候（型号列表两行卡片、分类群组十几行表格），面板到屏幕一半就结束了，
+      剩下近半屏都是页面底色的空白。内容多时反而会无限撑长、整页滚动，两种状态都不理想。
+    </p>
+  </div>
+
+  <h2><span class="no">A</span>方案 A：满幅工作台（推荐）<span class="opt-tag recommend">推荐</span></h2>
+  <div class="card">
+    <p class="cause" style="margin-bottom:14px">
+      思路：让型号管理的版面框<b>始终撑满视口剩余高度</b>，数据多时在框内滚动，数据少时框也不塌。
+      底部「添加型号 / 校验并保存」操作条固定在框底，任何时候都可见。
+    </p>
+    <div class="compare">
+      <!-- 页面一 before -->
+      <div class="shot">
+        <div class="shot-label bad">✕ 现状 · 型号列表：内容止于半屏，下方全是空白</div>
+        <div class="vp">
+          <div class="bar"><span class="dot"></span>刷新 · 导出分类汇总 · 导出型号清单</div>
+          <div class="pm" style="flex:none">
+            <div class="pm-side">
+              <div class="cat">全部分类</div>
+              <div class="cat">冰箱</div>
+              <div class="cat on">洗衣机 30</div>
+              <div class="cat">空调机</div>
+            </div>
+            <div class="pm-main">
+              <div class="pm-tools">洗衣机 · 30 个型号 <span class="sp"></span><span class="search">搜索当前分类型号</span><span class="btn gho" style="color:#b91c1c">🗑 删除分类</span></div>
+              <div class="chipzone" style="flex:none">
+                <div class="chips">
+                  <div class="chip"><b>洗衣机 01</b><i>已上线</i></div><div class="chip"><b>洗衣机 02</b><i>已上线</i></div>
+                  <div class="chip"><b>洗衣机 03</b><i>已上线</i></div><div class="chip"><b>洗衣机 04</b><i>已上线</i></div>
+                  <div class="chip"><b>洗衣机 05</b><i>已上线</i></div><div class="chip"><b>洗衣机 06</b><i>已上线</i></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="void"><span>↓ 约 40% 视口高度的空白</span></div>
+        </div>
+      </div>
+      <!-- 页面一 after -->
+      <div class="shot">
+        <div class="shot-label good">✓ 方案 A · 型号列表：版面框撑满视口，网格内滚动，操作条吸底</div>
+        <div class="vp">
+          <div class="bar"><span class="dot"></span>刷新 · 导出分类汇总 · 导出型号清单</div>
+          <div class="pm grow">
+            <div class="pm-side">
+              <div class="cat">全部分类</div>
+              <div class="cat">冰箱</div>
+              <div class="cat on">洗衣机 30</div>
+              <div class="cat" style="margin-top:auto; color:var(--ink-3)">分类树同高延展 ↕</div>
+            </div>
+            <div class="pm-main">
+              <div class="pm-tools">洗衣机 · 30 个型号 <span class="sp"></span><span class="search">搜索当前分类型号</span><span class="btn gho" style="color:#b91c1c">🗑 删除分类</span></div>
+              <div class="chipzone">
+                <div class="chips">
+                  <div class="chip"><b>洗衣机 01</b><i>已上线</i></div><div class="chip"><b>洗衣机 02</b><i>已上线</i></div>
+                  <div class="chip"><b>洗衣机 03</b><i>已上线</i></div><div class="chip"><b>洗衣机 04</b><i>已上线</i></div>
+                  <div class="chip"><b>洗衣机 05</b><i>已上线</i></div><div class="chip"><b>洗衣机 06</b><i>已上线</i></div>
+                  <div class="chip"><b>洗衣机 07</b><i>已上线</i></div><div class="chip"><b>洗衣机 08</b><i>已上线</i></div>
+                </div>
+                <div class="fade"><span>▾ 网格区域内部滚动</span></div>
+              </div>
+              <div class="pm-actions">
+                <span class="input">输入新型号名称</span>
+                <span class="btn gho">新建后：待上线 ▾</span>
+                <span class="btn add">＋ 添加型号</span>
+                <span class="sp"></span>
+                <span style="font-size:8.5px">新增或删除立即保存，执行校验可复查影响</span>
+                <span class="btn gho">✓ 校验并保存</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <p class="cause" style="margin-bottom:14px">页面二「分类群组」同理：面板撑满视口，表格在框内滚动，统计条与工具栏常驻。</p>
+    <div class="compare">
+      <div class="shot">
+        <div class="shot-label bad">✕ 现状 · 分类群组：表格自然高度，下方约 38% 空白</div>
+        <div class="vp">
+          <div class="bar"><span class="dot"></span>型号核查 · 分类编辑 · <span class="btn pri">＋新增映射分类</span> · 批量导入 <span style="flex:1"></span>搜索型号或分类… · 导出配置 · <span class="btn save">保存配置</span></div>
+          <div class="tb" style="flex:none">
+            <div class="stats"><span><b>141</b> 全部型号</span><span><b>16</b> 未映射</span><span><b>125</b> 多分类</span><span><b>0</b> 目录外型号</span></div>
+            <div class="row thead"><span class="name">型号</span><span>所属分类</span><span class="num">多分类</span><span class="st">状态</span></div>
+            <div class="row"><span class="name">洗衣机Z1 Max贴贴版</span><span><span class="tag">大洗</span> <span class="tag">所有洗衣机</span> <span class="tag">所有型号</span></span><span class="num">3</span><span class="st multi">多分类</span></div>
+            <div class="row"><span class="name">智界S.D</span><span style="color:var(--ink-3)">未配置</span><span class="num">0</span><span class="st none">未映射</span></div>
+          </div>
+          <div class="void"><span>↓ 约 38% 视口高度的空白</span></div>
+        </div>
+      </div>
+      <div class="shot">
+        <div class="shot-label good">✓ 方案 A · 分类群组：面板撑满视口，表格内滚动，工具/统计条常驻</div>
+        <div class="vp">
+          <div class="bar"><span class="dot"></span>型号核查 · 分类编辑 · <span class="btn pri">＋新增映射分类</span> · 批量导入 <span style="flex:1"></span>搜索型号或分类… · 导出配置 · <span class="btn save">保存配置</span></div>
+          <div class="tb grow">
+            <div class="stats"><span><b>141</b> 全部型号</span><span><b>16</b> 未映射</span><span><b>125</b> 多分类</span><span><b>0</b> 目录外型号</span><span style="margin-left:auto;color:var(--primary)">全部 · 未映射 · 多分类</span></div>
+            <div class="row thead"><span class="name">型号</span><span>所属分类</span><span class="num">多分类</span><span class="st">状态</span></div>
+            <div class="row"><span class="name">洗衣机Z1 Max贴贴版</span><span><span class="tag">大洗</span> <span class="tag">所有洗衣机</span> <span class="tag">所有型号</span></span><span class="num">3</span><span class="st multi">多分类</span></div>
+            <div class="row"><span class="name">睿采</span><span><span class="tag">所有洗衣机</span> <span class="tag">拓界Aura内部名…</span> <span class="tag">A30 系列</span></span><span class="num">6</span><span class="st multi">多分类</span></div>
+            <div class="row"><span class="name">智界S.D</span><span style="color:var(--ink-3)">未配置</span><span class="num">0</span><span class="st none">未映射</span></div>
+            <div class="row"><span class="name">A33</span><span><span class="tag">所有型号</span> <span class="tag">A33 系列</span></span><span class="num">2</span><span class="st multi">多分类</span></div>
+            <div class="fade" style="background:linear-gradient(transparent,#fff)"><span>▾ 表格区域内部滚动</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2><span class="no">B</span>方案 B：紧凑收窄（备选）<span class="opt-tag backup">备选</span></h2>
+  <div class="card">
+    <p class="cause">
+      不拉伸版面框，改为<b>限制内容区最大宽度（约 1200px）并居中</b>，底部操作条对视口吸底（sticky）。
+      空白被收进两侧留白，观感从「没渲染完」变成「刻意的留白」。
+      优点是改动极小；缺点是宽屏下信息密度低，分类群组表格列多时会偏挤。
+    </p>
+  </div>
+
+  <h2><span class="no">✓</span>方案 A 的具体改动点（均为视觉/布局层）</h2>
+  <div class="card">
+    <ul class="note">
+      <li><span class="tagchip">高度</span><code>#productManagerView.is-active-view</code> 由 <code>height:auto</code> 改为 <code>display:flex; flex-direction:column; min-height:calc(100vh - 顶部占用)</code>，其子层链路恢复 flex 拉伸（即移除/收窄 1088-1102 行的强制 auto）。</li>
+      <li><span class="tagchip">滚动</span>恢复 <code>.pm-model-list / .mm-category-table-wrap</code> 的 <code>overflow:auto</code> 与内部滚动（1113-1118 行不再全局 visible），滚动只发生在版面框内。</li>
+      <li><span class="tagchip">吸底</span>「添加型号」操作条与「校验并保存」说明行固定在版面框底部，不随内容滚动。</li>
+      <li><span class="tagchip">空态</span>数据极少时版面框保持最小高度（如 420px），网格/表格居中放置，不再塌成一条。</li>
+      <li><span class="tagchip">不动</span>左侧导航、分类树交互、表格列结构、按钮功能与文案全部保持现状。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

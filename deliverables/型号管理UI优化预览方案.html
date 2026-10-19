@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>型号管理 · UI 优化预览方案（两页 8 项）</title>
+<style>
+  :root {
+    --primary: #2563eb;
+    --ink: #1e293b;
+    --ink-2: #475569;
+    --ink-3: #94a3b8;
+    --line: #e2e8f0;
+    --panel: #f8fafc;
+    --danger: #dc2626;
+    --danger-bg: #fef2f2;
+    --ok: #0d9488;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f1f5f9; color: var(--ink); padding: 32px 40px 64px; line-height: 1.6; }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: var(--ink-3); font-size: 13px; margin-bottom: 24px; }
+  h2 { font-size: 17px; margin: 40px 0 6px; }
+  h2 .pg { display: inline-block; background: var(--primary); color: #fff; border-radius: 6px;
+           font-size: 12px; padding: 2px 10px; margin-right: 8px; vertical-align: 2px; }
+  .desc { color: var(--ink-2); font-size: 13px; margin-bottom: 14px; }
+  .item { background: #fff; border: 1px solid var(--line); border-radius: 12px;
+          padding: 18px 22px; margin-bottom: 14px; }
+  .item h3 { font-size: 14.5px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .pri { font-size: 11px; border-radius: 999px; padding: 1px 10px; font-weight: 400; }
+  .pri.red { background: #fef2f2; color: #b91c1c; }
+  .pri.amb { background: #fefce8; color: #a16207; }
+  .pri.gray { background: var(--panel); color: var(--ink-3); border: 1px solid var(--line); }
+  .cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .shot { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .shot-label { font-size: 12px; padding: 6px 12px; border-bottom: 1px solid var(--line); }
+  .shot-label.bad { color: #b91c1c; background: #fef2f2; }
+  .shot-label.good { color: #166534; background: #f0fdf4; }
+  .stage { padding: 14px 16px; background: #fbfdff; min-height: 120px; display: flex; flex-direction: column; justify-content: center; }
+
+  /* ===== 组件样式 ===== */
+  .side { background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 10px; width: 240px; }
+  .side .hd { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-3);
+              padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+  .cat { display: flex; justify-content: space-between; align-items: center; font-size: 13px;
+         padding: 7px 10px; border-radius: 6px; color: var(--ink-2); margin-bottom: 2px; position: relative; }
+  .cat .n { background: #e2e8f0; color: var(--ink-3); border-radius: 999px; font-size: 11px; padding: 0 8px; }
+  .cat.sel-old { background: #fde8e8; color: var(--primary); font-weight: 500; }
+  .cat.sel-old .n { background: #fbcfe8; color: #be185d; }
+  .cat.sel-old::after { content: ""; position: absolute; right: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: var(--primary); }
+  .cat.sel-new { background: #eff6ff; color: var(--primary); font-weight: 500; }
+  .cat.sel-new .n { background: #dbeafe; color: var(--primary); }
+  .cat.sel-new::after { content: ""; position: absolute; right: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: var(--primary); }
+
+  .tools { display: flex; align-items: center; gap: 10px; }
+  .search { flex: 0 0 220px; display: flex; align-items: center; gap: 6px; background: #fff;
+            border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 12.5px; color: var(--ink-3); }
+  .btn { display: inline-flex; align-items: center; gap: 5px; border-radius: 6px; font-size: 12.5px; padding: 6px 12px; }
+  .btn.danger-old { border: 1px solid #fca5a5; color: var(--danger); background: #fff; }
+  .btn.danger-soft { border: none; color: #b91c1c; background: var(--danger-bg); }
+  .btn.pri { background: var(--primary); color: #fff; }
+  .btn.pri-o { border: 1px solid #bfdbfe; color: var(--primary); background: #fff; }
+  .btn.teal-o { border: 1px solid #99f6e4; color: #0f766e; background: #fff; }
+  .btn.teal { background: var(--ok); color: #fff; }
+  .btn.ghost { border: 1px solid var(--line); color: var(--ink-2); background: #fff; }
+  .vsep { width: 1px; height: 22px; background: var(--line); }
+
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 10px 12px;
+          display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .card .nm { flex: 1; }
+  .tag-on { font-size: 11px; color: var(--ink-3); border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; }
+  .x { color: #cbd5e1; font-size: 12px; }
+  .card.hover-demo { border-color: var(--primary); }
+  .x.hover-demo { color: var(--ink-2); }
+  .dim { color: var(--ink-3); }
+  .note { font-size: 11px; color: var(--ink-3); margin-top: 8px; }
+  .note.ok { color: #166534; }
+  .note.bad { color: #b91c1c; }
+
+  .addbar { display: flex; align-items: center; gap: 10px; }
+  .addbar .input { flex: 1; border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; font-size: 12.5px; color: var(--ink-3); background: #fff; }
+  .mini { font-size: 12px; color: var(--ink-2); }
+  select-ish { }
+
+  .stat { display: flex; gap: 16px; font-size: 12.5px; color: var(--ink-2); align-items: center; }
+  .stat b { color: var(--ink); font-size: 14px; }
+  .q { display: inline-flex; width: 14px; height: 14px; border-radius: 50%; background: var(--line);
+       color: var(--ink-2); font-size: 10px; align-items: center; justify-content: center; }
+
+  table.tb { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.tb th { text-align: left; color: var(--ink-3); font-weight: 400; font-size: 11.5px;
+                border-bottom: 1px solid var(--line); padding: 6px 10px; background: #fbfdff; }
+  table.tb td { border-bottom: 1px solid #f1f5f9; padding: 8px 10px; vertical-align: top; }
+  .tag { display: inline-block; background: #eef2ff; color: #4f46e5; border-radius: 4px;
+         padding: 1px 7px; font-size: 11px; margin: 1px 2px 1px 0; }
+  .tag.st { background: #fefce8; color: #a16207; }
+  .more-tag { display: inline-block; border: 1px dashed #c7d2fe; color: #4f46e5; border-radius: 4px;
+              padding: 1px 7px; font-size: 11px; background: #fff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>型号管理 · UI 优化预览方案</h1>
+  <div class="sub">共 8 项 · 均为视觉与微文案层 · 左「现状」右「改后」 · 2026-10-08</div>
+
+  <h2><span class="pg">页面一</span>型号目录</h2>
+
+  <div class="item">
+    <h3>① 分类树选中态：粉色危险底 → 主色蓝 <span class="pri red">交互安全</span></h3>
+    <div class="cmp">
+      <div class="shot"><div class="shot-label bad">✕ 现状：选中项粉底＋蓝字，危险色系与主色混用</div>
+        <div class="stage"><div class="side">
+          <div class="hd"><span>分类列表</span><span>4 个分类</span></div>
+          <div class="cat sel-old">吸尘器 <span class="n">6</span></div>
+          <div class="cat">扫地机 <span class="n">46</span></div>
+          <div class="cat">洗地机 <span class="n">60</span></div>
+          <div class="cat">洗衣机 <span class="n">30</span></div>
+        </div><div class="note bad">粉色底是危险色语汇，但「选中分类」是中性操作；文字蓝色与粉底互相打架</div></div>
+      </div>
+      <div class="shot"><div class="shot-label good">✓ 改后：浅蓝底＋蓝字＋蓝色指示条，全链路主色</div>
+        <div class="stage"><div class="side">
+          <div class="hd"><span>分类列表</span><span>4 个分类</span></div>
+          <div class="cat sel-new">吸尘器 <span class="n">6</span></div>
+          <div class="cat">扫地机 <span class="n">46</span></div>
+          <div class="cat">洗地机 <span class="n">60</span></div>
+          <div class="cat">洗衣机 <span class="n">30</span></div>
+        </div><div class="note ok">危险色只留给「删除分类」，选中即主色语义</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="item">
+    <h3>② 「删除分类」防误触：拉开间距＋降为浅色危险样式 <span class="pri red">交互安全</span></h3>
+    <div class="cmp">
+      <div class="shot"><div class="shot-label bad">✕ 现状：紧贴搜索框（间距约 8px），红描边醒目</div>
+        <div class="stage"><div class="tools">
+          <div class="search">🔍 搜索当前分类型号</div>
+          <div class="btn danger-old">🗑 删除分类</div>
+        </div><div class="note bad">搜索完手一抖就点到删除整个分类</div></div>
+      </div>
+      <div class="shot"><div class="shot-label good">✓ 改后：竖分隔线＋16px 间距，浅红底弱化存在感</div>
+        <div class="stage"><div class="tools">
+          <div class="search">🔍 搜索当前分类型号</div>
+          <div class="vsep"></div>
+          <div class="btn danger-soft">🗑 删除分类</div>
+        </div><div class="note ok">保留位置与功能（含二次确认），仅降低视觉活性与误触概率</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="item">
+    <h3>③ 双主按钮收敛：「校验并保存」降为次级 <span class="pri amb">视觉降噪</span></h3>
+    <div class="cmp">
+      <div class="shot"><div class="shot-label bad">✕ 现状：两个蓝色实心按钮垂直相邻</div>
+        <div class="stage">
+          <div class="addbar"><div class="input">输入新型号名称</div><span class="mini">新建后：</span><div class="btn ghost">待上线 ▾</div><div class="btn pri">＋ 添加型号</div></div>
+          <div style="display:flex; justify-content:flex-end; margin-top:10px;"><div class="btn pri">✓ 校验并保存</div></div>
+          <div class="note bad">视线会同时被两个主按钮拉扯</div>
+        </div>
+      </div>
+      <div class="shot"><div class="shot-label good">✓ 改后：主按钮唯一，校验为描边次级</div>
+        <div class="stage">
+          <div class="addbar"><div class="input">输入新型号名称</div><span class="mini">新建后：</span><div class="btn ghost">待上线 ▾</div><div class="btn pri">＋ 添加型号</div></div>
+          <div style="display:flex; justify-content:flex-end; margin-top:10px;"><div class="btn pri-o">✓ 校验并保存</div></div>
+          <div class="note ok">「添加型号」是高频主操作；「校验并保存」低频，降为描边</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="item">
+    <h3>④＋⑤ 状态标签与删除 ✕ 降噪 <span class="pri amb">视觉降噪</span></h3>
+    <div class="cmp">
+      <div class="shot"><div class="shot-label bad">✕ 现状：6 张卡片 6 个「已上线」＋6 个常显 ✕</div>
+        <div class="stage"><div class="cards">
+          <div class="card"><span class="nm">H5</span><span class="tag-on">已上线</span><span class="x">✕</span></div>
+          <div class="card"><span class="nm">H6</span><span class="tag-on">已上线</span><span class="x">✕</span></div>
+          <div class="card"><span class="nm">H7</span><span class="tag-on">已上线</span><span class="x">✕</span></div>
+          <div class="card"><span class="nm">H50 Ultra</span><span class="tag-on">已上线</span><span class="x">✕</span></div>
+          <div class="card"><span class="nm">H50</span><span class="tag-on">已上线</span><span class="x">✕</span></div>
+          <div class="card"><span class="nm">H50 Pro</span><span class="tag-on">已上线</span><span class="x">✕</span></div>
+        </div><div class="note bad">全部相同的标签＝零信息量；一排灰 ✕ 是噪音</div></div>
+      </div>
+      <div class="shot"><div class="shot-label good">✓ 改后：已上线不显示标签；✕ 仅 hover 浮现</div>
+        <div class="stage"><div class="cards">
+          <div class="card"><span class="nm">H5</span><span class="x">✕</span></div>
+          <div class="card"><span class="nm">H6</span><span class="x">✕</span></div>
+          <div class="card hover-demo"><span class="nm">H7</span><span class="x hover-demo">✕</span></div>
+          <div class="card"><span class="nm">H50 Ultra</span><span class="x">✕</span></div>
+          <div class="card"><span class="nm">H50</span><span class="x">✕</span></div>
+          <div class="card"><span class="nm">H50 Pro</span><span class="x">✕</span></div>
+        </div><div class="note ok">仅「待上线 / 已下线」等非默认状态才显示标签（黄/灰样式区分）；✕ 默认隐藏、hover 卡片浮现（H7 为 hover 演示）</div></div>
+      </div>
+    </div>
+  </div>
+
+  <h2><span class="pg">页面二</span>分类映射</h2>
+
+  <div class="item">
+    <h3>⑥ 双强调色收敛：「保存配置」绿色实心 → 描边 <span class="pri amb">视觉降噪</span></h3>
+    <div class="cmp">
+      <div class="shot"><div class="shot-label bad">✕ 现状：蓝实心与绿实心并排，都像主按钮</div>
+        <div class="stage"><div class="tools" style="justify-content:flex-end">
+          <div class="search" style="flex:0 0 200px">🔍 搜索型号或分类…</div>
+          <div class="btn ghost">导出配置</div>
+          <div class="btn teal">💾 保存配置</div>
+        </div><div class="note bad">「新增映射分类」蓝色实心在左侧，页面同时存在两个实心强调色</div></div>
+      </div>
+      <div class="shot"><div class="shot-label good">✓ 改后：保存降为绿描边，蓝色实心全页唯一</div>
+        <div class="stage"><div class="tools" style="justify-content:flex-end">
+          <div class="search" style="flex:0 0 200px">🔍 搜索型号或分类…</div>
+          <div class="btn ghost">导出配置</div>
+          <div class="btn teal-o">💾 保存配置</div>
+        </div><div class="note ok">保留绿色区分「保存」动作，仅弱化视觉权重</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="item">
+    <h3>⑦ 长标签行截断：超过一行收为「…＋N」 <span class="pri amb">视觉降噪</span></h3>
+    <div class="cmp">
+      <div class="shot"><div class="shot-label bad">✕ 现状：9 个 tag 换成两行，行高参差</div>
+        <div class="stage">
+          <table class="tb">
+            <tr><th>型号</th><th>所属分类</th><th style="width:50px">分类数</th><th style="width:56px">状态</th></tr>
+            <tr><td>石头犀牛Pro</td><td><span class="tag">清洁一条地机</span><span class="tag">去掉 T 系列、G10 系列、G10S 系列扫地机</span><span class="tag">去掉 T 系列扫地机</span><span class="tag">所有扫地机</span><span class="tag">所有型号</span><br><span class="tag">旋转拖布、先扫后拖在快递指令里</span><span class="tag">旋觅系列</span><span class="tag">P20 系列</span><span class="tag">P 系列</span></td><td>9</td><td><span class="tag st">多分类</span></td></tr>
+            <tr><td>分子筛干衣机Z1 Max</td><td><span class="tag">干衣机</span><span class="tag">所有洗衣机</span><span class="tag">所有型号</span></td><td>3</td><td><span class="tag st">多分类</span></td></tr>
+          </table>
+          <div class="note bad">一行 tag 多、一行 tag 少，行高 34px ↔ 62px 跳变</div>
+        </div>
+      </div>
+      <div class="shot"><div class="shot-label good">✓ 改后：单行截断＋「…＋N」，行高统一</div>
+        <div class="stage">
+          <table class="tb">
+            <tr><th>型号</th><th>所属分类</th><th style="width:50px">分类数</th><th style="width:56px">状态</th></tr>
+            <tr><td>石头犀牛Pro</td><td><span class="tag">清洁一条地机</span><span class="tag">去掉 T 系列、G10 系列、G10S 系列扫地机</span><span class="tag">去掉 T 系列扫地机</span><span class="tag">所有扫地机</span><span class="more-tag">…＋5</span></td><td>9</td><td><span class="tag st">多分类</span></td></tr>
+            <tr><td>分子筛干衣机Z1 Max</td><td><span class="tag">干衣机</span><span class="tag">所有洗衣机</span><span class="tag">所有型号</span></td><td>3</td><td><span class="tag st">多分类</span></td></tr>
+          </table>
+          <div class="note ok">每行只显示一行 tag，余量收进「…＋N」；完整列表放 title 悬浮提示，不改变点击行为</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="item">
+    <h3>⑧ 「目录外型号」加口径提示 <span class="pri gray">微文案</span></h3>
+    <div class="cmp">
+      <div class="shot"><div class="shot-label bad">✕ 现状：统计条出现「目录外型号」，口径无解释</div>
+        <div class="stage"><div class="stat">
+          <span><b>142</b> 全部型号</span><span><b>17</b> 未映射</span><span><b>125</b> 多分类</span><span><b>0</b> 目录外型号</span>
+        </div><div class="note bad">只有维护者知道「目录外」指什么</div></div>
+      </div>
+      <div class="shot"><div class="shot-label good">✓ 改后：名词后加问号角标，悬浮给一句话口径</div>
+        <div class="stage"><div class="stat">
+          <span><b>142</b> 全部型号</span><span><b>17</b> 未映射</span><span><b>125</b> 多分类</span><span><b>0</b> 目录外型号 <span class="q">?</span></span>
+        </div><div class="note ok">悬浮提示：「未出现在任何映射分类中的型号，需人工归入或确认弃用」</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="item" style="background:#f8fafc">
+    <h3 style="margin-bottom:4px">实施说明</h3>
+    <div class="desc" style="margin:0">
+      8 项全部只动 CSS/微文案，不改 HTML 结构与交互逻辑（⑦的截断为纯 CSS 单行 + title 属性，⑧为加一个 title）。
+      ①②③⑥为纯样式覆盖；④⑤需要改 app_v8.js 里的卡片渲染条件（仅控制标签/✕是否输出，不改数据与操作）。
+      每项改完按 :8085 实测截图验证，逐项给你过目。
+    </div>
+  </div>
+</div>
+</body>
+</html>

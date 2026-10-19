@@ -1,4 +1,6 @@
 #!/bin/bash
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 echo "🚀 启动 KnowBase Hub 本地版..."
 
 # 获取项目根目录（脚本在 🚀 启动脚本/ 子目录中）

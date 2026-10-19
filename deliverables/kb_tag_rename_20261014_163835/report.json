@@ -1,0 +1,107 @@
+{
+  "database": "knowledgebase_restored_20261009",
+  "renamed": [
+    {
+      "id": "0873ca7e-9686-476b-b1ed-80a8a9d5e268",
+      "old": "联网",
+      "new": "设备–配网联网",
+      "associations": 1
+    },
+    {
+      "id": "19b71a06-69d5-484a-9059-8df1e795eeb6",
+      "old": "重启",
+      "new": "异常恢复–设备重启",
+      "associations": 1
+    },
+    {
+      "id": "3084dfcf-7cad-4d4a-94ee-3832b9b008ab",
+      "old": "报错-重置解决",
+      "new": "异常恢复–重置解决",
+      "associations": 1
+    },
+    {
+      "id": "3de1ad57-cb45-40a2-9d8c-cb5a42464c0f",
+      "old": "订单购买",
+      "new": "交易–下单流程",
+      "associations": 1
+    },
+    {
+      "id": "445c5e1d-4d6c-4e67-92c1-979ac8885333",
+      "old": "洗地机全品类对比",
+      "new": "导购–洗地机品类对比",
+      "associations": 1
+    },
+    {
+      "id": "4a40e834-afd1-4a06-b94d-eb7ccb19de48",
+      "old": "轻拖",
+      "new": "清洁–轻拖模式",
+      "associations": 1
+    },
+    {
+      "id": "7fe62bbb-a33d-4d74-9224-37314e6807ac",
+      "old": "产品对比",
+      "new": "导购–产品对比",
+      "associations": 133
+    },
+    {
+      "id": "8444c837-e166-4da7-86de-a075c5a4d8eb",
+      "old": "电量 20%",
+      "new": "充电–电量20%",
+      "associations": 1
+    },
+    {
+      "id": "847b9847-d6b4-43a4-bf17-d58dad48e52f",
+      "old": "延保",
+      "new": "服务–延保购买",
+      "associations": 9
+    },
+    {
+      "id": "8f0f8ab3-233e-44c1-b43e-9a0b24e459b3",
+      "old": "错误码",
+      "new": "异常–错误码提示",
+      "associations": 80
+    },
+    {
+      "id": "9861f45b-0736-44aa-8f8c-ddb59bd35e9a",
+      "old": "转人工",
+      "new": "客服–转人工",
+      "associations": 3
+    },
+    {
+      "id": "dc31bfec-fa71-4132-b87d-1f811db5dd0f",
+      "old": "电量 15%",
+      "new": "充电–电量15%",
+      "associations": 1
+    },
+    {
+      "id": "dd00590f-c5e7-479a-9de2-d8f11f874b70",
+      "old": "618保价",
+      "new": "交易–618保价",
+      "associations": 0
+    }
+  ],
+  "deleted": [
+    "E2E临时标签"
+  ],
+  "associations_before": 235,
+  "associations_after": 235,
+  "knowledge_content_unchanged": true,
+  "after_tags": [
+    "设备–配网联网",
+    "异常恢复–设备重启",
+    "异常恢复–重置解决",
+    "交易–下单流程",
+    "导购–洗地机品类对比",
+    "清洁–轻拖模式",
+    "导购–产品对比",
+    "充电–电量20%",
+    "服务–延保购买",
+    "会员中心",
+    "异常–错误码提示",
+    "客服–转人工",
+    "充电–电量15%",
+    "交易–618保价"
+  ],
+  "backup": "/Users/tuzi/个人项目/One/knowbase_hub_8085/deliverables/kb_tag_rename_20261014_163835",
+  "verified": true
+}

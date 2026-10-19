@@ -61,7 +61,7 @@ class ModificationTagDiffTests(unittest.TestCase):
             'product_name': (
                 'A20 Air,A30,A30 2.0,A30 CE,A30 CE 增强版,A30 CE 性能版,'
                 'A30 CE 畅享版,A30 Combo,A30 Pro CE 悦享版,A30 Pro Steam 智享版,'
-                'A30 Pro Turbo,A30 ProCE,A30 超能版,拓界 Aura,拓界 Pro,拓界 Tech,'
+                'A30 Pro Turbo,A30 ProCE,A30超能版,拓界 Aura,拓界 Pro,拓界 Tech,'
                 '拓界Airy,拓界Noble,智净'
             ),
         })
@@ -69,7 +69,7 @@ class ModificationTagDiffTests(unittest.TestCase):
             'product_name': (
                 'A20 Air, A30, A30 2.0, A30 CE, A30 CE 增强版, A30 CE 性能版, '
                 'A30 CE 畅享版, A30 Combo, A30 Pro CE 悦享版, A30 Pro Steam 智享版, '
-                'A30 Pro Turbo, A30 ProCE, A30 超能版, 拓界 Aura, 拓界 Pro, 拓界 Tech, '
+                'A30 Pro Turbo, A30 ProCE, A30超能版, 拓界 Aura, 拓界 Pro, 拓界 Tech, '
                 '拓界Airy, 拓界Noble, 智净'
             ),
         })

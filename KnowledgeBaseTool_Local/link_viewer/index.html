@@ -9,8 +9,8 @@
   <link rel="stylesheet" href="design-system.css?v=3">
   
   <!-- 原有样式 -->
-  <link rel="stylesheet" href="styles.css?v=65">
-  <link rel="stylesheet" href="extra_styles.css?v=69">
+  <link rel="stylesheet" href="styles.css?v=67">
+  <link rel="stylesheet" href="extra_styles.css?v=105">
   <!-- 滚动性能优化 -->
   <link rel="stylesheet" href="scroll-performance.css?v=4">
   <!-- 加载状态提示样式 -->
@@ -340,7 +340,7 @@
             <p id="currentModuleDesc">维护 V1 知识库内容，支持搜索、编辑、导出与下游同步。</p>
           </div>
           <div class="workbench-status-row">
-            <span class="workbench-status-pill">当前分组：<b id="currentModuleGroup">核心数据</b></span>
+            <span class="workbench-status-pill">当前分组：<b id="currentModuleGroup">知识预览 · 看</b></span>
             <span class="workbench-status-pill">当前用户：<b id="currentUser"></b></span>
             <span class="workbench-status-pill">运行环境：<b>本地工作台</b></span>
           </div>
@@ -356,12 +356,13 @@
       </div>
 
       <div class="workbench-layout" id="workbenchLayout">
-        <aside class="workbench-sidebar">
+        <aside class="workbench-sidebar" aria-label="模块导航">
           <div class="workbench-sidebar-card">
             <div class="workbench-sidebar-header">
+              <div class="workbench-brand-mark" aria-hidden="true"><i class="fas fa-bolt"></i></div>
               <div class="workbench-sidebar-header-copy">
-                <div class="workbench-sidebar-title">模块导航</div>
-                <div class="workbench-sidebar-subtitle">按任务分组，保留原有功能入口</div>
+                <div class="workbench-sidebar-title">知识运营台</div>
+                <div class="workbench-sidebar-subtitle">Knowledge Ops</div>
               </div>
               <button
                 type="button"
@@ -375,38 +376,67 @@
                 <i class="fas fa-angle-left" aria-hidden="true"></i>
               </button>
             </div>
-            <div class="workbench-sidebar-nav">
-              <div class="workbench-nav-group" data-nav-group="核心数据">
-                <div class="workbench-nav-group-title">核心数据</div>
-                <button onclick="switchTab('kbView')" class="tab-modern workbench-nav-btn active" id="tab-kbView">知识库管理</button>
-                <button onclick="switchTab('kbDuplicateCheckView')" class="tab-modern workbench-nav-btn" id="tab-kbDuplicateCheckView">知识查重</button>
-                <button onclick="switchTab('kbCompareView')" class="tab-modern workbench-nav-btn" id="tab-kbCompareView">知识对比</button>
-                <button onclick="switchTab('knowledgeGraphView')" class="tab-modern workbench-nav-btn" id="tab-knowledgeGraphView">知识图谱</button>
-                <button onclick="switchTab('matrixView')" class="tab-modern workbench-nav-btn" id="tab-matrixView">机型矩阵管理</button>
-                <button onclick="switchTab('linkView')" class="tab-modern workbench-nav-btn" id="tab-linkView">多媒体预览</button>
+            <div class="workbench-sidebar-search" role="search">
+              <i class="fas fa-search" aria-hidden="true"></i>
+              <input id="workbenchNavSearch" type="search" placeholder="搜索菜单 / 功能" aria-label="搜索菜单或功能" autocomplete="off">
+              <kbd>⌘K</kbd>
+            </div>
+            <div class="workbench-flow-indicator" aria-label="工作流程">
+              <button type="button" class="workbench-flow-step" data-flow-key="view" onclick="focusWorkbenchNavGroup('view')"><span class="workbench-flow-dot"></span><span>看</span></button>
+              <span class="workbench-flow-line" aria-hidden="true"></span>
+              <button type="button" class="workbench-flow-step" data-flow-key="edit" onclick="focusWorkbenchNavGroup('edit')"><span class="workbench-flow-dot"></span><span>编</span></button>
+              <span class="workbench-flow-line" aria-hidden="true"></span>
+              <button type="button" class="workbench-flow-step" data-flow-key="flow" onclick="focusWorkbenchNavGroup('flow')"><span class="workbench-flow-dot"></span><span>流转</span></button>
+              <span class="workbench-flow-line" aria-hidden="true"></span>
+              <button type="button" class="workbench-flow-step" data-flow-key="sys" onclick="focusWorkbenchNavGroup('sys')"><span class="workbench-flow-dot"></span><span>管</span></button>
+            </div>
+            <nav class="workbench-sidebar-nav" aria-label="主导航">
+              <div class="workbench-nav-group" data-nav-group="view" data-group-tone="view">
+                <button type="button" class="workbench-nav-group-title" onclick="toggleWorkbenchNavGroup('view')" aria-expanded="true" aria-controls="workbench-nav-view"><span class="workbench-nav-group-icon"><i class="fas fa-eye" aria-hidden="true"></i></span><span class="workbench-nav-group-name">知识预览</span><span class="workbench-nav-group-count">4</span><i class="fas fa-chevron-down workbench-nav-group-chevron" aria-hidden="true"></i></button>
+                <div id="workbench-nav-view" class="workbench-nav-group-items">
+                  <button onclick="switchTab('kbView')" class="tab-modern workbench-nav-btn active" id="tab-kbView" data-nav-label="知识库管理"><i class="nav-icon fas fa-database" aria-hidden="true"></i><span class="nav-label">知识库管理</span><span class="nav-badge">NEW</span></button>
+                  <button onclick="switchTab('matrixView')" class="tab-modern workbench-nav-btn" id="tab-matrixView" data-nav-label="机型矩阵视图"><i class="nav-icon fas fa-table-cells-large" aria-hidden="true"></i><span class="nav-label">机型矩阵视图</span></button>
+                  <button onclick="openProductManager()" class="tab-modern workbench-nav-btn" id="tab-productManagerView" data-nav-label="型号库视图"><i class="nav-icon fas fa-layer-group" aria-hidden="true"></i><span class="nav-label">型号库视图</span></button>
+                  <button onclick="switchTab('linkView')" class="tab-modern workbench-nav-btn" id="tab-linkView" data-nav-label="多媒体视图"><i class="nav-icon fas fa-image" aria-hidden="true"></i><span class="nav-label">多媒体视图</span></button>
+                </div>
               </div>
 
-              <div class="workbench-nav-group" data-nav-group="质量管控">
-                <div class="workbench-nav-group-title">质量管控</div>
-                <button onclick="switchTab('scoringView')" class="tab-modern workbench-nav-btn" id="tab-scoringView">知识库评分</button>
-                <button onclick="switchTab('governanceView')" class="tab-modern workbench-nav-btn" id="tab-governanceView">知识库治理</button>
-                <button onclick="switchTab('controlCenterView')" class="tab-modern workbench-nav-btn" id="tab-controlCenterView">管控中心</button>
-                <button onclick="switchTab('parameterCheckView')" class="tab-modern workbench-nav-btn" id="tab-parameterCheckView">参数校对</button>
+              <div class="workbench-nav-group" data-nav-group="edit" data-group-tone="edit">
+                <button type="button" class="workbench-nav-group-title" onclick="toggleWorkbenchNavGroup('edit')" aria-expanded="true" aria-controls="workbench-nav-edit"><span class="workbench-nav-group-icon"><i class="fas fa-pen" aria-hidden="true"></i></span><span class="workbench-nav-group-name">知识维护</span><span class="workbench-nav-group-count">6</span><i class="fas fa-chevron-down workbench-nav-group-chevron" aria-hidden="true"></i></button>
+                <div id="workbench-nav-edit" class="workbench-nav-group-items">
+                  <button onclick="switchTab('newProductEntryView')" class="tab-modern workbench-nav-btn" id="tab-newProductEntryView" data-nav-label="新品录入"><i class="nav-icon fas fa-circle-plus" aria-hidden="true"></i><span class="nav-label">新品录入</span></button>
+                  <button onclick="switchTab('smartMappingView')" class="tab-modern workbench-nav-btn" id="tab-smartMappingView" data-nav-label="智能映射"><i class="nav-icon fas fa-link" aria-hidden="true"></i><span class="nav-label">智能映射</span></button>
+                  <button onclick="switchTab('kbDuplicateCheckView')" class="tab-modern workbench-nav-btn" id="tab-kbDuplicateCheckView" data-nav-label="知识查重"><i class="nav-icon fas fa-copy" aria-hidden="true"></i><span class="nav-label">知识查重</span></button>
+                  <button onclick="switchTab('kbCompareView')" class="tab-modern workbench-nav-btn" id="tab-kbCompareView" data-nav-label="知识对比"><i class="nav-icon fas fa-code-compare" aria-hidden="true"></i><span class="nav-label">知识对比</span></button>
+                  <button onclick="switchTab('knowledgeGraphView')" class="tab-modern workbench-nav-btn" id="tab-knowledgeGraphView" data-nav-label="关系图谱"><i class="nav-icon fas fa-share-nodes" aria-hidden="true"></i><span class="nav-label">关系图谱</span></button>
+                  <button onclick="switchTab('parameterCheckView')" class="tab-modern workbench-nav-btn" id="tab-parameterCheckView" data-nav-label="参数校对"><i class="nav-icon fas fa-sliders" aria-hidden="true"></i><span class="nav-label">参数校对</span></button>
+                </div>
               </div>
 
-              <div class="workbench-nav-group" data-nav-group="工具与映射">
-                <div class="workbench-nav-group-title">工具与映射</div>
-                <button onclick="switchTab('dataSettingsView')" class="tab-modern workbench-nav-btn" id="tab-dataSettingsView">数据设置</button>
-                <button onclick="switchTab('smartMappingView')" class="tab-modern workbench-nav-btn" id="tab-smartMappingView">智能映射</button>
-                <button onclick="switchTab('newProductEntryView')" class="tab-modern workbench-nav-btn" id="tab-newProductEntryView">新品录入</button>
+              <div class="workbench-nav-group" data-nav-group="flow" data-group-tone="flow">
+                <button type="button" class="workbench-nav-group-title" onclick="toggleWorkbenchNavGroup('flow')" aria-expanded="true" aria-controls="workbench-nav-flow"><span class="workbench-nav-group-icon"><i class="fas fa-arrows-rotate" aria-hidden="true"></i></span><span class="workbench-nav-group-name">更新处理</span><span class="workbench-nav-group-count">6</span><i class="fas fa-chevron-down workbench-nav-group-chevron" aria-hidden="true"></i></button>
+                <div id="workbench-nav-flow" class="workbench-nav-group-items">
+                  <button onclick="switchTab('scoringView')" class="tab-modern workbench-nav-btn" id="tab-scoringView" data-nav-label="质量评分"><i class="nav-icon fas fa-gauge-high" aria-hidden="true"></i><span class="nav-label">质量评分</span></button>
+                  <button onclick="switchTab('governanceView')" class="tab-modern workbench-nav-btn" id="tab-governanceView" data-nav-label="质量治理"><i class="nav-icon fas fa-shield-halved" aria-hidden="true"></i><span class="nav-label">质量治理</span></button>
+                  <button onclick="switchTab('activityArchiveView')" class="tab-modern workbench-nav-btn" id="tab-activityArchiveView" data-nav-label="活动暂存"><i class="nav-icon fas fa-pause-circle" aria-hidden="true"></i><span class="nav-label">活动暂存</span></button>
+                  <button onclick="switchTab('pendingModificationsView')" class="tab-modern workbench-nav-btn" id="tab-pendingModificationsView" data-nav-label="待上线记录"><i class="nav-icon fas fa-clock" aria-hidden="true"></i><span class="nav-label">待上线记录</span><span class="nav-dot" aria-label="有待办"></span></button>
+                  <button onclick="switchTab('modificationsView')" class="tab-modern workbench-nav-btn" id="tab-modificationsView" data-nav-label="修改记录"><i class="nav-icon fas fa-clock-rotate-left" aria-hidden="true"></i><span class="nav-label">修改记录</span></button>
+                  <button onclick="switchTab('archiveView')" class="tab-modern workbench-nav-btn" id="tab-archiveView" data-nav-label="归档管理"><i class="nav-icon fas fa-box-archive" aria-hidden="true"></i><span class="nav-label">归档管理</span></button>
+                </div>
               </div>
 
-              <div class="workbench-nav-group" data-nav-group="日志与归档">
-                <div class="workbench-nav-group-title">日志与归档</div>
-                <button onclick="switchTab('modificationsView')" class="tab-modern workbench-nav-btn" id="tab-modificationsView">修改记录</button>
-                <button onclick="switchTab('archiveView')" class="tab-modern workbench-nav-btn" id="tab-archiveView">归档管理</button>
-                <button onclick="switchTab('activityArchiveView')" class="tab-modern workbench-nav-btn" id="tab-activityArchiveView">活动暂存</button>
+              <div class="workbench-nav-group" data-nav-group="sys" data-group-tone="sys">
+                <button type="button" class="workbench-nav-group-title" onclick="toggleWorkbenchNavGroup('sys')" aria-expanded="true" aria-controls="workbench-nav-sys"><span class="workbench-nav-group-icon"><i class="fas fa-sliders" aria-hidden="true"></i></span><span class="workbench-nav-group-name">平台维护</span><span class="workbench-nav-group-count">2</span><i class="fas fa-chevron-down workbench-nav-group-chevron" aria-hidden="true"></i></button>
+                <div id="workbench-nav-sys" class="workbench-nav-group-items">
+                  <button onclick="switchTab('controlCenterView')" class="tab-modern workbench-nav-btn" id="tab-controlCenterView" data-nav-label="管控中心"><i class="nav-icon fas fa-shield" aria-hidden="true"></i><span class="nav-label">管控中心</span></button>
+                  <button onclick="switchTab('dataSettingsView')" class="tab-modern workbench-nav-btn" id="tab-dataSettingsView" data-nav-label="数据设置"><i class="nav-icon fas fa-sliders" aria-hidden="true"></i><span class="nav-label">数据设置</span></button>
+                </div>
               </div>
+            </nav>
+            <div class="workbench-sidebar-footer">
+              <button type="button" class="workbench-sidebar-tool" title="帮助" aria-label="帮助" onclick="openManual()"><i class="fas fa-circle-question" aria-hidden="true"></i></button>
+              <div class="workbench-sidebar-version"><strong>v2.4.1</strong><span>生产环境</span></div>
+              <button type="button" class="workbench-sidebar-tool" title="刷新" aria-label="刷新" onclick="location.reload()"><i class="fas fa-rotate" aria-hidden="true"></i></button>
             </div>
           </div>
         </aside>
@@ -426,7 +456,7 @@
           <div class="workbench-content-panel">
             <div class="workbench-content-head">
               <div class="workbench-content-head-label">当前模块</div>
-              <div id="currentModuleLabel" class="workbench-content-head-value">核心数据 / 知识库管理</div>
+              <div id="currentModuleLabel" class="workbench-content-head-value">知识预览 · 看 / 知识库管理</div>
             </div>
 
             <div class="workbench-views">
@@ -519,10 +549,10 @@
                 <div class="gov-filter-row gov-filter-row-basic kb-filter-chip-row">
                     <div id="reviewStatusChips" class="kb-filter-group kb-filter-group-wrap">
                             <span class="kb-filter-label">状态:</span>
-                            <div class="tag-chip active" data-value="unadjusted" onclick="toggleStatusFilter(this)">未调整</div>
-                            <div class="tag-chip active" data-value="creating" onclick="toggleStatusFilter(this)">新增中</div>
-                            <div class="tag-chip active" data-value="modifying" onclick="toggleStatusFilter(this)">修改中</div>
-                            <div class="tag-chip active" data-value="deleting" onclick="toggleStatusFilter(this)">删除中</div>
+                            <button type="button" class="tag-chip active" data-value="unadjusted" aria-pressed="true" onclick="toggleStatusFilter(this)">未调整</button>
+                            <button type="button" class="tag-chip active" data-value="creating" aria-pressed="true" onclick="toggleStatusFilter(this)">新增中</button>
+                            <button type="button" class="tag-chip active" data-value="modifying" aria-pressed="true" onclick="toggleStatusFilter(this)">修改中</button>
+                            <button type="button" class="tag-chip active" data-value="deleting" aria-pressed="true" onclick="toggleStatusFilter(this)">删除中</button>
                     </div>
                     <div id="kbProductCategoryFilter" class="kb-filter-group kb-filter-group-wrap">
                             <span class="kb-filter-label">产品分类:</span>
@@ -537,11 +567,20 @@
                             <div class="tag-chip" data-value="no_draft" onclick="setKBDraftStatusFilter(this)">无草稿</div>
                     </div>
                     <div class="kb-tag-filter-inline">
-                        <button type="button" id="kbTagFilterModalBtn" onclick="openKbTagFilterModal()" class="action-btn btn-secondary-outline">
-                            🏷️ 标签筛选 <span id="kbTagFilterCount" style="background: #e2e8f0; color: #475569; padding: 2px 6px; border-radius: 10px; font-size: 11px; display: none;">0</span>
+                        <button type="button" id="kbTagFilterBtn" onclick="toggleKbTagFilterDropdown()" class="action-btn btn-secondary-outline kb-tag-filter-trigger" aria-haspopup="dialog" aria-expanded="false" aria-controls="kbTagFilterDropdown">
+                            <i class="fas fa-tags" aria-hidden="true"></i><span>标签筛选</span>
+                            <span id="kbTagFilterValue" class="kb-tag-filter-value">全部标签</span>
+                            <span id="kbTagFilterCount" class="kb-tag-filter-count" hidden>0</span>
+                            <i class="fas fa-chevron-down kb-tag-filter-arrow" aria-hidden="true"></i>
                         </button>
                         <input type="hidden" name="kbTagFilterMode" value="OR">
                     </div>
+                    <label class="kb-mapping-tag-filter" for="kbMappingTagFilter">
+                        <span>映射标签:</span>
+                        <select id="kbMappingTagFilter" class="input-modern" onchange="this.title = this.options[this.selectedIndex]?.textContent || '全部映射标签'; clearKBCache(); loadKBTable(1)" title="全部映射标签">
+                            <option value="">全部映射标签</option>
+                        </select>
+                    </label>
                     <div class="gov-filter-btn-group kb-filter-actions-inline">
                         <button onclick="searchKB()" class="primary-btn btn-primary-gradient">🔍 搜索</button>
                         <button onclick="resetKBSearch()" class="action-btn btn-secondary-outline">重置</button>
@@ -848,13 +887,216 @@
       </dialog>
 
 
+      <!-- Tab Content: Product Manager -->
+      <div id="productManagerView" class="d-none">
+          <div class="kb-section product-manager-section">
+            <div class="product-manager-tabs" role="tablist" aria-label="型号库功能">
+                <button id="productManagerCatalogTab" type="button" class="product-manager-tab active" role="tab" aria-selected="true" aria-controls="productCatalogPanel" onclick="setProductManagerSubView('catalog')">
+                    <span>型号目录</span>
+                </button>
+                <button id="productManagerMappingTab" type="button" class="product-manager-tab" role="tab" aria-selected="false" aria-controls="productMappingPanel" onclick="setProductManagerSubView('mapping')">
+                    <span>分类映射</span>
+                </button>
+                <button id="productManagerReleaseTab" type="button" class="product-manager-tab" role="tab" aria-selected="false" aria-controls="productReleasePanel" onclick="setProductManagerSubView('release')">
+                    <span>新品分批发布</span>
+                </button>
+            </div>
+
+            <div id="productCatalogPanel" class="product-manager-subview">
+            <div class="product-catalog-toolbar">
+                <div class="product-catalog-title-group">
+                    <div class="product-catalog-title">型号目录</div>
+                    <div id="productManagerSummary" class="product-manager-summary" role="status">正在加载型号库...</div>
+                </div>
+                <div class="action-bar product-catalog-actions">
+                    <button type="button" onclick="loadProductManagerData()" class="action-btn btn-secondary-outline"><i class="fas fa-sync-alt" aria-hidden="true"></i><span>刷新</span></button>
+                    <button type="button" onclick="exportProductCatalogXlsx()" class="action-btn btn-secondary-outline"><i class="fas fa-file-excel" aria-hidden="true"></i><span>导出分类汇总</span></button>
+                    <button type="button" onclick="exportProductCatalogModelListXlsx()" class="action-btn btn-secondary-outline"><i class="fas fa-list" aria-hidden="true"></i><span>导出型号清单</span></button>
+                </div>
+            </div>
+            <div class="pm-layout product-manager-layout">
+                <aside class="pm-sidebar" aria-label="型号分类">
+                    <div class="pm-sidebar-header">
+                        <span>分类列表</span>
+                        <span id="productManagerCategorySummary" class="pm-sidebar-summary"></span>
+                    </div>
+                    <div id="productCategoryList" class="pm-category-list custom-scrollbar"></div>
+                    <div class="pm-add-category-wrapper">
+                        <button type="button" onclick="showAddCategoryInput()" id="showAddCategoryBtn" class="pm-btn-outline" style="width: 100%;"><i class="fas fa-plus" aria-hidden="true"></i><span>新增分类</span></button>
+                        <div id="addCategoryInputDiv" class="d-none" style="margin-top: 10px;">
+                            <input type="text" id="newCategoryName" placeholder="输入分类名称" class="pm-input" style="width: 100%; margin-bottom: 8px;">
+                            <div style="display: flex; gap: 8px;">
+                                <button type="button" onclick="addProductCategory()" class="pm-btn-primary" style="padding: 6px 0; flex: 1; font-size: 13px;">确认</button>
+                                <button type="button" onclick="hideAddCategoryInput()" class="pm-btn-outline" style="padding: 6px 0; flex: 1; font-size: 13px;">取消</button>
+                            </div>
+                        </div>
+                    </div>
+                </aside>
+
+                <section class="pm-content" aria-label="型号列表">
+                    <div class="pm-content-header">
+                        <div>
+                            <div id="currentCategoryTitle" class="pm-content-title">请选择分类</div>
+                            <div id="currentCategoryMeta" class="pm-content-meta">从左侧选择分类后管理型号</div>
+                        </div>
+                        <div class="pm-content-actions">
+                            <label class="pm-model-search" for="productModelSearch">
+                                <i class="fas fa-search" aria-hidden="true"></i>
+                                <input type="search" id="productModelSearch" placeholder="搜索当前分类型号" aria-label="搜索当前分类型号" oninput="renderProductModels(currentCategory)">
+                            </label>
+                            <button type="button" onclick="deleteCurrentCategory()" id="deleteCategoryBtn" class="danger-btn btn-sm d-none"><i class="fas fa-trash-alt" aria-hidden="true"></i><span>删除分类</span></button>
+                        </div>
+                    </div>
+
+                    <div id="productModelList" class="pm-model-list custom-scrollbar">
+                        <div class="pm-empty-state">
+                            <i class="fas fa-arrow-left" aria-hidden="true"></i>
+                            <span>请先在左侧选择一个分类</span>
+                        </div>
+                    </div>
+
+                    <div id="addModelContainer" class="pm-add-model-wrapper d-none">
+                        <input type="text" id="newModelName" placeholder="输入新型号名称" class="pm-input">
+                        <label class="pm-model-status-control" for="newModelReleaseStatus">
+                            <span>新建后：</span>
+                            <select id="newModelReleaseStatus" class="pm-model-status" aria-label="新型号发布状态">
+                                <option value="pending_release">待上线</option>
+                                <option value="released">已上线</option>
+                            </select>
+                        </label>
+                        <button type="button" onclick="addProductModel()" class="pm-btn-primary"><i class="fas fa-plus" aria-hidden="true"></i><span>添加型号</span></button>
+                    </div>
+                </section>
+            </div>
+
+            <div class="product-manager-footer">
+                <div class="text-muted">新增或删除型号会立即保存；执行校验可再次检查型号库与矩阵数据的影响。</div>
+                <button id="productCatalogCleanupBtn" type="button" onclick="saveProductCatalogFromManager()" class="primary-btn"><i class="fas fa-check-circle" aria-hidden="true"></i><span>校验并保存</span></button>
+            </div>
+            </div>
+
+            <div id="productMappingPanel" class="product-manager-subview d-none" role="tabpanel" aria-labelledby="productManagerMappingTab">
+                <div class="mm-page-panel">
+                    <div class="mm-page-header">
+                        <div>
+                            <h3 class="mm-modal-title"><i class="fas fa-map-signs" aria-hidden="true"></i>机型分类映射管理</h3>
+                            <p>将型号归入业务分类，供矩阵筛选、核查和下游配置使用。</p>
+                        </div>
+                    </div>
+                    <div class="mm-modal-body">
+                        <div class="mm-toolbar">
+                            <div class="mm-view-switch" role="tablist" aria-label="机型映射视图">
+                                <button id="modelMappingAuditViewBtn" type="button" class="mm-view-switch-btn active" role="tab" aria-controls="modelMappingAuditView" aria-selected="true" onclick="setModelMappingView('audit')">
+                                    <i class="fas fa-table-list" aria-hidden="true"></i> 型号核查
+                                </button>
+                                <button id="modelMappingCategoriesViewBtn" type="button" class="mm-view-switch-btn" role="tab" aria-controls="modelMappingCategoriesView" aria-selected="false" onclick="setModelMappingView('categories')">
+                                    <i class="fas fa-folder-tree" aria-hidden="true"></i> 分类编辑
+                                </button>
+                            </div>
+                            <button type="button" onclick="addMappingCategory()" class="primary-btn btn-sm"><i class="fas fa-plus" aria-hidden="true"></i> 新增映射分类</button>
+                            <button type="button" onclick="openModelMappingImportModal()" class="action-btn btn-sm"><i class="fas fa-file-import" aria-hidden="true"></i> 批量导入</button>
+                            <div class="mm-toolbar-spacer"></div>
+                            <div class="mm-search-wrap">
+                                <i class="fas fa-search mm-search-icon" aria-hidden="true"></i>
+                                <input id="modelMappingSearch" class="mm-search-input" type="text" placeholder="搜索型号或分类..." aria-label="搜索型号或分类" oninput="renderModelMappingTable()">
+                            </div>
+                            <button type="button" onclick="exportModelMappingsJson()" class="action-btn btn-sm" title="导出当前机型分类映射配置（Excel）">
+                                <i class="fas fa-file-export" aria-hidden="true"></i> 导出配置
+                            </button>
+                            <button type="button" onclick="saveModelMappings()" class="success-btn btn-sm"><i class="fas fa-save" aria-hidden="true"></i> 保存配置</button>
+                        </div>
+
+                        <section id="modelMappingAuditView" class="mm-audit-view" role="tabpanel" aria-labelledby="modelMappingAuditViewBtn">
+                            <div class="mm-audit-toolbar">
+                                <div id="modelMappingAuditSummary" class="mm-audit-summary" aria-live="polite"></div>
+                                <div class="mm-audit-filters" role="group" aria-label="型号核查筛选">
+                                    <button id="modelMappingAuditFilterAll" type="button" class="active" aria-pressed="true" onclick="setModelMappingAuditFilter('all')">全部</button>
+                                    <button id="modelMappingAuditFilterUnmapped" type="button" aria-pressed="false" onclick="setModelMappingAuditFilter('unmapped')">未映射</button>
+                                    <button id="modelMappingAuditFilterMulti" type="button" aria-pressed="false" onclick="setModelMappingAuditFilter('multi')">多分类</button>
+                                </div>
+                            </div>
+                            <div class="mm-audit-table-wrap custom-scrollbar">
+                                <table class="mm-audit-table">
+                                    <thead><tr><th scope="col">型号</th><th scope="col">所属分类</th><th scope="col">分类数</th><th scope="col">状态</th></tr></thead>
+                                    <tbody id="modelMappingAuditBody"></tbody>
+                                </table>
+                            </div>
+                        </section>
+
+                        <section id="modelMappingCategoriesView" class="mm-categories-view" role="tabpanel" aria-labelledby="modelMappingCategoriesViewBtn" hidden>
+                            <p class="mm-order-hint">使用右侧 ↑ / ↓ 调整分类顺序，完成后点击“保存配置”。此顺序同步用于矩阵筛选、映射标签和分类复制。搜索时仍按完整列表相邻位置移动。</p>
+                            <div class="mm-category-table-wrap custom-scrollbar">
+                                <table class="mm-table mm-category-table">
+                                    <thead><tr><th scope="col">映射分类</th><th scope="col">已映射型号</th><th scope="col">操作</th></tr></thead>
+                                    <tbody id="modelMappingTableBody"></tbody>
+                                </table>
+                            </div>
+                        </section>
+                    </div>
+                </div>
+            </div>
+
+            <div id="productReleasePanel" class="product-manager-subview d-none" role="tabpanel" aria-labelledby="productManagerReleaseTab">
+              <section id="newProductReleaseView" class="new-product-release-workspace" data-enabled="false" data-readonly="true" aria-live="polite">
+                <div class="new-product-release-header">
+                  <div>
+                    <div class="workflow-badge">新品待上线工作区</div>
+                    <h3>新品按型号分批发布</h3>
+                  </div>
+                  <div class="new-product-release-actions">
+                    <button type="button" id="newProductReleaseRefreshBtn" class="action-btn btn-secondary-outline">刷新</button>
+                    <button type="button" id="newProductReleasePreviewBtn" class="action-btn btn-secondary-outline" disabled>预览</button>
+                    <button type="button" id="newProductReleasePublishBtn" class="primary-btn btn-primary-gradient" disabled>发布</button>
+                    <button type="button" id="newProductReleaseCancelBtn" class="action-btn btn-secondary-outline" disabled>取消</button>
+                    <button type="button" id="newProductReleaseReapplyBtn" class="action-btn btn-secondary-outline" disabled>重申请</button>
+                    <button type="button" id="newProductReleaseRetryOutboxBtn" class="action-btn btn-secondary-outline" disabled>Outbox 重试</button>
+                    <button type="button" id="newProductReleaseReconcileBtn" class="action-btn btn-secondary-outline" disabled>对账</button>
+                  </div>
+                </div>
+
+                <div class="new-product-release-confirmation" id="newProductReleasePublicKbConfirm">
+                  <label class="new-product-release-check" for="newProductReleaseConfirmImpact">
+                    <input id="newProductReleaseConfirmImpact" type="checkbox" />
+                    <span>我已理解公共 KB 影响范围，并确认该发布会影响公开内容、索引和下游展示。</span>
+                  </label>
+                  <label class="new-product-release-check" for="newProductReleaseConfirmFormal">
+                    <input id="newProductReleaseConfirmFormal" type="checkbox" />
+                    <span>我确认已核对正式发布内容，并接受该型号进入待上线状态。</span>
+                  </label>
+                </div>
+
+                <div class="new-product-release-meta-grid">
+                  <div class="new-product-release-stat"><span class="label">状态</span><strong id="newProductReleaseStatus">功能默认关闭，当前为只读状态。</strong></div>
+                  <div class="new-product-release-stat"><span class="label">当前页签</span><strong id="newProductReleaseTabState">只读</strong></div>
+                  <div class="new-product-release-stat"><span class="label">只读</span><strong id="newProductReleaseReadOnly">true</strong></div>
+                  <div class="new-product-release-stat"><span class="label">生效方式</span><strong id="newProductReleaseEffectiveMethod">online</strong></div>
+                  <div class="new-product-release-stat"><span class="label">触发型号</span><strong id="newProductReleaseTriggerModel">-</strong></div>
+                  <div class="new-product-release-stat"><span class="label">公共 KB</span><strong id="newProductReleasePublicKb">未确认</strong></div>
+                  <div class="new-product-release-stat"><span class="label">待执行链</span><strong id="newProductReleasePendingChain">[]</strong></div>
+                  <div class="new-product-release-stat"><span class="label">幂等</span><strong id="newProductReleaseIdempotent">待检测</strong></div>
+                  <div class="new-product-release-stat"><span class="label">Preview Token</span><strong id="newProductReleasePreviewToken">未生成</strong></div>
+                  <div class="new-product-release-stat"><span class="label">冲突</span><strong id="newProductReleaseConflictState">clean</strong></div>
+                  <div class="new-product-release-stat"><span class="label">Batch</span><strong id="newProductReleaseBatchId">-</strong></div>
+                  <div class="new-product-release-stat"><span class="label">下游状态</span><strong id="newProductReleaseDownstream">queued</strong></div>
+                </div>
+
+                <div id="newProductReleaseBlockReason" class="new-product-release-block-reason d-none"></div>
+                <div id="newProductReleaseWorkspace" class="new-product-release-card">
+                  <div class="new-product-release-card-title">工作区待上线请求</div>
+                  <div id="newProductReleaseWorkspaceList" class="new-product-release-workspace-list"></div>
+                </div>
+              </section>
+            </div>
+          </div>
+      </div>
+
       <div id="dataSettingsView" class="d-none">
           <div class="kb-section data-settings-section">
             <div class="data-settings-hero">
                 <div>
                     <div class="data-settings-eyebrow">DATA CONTROL CENTER</div>
                     <h3 class="data-settings-title">数据设置</h3>
-                    <p class="data-settings-desc">集中管理知识库导入、同步链路、AI 配置、型号库和表格展示，原“更多操作”已统一迁移到这里。</p>
+                    <p class="data-settings-desc">集中管理知识库导入、标签、同步链路、AI 配置和表格展示。</p>
                 </div>
                 <div class="data-settings-hero-actions">
                     <button onclick="switchTab('kbView')" class="action-btn btn-secondary-outline">返回知识库</button>
@@ -947,18 +1189,15 @@
 
                 <article class="data-setting-card">
                     <div class="data-setting-card-head">
-                        <div class="data-setting-icon">⚙️</div>
+                        <div class="data-setting-icon" aria-hidden="true">🏷️</div>
                         <div>
-                            <h4>管理型号库</h4>
-                            <p>维护产品分类和型号目录，为知识库与矩阵提供统一选项。</p>
+                            <h4>标签管理</h4>
+                            <p>查看标签关联的知识数量，统一修改名称或删除标签。</p>
                         </div>
                     </div>
-                    <div class="data-setting-tags">
-                        <span>产品分类</span>
-                        <span>型号目录</span>
-                    </div>
+                    <div class="data-setting-tags"><span>名称修改</span><span>关联数量</span><span>标签清理</span></div>
                     <div class="data-setting-actions">
-                        <button onclick="openProductManager()" class="action-btn btn-secondary-outline">进入型号库</button>
+                        <button type="button" onclick="openKbTagManager()" class="action-btn btn-secondary-outline">管理标签</button>
                     </div>
                 </article>
 
@@ -1380,8 +1619,6 @@
                         <div class="dropdown-menu d-none matrix-more-menu">
                             <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openSyncMatrixModal()" class="matrix-more-menu-danger">🔄 同步此刻库</a>
                             <div class="matrix-more-menu-divider"></div>
-                            <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openProductManager()">⚙️ 管理型号库</a>
-                            <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); openModelMappingModal()">🗺️ 机型映射配置</a>
                             <a href="#" onclick="event.preventDefault(); closeMatrixMoreMenu(this); switchTab('newProductEntryView')">📥 新品录入工作台</a>
                         </div>
                     </div>
@@ -1637,7 +1874,7 @@
 
       <!-- Tab Content: Link Viewer -->
       <div id="linkView" class="d-none">
-        <!-- Image Modal -->
+        <!-- Image Modal stays outside the link list subview so comparison assets can open it. -->
         <div id="imageModal" class="modal">
           <div class="modal-content modal-img-container">
             <div class="image-modal-toolbar">
@@ -1657,6 +1894,20 @@
           </div>
         </div>
 
+        <nav class="cm-tabs" role="tablist" aria-label="多媒体视图页签">
+          <button type="button" role="tab" aria-selected="true" data-cm-tab="allLinksView" onclick="comparisonUI.switchTab('allLinksView')">全部链接</button>
+          <button type="button" role="tab" aria-selected="false" data-cm-tab="comparisonImagesView" onclick="comparisonUI.switchTab('comparisonImagesView')">产品对比图</button>
+          <button type="button" role="tab" aria-selected="false" data-cm-tab="comparisonMatrixView" onclick="comparisonUI.switchTab('comparisonMatrixView')">对比矩阵</button>
+        </nav>
+        <section id="comparisonImagesView" class="cm-panel" role="tabpanel" hidden></section>
+        <section id="comparisonMatrixView" class="cm-panel" role="tabpanel" hidden></section>
+        <dialog id="comparisonDialog" class="cm-dialog" aria-label="产品对比图操作">
+          <div class="cm-dialog-head"><strong id="comparisonDialogTitle"></strong><button type="button" onclick="document.getElementById('comparisonDialog').close()" aria-label="关闭">×</button></div>
+          <div id="comparisonDialogBody"></div>
+          <p id="comparisonDialogError" role="alert"></p>
+        </dialog>
+        <p id="comparisonStatus" role="status" hidden></p>
+        <div id="allLinksView" class="comparison-subview" role="tabpanel">
         <section class="input-panel link-toolbar-panel">
           <div class="link-toolbar-row">
             <button id="openLinkImportModalBtn" class="primary-btn">🔗 链接导入</button>
@@ -1789,7 +2040,11 @@
           </div>
         </section>
     
-        <section class="table-container link-table-container">
+        <div id="linkLoadStatus" class="link-load-status" role="status" hidden>
+          <span id="linkLoadStatusText"></span>
+          <button id="retryLoadLinksBtn" type="button" class="action-btn" onclick="loadLinks()" hidden>重试</button>
+        </div>
+        <section class="table-container link-table-container" aria-label="全部链接列表">
           <table id="linkTable" class="kb-table">
             <colgroup id="linkTableColgroup">
               <col data-col-key="checkbox">
@@ -1816,10 +2071,10 @@
         </section>
 
         <!-- Link Viewer Pagination -->
-        <div class="pagination-container">
+        <div class="pagination-container link-pagination" role="navigation" aria-label="全部链接分页">
             <div class="pagination-left">
                 <div class="page-size-wrapper">
-                    <span class="page-size-label">每页显示：</span>
+                    <label for="linkPageSizeSelect" class="page-size-label">每页显示：</label>
                     <select id="linkPageSizeSelect" onchange="changeLinkPageSize()" class="page-size-select">
                         <option value="10">10</option>
                         <option value="20" selected>20</option>
@@ -1827,11 +2082,18 @@
                         <option value="100">100</option>
                     </select>
                 </div>
+                <span id="linkPageInfo" class="page-info" aria-live="polite">共 0 条 · 第 0 / 0 页</span>
             </div>
             <div class="pagination-right">
-                <span id="linkPageInfo" class="page-info">共 0 条</span>
-                <button onclick="changeLinkPage(-1)" id="prevLinkPageBtn" disabled class="pagination-btn">上一页</button>
-                <button onclick="changeLinkPage(1)" id="nextLinkPageBtn" disabled class="pagination-btn">下一页</button>
+                <button type="button" onclick="jumpLinkPage(1)" id="firstLinkPageBtn" disabled class="pagination-btn">首页</button>
+                <button type="button" onclick="changeLinkPage(-1)" id="prevLinkPageBtn" disabled class="pagination-btn">上一页</button>
+                <button type="button" onclick="changeLinkPage(1)" id="nextLinkPageBtn" disabled class="pagination-btn">下一页</button>
+                <button type="button" onclick="jumpLinkPage(getLinkPageCount())" id="lastLinkPageBtn" disabled class="pagination-btn">末页</button>
+                <div class="link-page-jump">
+                    <label for="linkPageJumpInput" class="page-size-label">跳至</label>
+                    <input id="linkPageJumpInput" type="number" min="1" step="1" value="1" aria-label="全部链接跳转页码" onkeydown="if(event.key === 'Enter') { event.preventDefault(); jumpLinkPage(); }">
+                    <button id="linkPageJumpBtn" type="button" onclick="jumpLinkPage()" class="pagination-btn">跳转</button>
+                </div>
             </div>
         </div>
 
@@ -1863,6 +2125,7 @@
               <button id="bulkDuplicateProceedBtn" class="primary-btn">仅添加非重复项</button>
             </div>
           </div>
+        </div>
         </div>
       </div>
 
@@ -2483,7 +2746,7 @@
             <div class="new-product-entry-hero">
                 <div>
                     <h3 class="new-product-entry-title">新品录入</h3>
-                    <p class="new-product-entry-desc">在一个工作区内创建草稿、核对差异、处理风险并提交矩阵修改。</p>
+                    <p class="new-product-entry-desc">用于补充内容、核对差异和提交矩阵修改；发布前请先在型号库管理中标记型号为“待上线”。</p>
                 </div>
                 <div class="new-product-entry-hero-actions">
                     <button type="button" class="primary-btn" onclick="openCopyConfigModal()"><i class="fas fa-plus" aria-hidden="true"></i><span>创建新品批次</span></button>
@@ -2918,7 +3181,7 @@
 
   <!-- KB Edit Modal (New/Edit) -->
   <div id="kbEditModal" class="modal">
-    <div class="modal-content kb-edit-modal-content" style="width: 1000px; max-width: 95vw;">
+    <div class="modal-content kb-edit-modal-content" style="width: min(98vw, 1880px) !important; max-width: min(98vw, 1880px) !important; height: min(1080px, calc(100vh - 28px)) !important; max-height: calc(100vh - 28px) !important;">
         <div class="modal-header kb-edit-modal-header">
             <div class="kb-edit-title-block">
                 <h3 id="kbEditTitle">新增数据</h3>
@@ -2979,6 +3242,10 @@
                             <div class="kb-preview-field" data-preview-key="kb_tags_input">
                                 <label>标签</label>
                                 <div id="kbEditPreviewTags" class="kb-preview-chip-row"></div>
+                            </div>
+                            <div class="kb-preview-field">
+                                <label>映射标签</label>
+                                <div id="kbEditPreviewMappingTags" class="kb-preview-chip-row" aria-live="polite"></div>
                             </div>
                         </div>
                     </aside>
@@ -3186,11 +3453,15 @@
                         </span>
                     </summary>
                     <div style="padding: 16px; border-top: 1px solid #eee;">
-                        <div class="form-group" style="background: #fff; padding: 12px; border-radius: 12px; border: 1px solid #f0f0f0;">
+                            <div class="form-group" style="background: #fff; padding: 12px; border-radius: 12px; border: 1px solid #f0f0f0;">
                             <div class="flex-center mb-5" style="justify-content: space-between;">
                                 <label class="form-label mb-0" style="font-weight: 600;">产品名称 (Product Name)</label>
                             </div>
                             <textarea name="product_name" id="kbEditProductName" rows="2" placeholder="多个型号用逗号分隔" style="margin-bottom: 8px; resize: vertical;"></textarea>
+                            <div id="kbEditProductRecognition" class="kb-product-recognition" aria-live="polite"></div>
+                            <div class="kb-mapping-tags-panel">
+                                <div id="kbEditMappingTags" class="kb-preview-chip-row" aria-live="polite"></div>
+                            </div>
                             <div id="productCheckboxes" class="product-checkbox-container custom-scrollbar">
                                 <small class="text-muted">加载型号列表中...</small>
                             </div>
@@ -3208,6 +3479,7 @@
                             <div style="display:flex; justify-content:space-between; align-items:center; gap: 10px;">
                                 <label class="form-label" style="margin:0;">相似问题 (每行一个)</label>
                                 <div style="display:flex; align-items:center; gap: 8px;">
+                                    <button type="button" class="action-btn btn-sm kb-expand-icon-btn" onclick="openKBSimilarQuestionPicker()" title="放大查看并编辑全部相似问" aria-label="放大查看并编辑全部相似问"><i class="fas fa-magnifying-glass" aria-hidden="true"></i></button>
                                     <button type="button" class="action-btn btn-sm" onclick="aiSimilarGenerate()">AI 生成</button>
                                     <span id="aiSimilarMetrics" class="ai-metrics"></span>
                                 </div>
@@ -3239,15 +3511,35 @@
                         </div>
                         <div class="form-group">
                             <label class="form-label">外链类型</label>
-                            <input type="text" name="link_type" placeholder="如: 官网/手册/FAQ..." style="font-size: 13px; padding: 6px 8px;">
+                            <input type="hidden" name="link_type" id="kbEditLinkTypeValue">
+                            <div class="kb-link-type-options" role="group" aria-label="外链类型">
+                                <label class="kb-link-type-option"><input type="checkbox" data-link-type="APP内页面" onchange="__kbEditMarkLinkTypeTouched()"><span>APP内页面</span></label>
+                                <label class="kb-link-type-option"><input type="checkbox" data-link-type="url" onchange="__kbEditMarkLinkTypeTouched()"><span>url</span></label>
+                            </div>
                         </div>
                         <div class="form-group">
                             <label class="form-label">外部链接</label>
                             <textarea name="link_url" rows="2" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">标签（逗号分隔）</label>
-                            <textarea id="kbEditTagsInput" name="kb_tags_input" rows="2" class="font-mono" style="font-size: 12px; background: #f9f9f9;" placeholder="例如：故障, 维护, FAQ"></textarea>
+                            <div id="kbEditTagsSelector" class="kb-edit-tags-selector">
+                                <div class="kb-edit-tags-heading">
+                                    <label class="form-label" for="kbEditTagsSearch">标签</label>
+                                    <span id="kbEditTagsCount" class="kb-edit-tags-count" aria-live="polite">已选 0</span>
+                                </div>
+                                <input id="kbEditTagsInput" name="kb_tags_input" type="hidden">
+                                <div class="kb-edit-tags-input-row">
+                                    <div class="kb-edit-tags-values">
+                                        <div id="kbEditTagsChips" class="kb-edit-tags-chips"></div>
+                                        <input id="kbEditTagsSearch" type="text" placeholder="输入标签，逗号分隔" aria-label="输入或搜索标签" aria-expanded="false" aria-controls="kbEditTagsDropdown" autocomplete="off">
+                                    </div>
+                                    <button id="kbEditTagsDropdownBtn" type="button" class="kb-edit-tags-trigger" title="选择已有标签" aria-label="选择已有标签" aria-expanded="false" aria-controls="kbEditTagsDropdown"><i class="fas fa-chevron-down" aria-hidden="true"></i></button>
+                                </div>
+                                <div id="kbEditTagsDropdown" class="kb-edit-tags-dropdown" hidden>
+                                    <div class="kb-edit-tags-menu-heading"><span>已有标签</span><button id="kbEditTagsClear" type="button" hidden>清空</button></div>
+                                    <div id="kbEditTagsOptions" class="kb-edit-tags-options" role="group" aria-label="已有标签" aria-live="polite"></div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </details>
@@ -3270,11 +3562,81 @@
                 </div>
             </form>
         </div>
+        <div id="kbEditReleaseOptions" class="kb-edit-release-options d-none" aria-live="polite">
+            <div class="form-group">
+                <label class="form-label" for="kbEditEffectMode">内容生效方式</label>
+                <select id="kbEditEffectMode" class="modern-input">
+                    <option value="immediate">立即生效</option>
+                    <option value="with_model_release">随指定型号上线</option>
+                </select>
+            </div>
+            <div class="form-group" id="kbEditTriggerModelsWrap">
+                <label class="form-label" for="kbEditTriggerModels">触发型号</label>
+                <input id="kbEditTriggerModels" class="modern-input" readonly>
+            </div>
+            <div id="kbEditPublicImpactModels" class="form-hint" aria-live="polite"></div>
+            <div id="kbEditSharedKbSplitHint" class="form-hint kb-edit-shared-kb-split-hint d-none" role="status">
+                当前 KB 由多个已上线型号共享；如果本次内容只适用于部分型号，请先拆分 KB，再提交型号专属内容，避免不同型号长期内容分叉。
+            </div>
+            <label class="new-product-release-check" id="kbEditPublicImpactWrap">
+                <input id="kbEditPublicImpactConfirmed" type="checkbox">
+                <span>我已核对该公共 KB 对全部已上线型号的影响，确认内容同样适用。</span>
+            </label>
+        </div>
         <div class="modal-footer">
             <span id="kbEditDirtyHint" class="text-muted" style="margin-right:auto; font-size:12px;">未检测</span>
             <span id="kbEditAutosaveHint" class="text-muted" style="margin-right:12px; font-size:12px;">草稿未保存</span>
             <button onclick="closeKBEditModal()" class="action-btn">取消</button>
             <button onclick="saveKBItem()" id="saveKBItemBtn" class="primary-btn">保存</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- KB Product Model Picker Modal -->
+  <div id="kbProductModelPickerModal" class="modal kb-editor-submodal" aria-hidden="true">
+    <div class="modal-content kb-editor-picker-content">
+        <div class="modal-header">
+            <div>
+                <h3>选择产品型号</h3>
+                <div class="kb-editor-picker-meta">完整展示型号名称，可多选</div>
+            </div>
+            <button class="close-modal-btn" type="button" onclick="closeKBProductModelPicker()" aria-label="关闭型号选择弹窗">&times;</button>
+        </div>
+        <div class="modal-body kb-editor-picker-body">
+            <div class="kb-editor-picker-toolbar">
+                <label class="kb-editor-picker-select-all"><input type="checkbox" id="kbProductPickerSelectAll" onchange="toggleKBProductPickerSelectAll(this.checked)"><span>全选</span></label>
+                <span id="kbProductPickerCount" class="kb-editor-picker-count">已选 0 个</span>
+                <input type="search" id="kbProductPickerSearch" class="modern-input" placeholder="搜索型号名称" oninput="filterKBProductModelPicker(this.value)">
+            </div>
+            <div id="kbProductPickerList" class="kb-product-picker-list"></div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="action-btn" onclick="closeKBProductModelPicker()">取消</button>
+            <button type="button" class="primary-btn" onclick="confirmKBProductModelPicker()">确认选择</button>
+        </div>
+    </div>
+  </div>
+
+  <!-- KB Similar Question Picker Modal -->
+  <div id="kbSimilarQuestionPickerModal" class="modal kb-editor-submodal" aria-hidden="true">
+    <div class="modal-content kb-editor-picker-content kb-similar-picker-content">
+        <div class="modal-header">
+            <div>
+                <h3>编辑相似问题</h3>
+                <div class="kb-editor-picker-meta">当前条目的全部相似问，可增删改</div>
+            </div>
+            <button class="close-modal-btn" type="button" onclick="closeKBSimilarQuestionPicker()" aria-label="关闭相似问题弹窗">&times;</button>
+        </div>
+        <div class="modal-body kb-editor-picker-body">
+            <div class="kb-editor-picker-toolbar">
+                <span id="kbSimilarPickerCount" class="kb-editor-picker-count">0 条相似问</span>
+                <button type="button" class="action-btn btn-sm" onclick="addKBSimilarQuestionRow()"><i class="fas fa-plus" aria-hidden="true"></i><span>新增相似问</span></button>
+            </div>
+            <div id="kbSimilarQuestionPickerList" class="kb-similar-picker-list"></div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="action-btn" onclick="closeKBSimilarQuestionPicker()">取消</button>
+            <button type="button" class="primary-btn" onclick="confirmKBSimilarQuestionPicker()">确认修改</button>
         </div>
     </div>
   </div>
@@ -3568,139 +3930,6 @@
     </div>
   </div>
 
-  <!-- Product Manager Modal -->
-  <div id="productManagerModal" class="modal">
-    <div class="modal-content" style="width: 900px; max-width: 95vw; border-radius: 12px; padding: 0;">
-        <div class="modal-header" style="padding: 20px 24px; border-bottom: 1px solid #f0f0f0;">
-            <h3 style="margin: 0; font-size: 20px;">产品型号管理</h3>
-            <button class="close-modal-btn" onclick="closeProductManager()">&times;</button>
-        </div>
-        <div class="modal-body" style="padding: 0;">
-            <div class="pm-layout">
-                <!-- Categories Sidebar -->
-                <div class="pm-sidebar">
-                    <div class="pm-sidebar-header">分类列表</div>
-                    <div id="productCategoryList" class="pm-category-list custom-scrollbar">
-                        <!-- Categories will be rendered here -->
-                    </div>
-                    
-                    <div class="pm-add-category-wrapper">
-                        <button onclick="showAddCategoryInput()" id="showAddCategoryBtn" class="pm-btn-outline" style="width: 100%;">+ 新增分类</button>
-                        
-                        <div id="addCategoryInputDiv" class="d-none" style="margin-top: 10px;">
-                            <input type="text" id="newCategoryName" placeholder="输入分类名称" class="pm-input" style="width: 100%; margin-bottom: 8px;">
-                            <div style="display: flex; gap: 8px;">
-                                <button onclick="addProductCategory()" class="pm-btn-primary" style="padding: 6px 0; flex: 1; font-size: 13px;">确认</button>
-                                <button onclick="hideAddCategoryInput()" class="pm-btn-outline" style="padding: 6px 0; flex: 1; font-size: 13px;">取消</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Models Content -->
-                <div class="pm-content">
-                    <div class="pm-content-header">
-                        <div id="currentCategoryTitle" class="pm-content-title">请选择分类</div>
-                        <button onclick="deleteCurrentCategory()" id="deleteCategoryBtn" class="danger-btn btn-sm d-none" style="padding: 6px 12px; font-size: 13px;">删除当前分类</button>
-                    </div>
-                    
-                    <div id="productModelList" class="pm-model-list custom-scrollbar">
-                        <div class="pm-empty-state">
-                            <i class="fas fa-arrow-left" style="font-size: 24px; margin-bottom: 10px; opacity: 0.5;"></i>
-                            请先在左侧选择一个分类
-                        </div>
-                    </div>
-
-                    <div id="addModelContainer" class="pm-add-model-wrapper d-none">
-                        <input type="text" id="newModelName" placeholder="输入新型号名称" class="pm-input">
-                        <button onclick="addProductModel()" class="pm-btn-primary">添加型号</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="modal-footer" style="padding: 16px 24px; border-top: 1px solid #f0f0f0;">
-            <button onclick="closeProductManager()" class="action-btn">关闭</button>
-            <button type="button" onclick="exportProductCatalogXlsx()" class="action-btn"><i class="fas fa-file-excel"></i> 导出 xlsx（分类汇总）</button>
-            <button type="button" onclick="exportProductCatalogModelListXlsx()" class="action-btn"><i class="fas fa-list"></i> 导出型号清单 xlsx（型号+分类）</button>
-            <button id="productCatalogCleanupBtn" onclick="saveProductCatalogFromManager()" class="primary-btn">执行清理</button>
-        </div>
-    </div>
-  </div>
-
-  <!-- Model Mapping Modal -->
-  <div id="modelMappingModal" class="modal">
-    <div class="modal-content mm-modal-content">
-        <div class="modal-header mm-modal-header">
-            <h3 class="mm-modal-title"><i class="fas fa-map-signs"></i>机型分类映射管理</h3>
-            <button class="close-modal-btn" onclick="closeModelMappingModal()">&times;</button>
-        </div>
-        
-        <div class="modal-body mm-modal-body">
-            <div class="mm-toolbar">
-                <div class="mm-view-switch" role="tablist" aria-label="机型映射视图">
-                    <button id="modelMappingAuditViewBtn" type="button" class="mm-view-switch-btn active" role="tab" aria-controls="modelMappingAuditView" aria-selected="true" onclick="setModelMappingView('audit')">
-                        <i class="fas fa-table-list"></i> 型号核查
-                    </button>
-                    <button id="modelMappingCategoriesViewBtn" type="button" class="mm-view-switch-btn" role="tab" aria-controls="modelMappingCategoriesView" aria-selected="false" onclick="setModelMappingView('categories')">
-                        <i class="fas fa-folder-tree"></i> 分类编辑
-                    </button>
-                </div>
-                <button onclick="addMappingCategory()" class="primary-btn btn-sm"><i class="fas fa-plus"></i> 新增映射分类</button>
-                <button onclick="openModelMappingImportModal()" class="action-btn btn-sm"><i class="fas fa-file-import"></i> 批量导入</button>
-                <div class="mm-toolbar-spacer"></div>
-                <div class="mm-search-wrap">
-                    <i class="fas fa-search mm-search-icon"></i>
-                    <input id="modelMappingSearch" class="mm-search-input" type="text" placeholder="搜索型号或分类..." aria-label="搜索型号或分类" oninput="renderModelMappingTable()">
-                </div>
-                <button onclick="exportModelMappingsJson()" class="action-btn btn-sm" title="导出当前机型分类映射配置（Excel）">
-                    <i class="fas fa-file-export"></i> 导出配置
-                </button>
-                <button onclick="saveModelMappings()" class="success-btn btn-sm"><i class="fas fa-save"></i> 保存配置</button>
-            </div>
-            
-            <section id="modelMappingAuditView" class="mm-audit-view" role="tabpanel" aria-labelledby="modelMappingAuditViewBtn">
-                <div class="mm-audit-toolbar">
-                    <div id="modelMappingAuditSummary" class="mm-audit-summary" aria-live="polite"></div>
-                    <div class="mm-audit-filters" role="group" aria-label="型号核查筛选">
-                        <button id="modelMappingAuditFilterAll" type="button" class="active" aria-pressed="true" onclick="setModelMappingAuditFilter('all')">全部</button>
-                        <button id="modelMappingAuditFilterUnmapped" type="button" aria-pressed="false" onclick="setModelMappingAuditFilter('unmapped')">未映射</button>
-                        <button id="modelMappingAuditFilterMulti" type="button" aria-pressed="false" onclick="setModelMappingAuditFilter('multi')">多分类</button>
-                    </div>
-                </div>
-                <div class="mm-audit-table-wrap custom-scrollbar">
-                    <table class="mm-audit-table">
-                        <thead>
-                            <tr>
-                                <th scope="col">型号</th>
-                                <th scope="col">所属分类</th>
-                                <th scope="col">分类数</th>
-                                <th scope="col">状态</th>
-                            </tr>
-                        </thead>
-                        <tbody id="modelMappingAuditBody"></tbody>
-                    </table>
-                </div>
-            </section>
-
-            <section id="modelMappingCategoriesView" class="mm-categories-view" role="tabpanel" aria-labelledby="modelMappingCategoriesViewBtn" hidden>
-                <div class="mm-category-table-wrap custom-scrollbar">
-                    <table class="mm-table mm-category-table">
-                        <thead>
-                            <tr>
-                                <th scope="col">映射分类</th>
-                                <th scope="col">已映射型号</th>
-                                <th scope="col">操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="modelMappingTableBody"></tbody>
-                    </table>
-                </div>
-            </section>
-
-        </div>
-    </div>
-  </div>
-
   <!-- Model Mapping Import Modal -->
   <div id="modelMappingImportModal" class="modal" style="z-index: 2100;">
     <div class="modal-content" style="width: 600px; max-width: 90vw;">
@@ -3736,6 +3965,11 @@ G10 系列: G10S, G10S Pro"></textarea>
         <div class="modal-body">
             <div style="margin-bottom: 16px;">
                 <input type="text" id="modelSelectorSearch" placeholder="搜索机型..." class="pm-input" oninput="filterModelSelector()">
+            </div>
+            <div class="mm-model-input-group">
+                <label for="modelSelectorInput">批量添加型号</label>
+                <input type="text" id="modelSelectorInput" class="pm-input" placeholder="输入多个型号，用英文逗号分隔" autocomplete="off" oninput="syncModelSelectorInput()" onkeydown="if (event.key === 'Enter') { event.preventDefault(); syncModelSelectorInput(); }">
+                <div id="modelSelectorRecognition" class="mm-model-recognition" aria-live="polite"></div>
             </div>
             <div id="modelSelectorSelected" class="mm-selected-bar"></div>
             <div id="modelSelectorList" class="mm-selector-list custom-scrollbar">
@@ -4161,7 +4395,7 @@ G10 系列: G10S, G10S Pro"></textarea>
             </div>
             <div class="modal-body">
                 <p style="font-size: 16px; color: #333; margin-bottom: 8px;">确定要完成本轮修订吗？</p>
-                <p class="text-muted" style="line-height: 1.5;">所有"修改中/删除中"的状态将被重置为"未调整"，且修改历史将被保留。</p>
+                <p class="text-muted" style="line-height: 1.5;">"修改中"内容将完成修订并恢复为"未调整"；"删除中"内容将在完成修订时从知识库移除。修改历史会保留。</p>
             </div>
             <div class="modal-footer">
                 <button onclick="closeRevisionModal()" class="btn btn-cancel">取消</button>
@@ -4353,42 +4587,61 @@ G10 系列: G10S, G10S Pro"></textarea>
         </div>
     </div>
 
-    <script src="app_v8.js?v=180"></script>
+    <script src="comparison_matrix.js?v=3"></script>
+<script src="app_v8.js?v=208"></script>
 
-  <!-- KB Tag Filter Modal -->
-  <div id="kbTagFilterModal" class="modal">
-      <div class="modal-content" style="max-width: 500px;">
-          <div class="modal-header" style="border-bottom: 1px solid #eee; padding-bottom: 15px;">
-              <h3 class="modal-title" style="margin: 0; color: #333;"><i class="fas fa-tags" style="color: #4CAF50; margin-right: 10px;"></i> 按标签筛选数据</h3>
-              <button class="close-modal-btn" onclick="closeKbTagFilterModal()">&times;</button>
+  <!-- Outside the scrolling filter row so the dropdown is never clipped. -->
+  <div id="kbTagFilterDropdown" class="kb-tag-filter-dropdown" role="dialog" aria-labelledby="kbTagFilterTitle" hidden>
+      <div class="kb-tag-filter-heading">
+          <strong id="kbTagFilterTitle">按标签筛选</strong>
+          <span id="kbTagFilterSelectionCount" aria-live="polite">未选择标签</span>
+      </div>
+      <div class="kb-tag-filter-mode" role="group" aria-label="标签匹配逻辑">
+          <label><input type="radio" name="kbTagFilterModeDraft" value="OR" checked> 包含任一 (OR)</label>
+          <label><input type="radio" name="kbTagFilterModeDraft" value="AND"> 包含所有 (AND)</label>
+      </div>
+      <label class="kb-tag-filter-search" for="kbTagFilterSearch">
+          <i class="fas fa-search" aria-hidden="true"></i>
+          <input id="kbTagFilterSearch" type="search" placeholder="搜索标签" autocomplete="off" oninput="renderKbTagFilterList()">
+      </label>
+      <div id="kbTagFilterList" class="kb-tag-filter-list" role="group" aria-label="可选标签"></div>
+      <div class="kb-tag-filter-footer">
+          <div class="kb-tag-filter-tools">
+              <button type="button" class="kb-tag-manage-link" onclick="openKbTagManager()">管理标签</button>
+              <button type="button" class="action-btn btn-secondary-outline" onclick="clearKbTagFilterDropdown()">清空</button>
           </div>
-          <div class="modal-body" style="padding: 20px;">
-              <p class="text-muted" style="font-size: 13px; margin-bottom: 16px;">
-                  选择一个或多个标签来过滤知识库数据。仅用于当前列表的数据筛选。
-              </p>
-              <div style="display:flex; gap:16px; align-items:center; margin-bottom: 16px; font-size: 13px;">
-                  <span style="font-weight: 600; color: #334155;">匹配逻辑:</span>
-                  <label style="display:flex; gap:4px; align-items:center; cursor:pointer;">
-                      <input type="radio" name="kbTagFilterModeModal" value="OR" checked onchange="document.querySelector('input[name=kbTagFilterMode][value=OR]').checked = true;"> 包含任一 (OR)
-                  </label>
-                  <label style="display:flex; gap:4px; align-items:center; cursor:pointer;">
-                      <input type="radio" name="kbTagFilterModeModal" value="AND" onchange="document.querySelector('input[name=kbTagFilterMode][value=AND]').checked = true;"> 包含所有 (AND)
-                  </label>
-              </div>
-              
-              <div id="kbTagFilterModalList" style="max-height: 300px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; display: flex; flex-wrap: wrap; gap: 8px;">
-                  <div class="text-muted" style="width: 100%; text-align: center; padding: 20px;">加载中...</div>
-              </div>
-          </div>
-          <div class="modal-footer" style="display: flex; justify-content: space-between; border-top: 1px solid #eee; padding-top: 15px;">
-              <button class="action-btn btn-secondary-outline" onclick="clearKbTagFilterModal()">清空选择</button>
-              <div style="display: flex; gap: 8px;">
-                  <button class="action-btn" onclick="closeKbTagFilterModal()">取消</button>
-                  <button class="primary-btn btn-primary-gradient" onclick="applyKbTagFilterModal()">确认筛选</button>
-              </div>
+          <div>
+              <button type="button" class="action-btn" onclick="closeKbTagFilterDropdown(true)">取消</button>
+              <button type="button" class="primary-btn btn-primary-gradient" onclick="applyKbTagFilterDropdown()">确认筛选</button>
           </div>
       </div>
   </div>
+
+  <dialog id="kbTagManagerDialog" class="kb-tag-manager" aria-labelledby="kbTagManagerTitle" oncancel="if (kbTagManagerState.busy) event.preventDefault()" onclick="if (event.target === this) closeKbTagManager()">
+      <div class="kb-tag-manager-head">
+          <div><h3 id="kbTagManagerTitle">标签管理</h3><p>统一维护知识库标签。改名会同步显示在所有关联知识中；删除标签会移除关联，知识内容保留。</p></div>
+          <button type="button" class="action-btn" aria-label="关闭标签管理" onclick="closeKbTagManager()">×</button>
+      </div>
+      <div class="kb-tag-manager-toolbar">
+          <label for="kbTagManagerSearch"><i class="fas fa-search" aria-hidden="true"></i><input type="search" id="kbTagManagerSearch" placeholder="搜索标签名称" oninput="renderKbTagManager()" autocomplete="off"></label>
+          <span id="kbTagManagerCount"></span>
+          <button type="button" class="action-btn btn-secondary-outline" onclick="loadKbTagManager()">刷新</button>
+      </div>
+      <p class="kb-tag-manager-note">这里管理手动添加的知识库标签。自动生成的映射标签请在型号库管理中维护分类映射。</p>
+      <div id="kbTagManagerStatus" class="kb-tag-manager-status" role="status" aria-live="polite"></div>
+      <div class="kb-tag-manager-table-wrap">
+          <table class="kb-tag-manager-table"><thead><tr><th>标签名称</th><th>关联知识</th><th>操作</th></tr></thead><tbody id="kbTagManagerBody"></tbody></table>
+      </div>
+      <form id="kbTagManagerAction" class="kb-tag-manager-action" hidden onsubmit="event.preventDefault(); submitKbTagManagerAction()">
+          <strong id="kbTagManagerActionTitle"></strong>
+          <p id="kbTagManagerImpact"></p>
+          <label id="kbTagManagerNameField" for="kbTagManagerName">新的标签名称<input id="kbTagManagerName" type="text" maxlength="100" autocomplete="off"></label>
+          <div class="kb-tag-manager-action-buttons">
+              <button type="button" class="action-btn" onclick="cancelKbTagManagerAction()">取消</button>
+              <button id="kbTagManagerSubmit" type="submit" class="primary-btn btn-primary-gradient">保存名称</button>
+          </div>
+      </form>
+  </dialog>
 
   <!-- Legacy copy config modal retained as an empty compatibility target. -->
   <template id="copyConfigModal">
@@ -4594,6 +4847,7 @@ G10 系列: G10S, G10S Pro"></textarea>
         <span id="cloneReviewFooterStatus" class="clone-review-footer-status"></span>
         <button id="cloneReviewDeleteButton" type="button" class="danger-btn clone-review-delete-button" onclick="deleteCloneReviewBatch(copyConfigState.activeReviewBatchId, this)" title="删除当前批次及其全部复核记录" hidden><i class="fas fa-trash-alt" aria-hidden="true"></i><span>删除当前批次</span></button>
         <button id="cloneReviewResumeButton" type="button" class="action-btn btn-secondary-outline" onclick="resumeCloneReviewScan()" title="仅校验仍在等待的条目" hidden><i class="fas fa-play" aria-hidden="true"></i><span>继续校验</span></button>
+        <button id="cloneReviewReparseButton" type="button" class="action-btn btn-secondary-outline" onclick="reparseCloneReviewRules()" title="按当前解析器重新生成差异规则" hidden><i class="fas fa-wand-magic-sparkles" aria-hidden="true"></i><span>重新解析规则</span></button>
         <button id="cloneReviewApplyButton" type="button" class="action-btn btn-secondary-outline" onclick="applyCloneReviewDecisions()">执行已确认决定</button>
         <button id="cloneReviewCompleteButton" type="button" class="primary-btn" onclick="completeCloneReviewBatch()">完成校验</button>
       </div>
@@ -4729,5 +4983,53 @@ G10 系列: G10S, G10S Pro"></textarea>
   <!-- Manual Tool Modal removed -->
 
 <!-- Narrow Handoff Filter Modal removed -->
+
+  <section id="pendingModificationsView" class="kb-section" aria-live="polite">
+    <div class="gov-summary-panel" style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;">
+      <div>
+        <div style="font-weight:600;color:#1E3A8A;margin-bottom:4px;">待上线修改记录</div>
+        <div class="text-muted" style="font-size:13px;">新品录入、机型矩阵和知识库管理的待上线变更集中展示；型号上线后转入正式修改记录。</div>
+      </div>
+      <button type="button" class="action-btn btn-secondary-outline" onclick="loadPendingModificationRecords()">刷新</button>
+    </div>
+    <div class="pending-modification-filters" aria-label="待上线修改记录筛选">
+      <label for="pendingModificationIdFilter">ID
+        <input id="pendingModificationIdFilter" class="input-modern" type="search" placeholder="记录编号或问题编号" oninput="filterPendingModificationRecords()">
+      </label>
+      <label for="pendingModificationSourceFilter">来源
+        <select id="pendingModificationSourceFilter" class="input-modern" onchange="filterPendingModificationRecords()">
+          <option value="">全部来源</option>
+          <option value="新品录入">新品录入</option>
+          <option value="知识库管理">知识库管理</option>
+          <option value="机型矩阵管理">机型矩阵管理</option>
+        </select>
+      </label>
+      <label for="pendingModificationModelFilter">待上线型号
+        <input id="pendingModificationModelFilter" class="input-modern" type="search" placeholder="输入型号" oninput="filterPendingModificationRecords()">
+      </label>
+      <button type="button" class="action-btn btn-secondary-outline" onclick="clearPendingModificationFilters()">清除筛选</button>
+    </div>
+    <div class="table-container min-h-200 mb-0">
+      <table class="kb-table" id="pendingModificationsTable">
+        <thead><tr><th>记录编号</th><th>来源</th><th>问题编号</th><th>目标型号</th><th>变更</th><th>提交人</th><th>提交时间</th><th>状态</th></tr></thead>
+        <tbody id="pendingModificationsTableBody"><tr><td colspan="8" class="empty-message">暂无待上线修改记录</td></tr></tbody>
+      </table>
+    </div>
+    <div class="pagination-container pending-modification-pagination">
+      <div class="pagination-left">
+        <label class="page-size-wrapper" for="pendingModificationPageSize">
+          <span class="page-size-label">每页显示：</span>
+          <select id="pendingModificationPageSize" class="page-size-select input-modern input-sm" onchange="changePendingModificationPageSize()">
+            <option value="10">10</option><option value="20" selected>20</option><option value="50">50</option>
+          </select>
+        </label>
+      </div>
+      <div class="pagination-right">
+        <span id="pendingModificationPageInfo" class="page-info" aria-live="polite">共 0 条</span>
+        <button type="button" id="pendingModificationPrev" class="pagination-btn btn-pagination-modern" onclick="changePendingModificationPage(-1)" disabled>上一页</button>
+        <button type="button" id="pendingModificationNext" class="pagination-btn btn-pagination-modern" onclick="changePendingModificationPage(1)" disabled>下一页</button>
+      </div>
+    </div>
+  </section>
 </body>
 </html>

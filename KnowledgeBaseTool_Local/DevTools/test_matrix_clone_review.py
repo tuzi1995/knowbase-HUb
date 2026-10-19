@@ -1,9 +1,10 @@
 import io
+import json
 import os
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from openpyxl import load_workbook
 
@@ -106,11 +107,98 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
                 },
             })
 
+    def test_v1_reconcile_disables_stale_matrix_relations_before_clone(self):
+        with server.app.app_context():
+            stale = server.ProductMatrix(
+                question_wiki_id="KB-OLD",
+                product_name="A30 3.0",
+                is_configured=True,
+                edit_source="submitted",
+            )
+            server.db.session.add(stale)
+            server.db.session.commit()
+        client = Mock()
+        client.select_all.side_effect = lambda table, **kwargs: (
+            [{
+                "question_wiki_id": "KB-1",
+                "question": "问题",
+                "answer": "答案",
+                "product_name": "A30 3.0",
+                "product_category_name": "洗地机",
+                "update_time": "2026-09-11",
+            }]
+            if table in ("knowledge_base_v1", "formal_knowledge_base_v1") else [
+                {"question_wiki_id": "KB-1", "product_name": "A30 3.0", "is_configured": True},
+            ]
+        )
+        client.upsert.return_value = Mock(status_code=200)
+        client.delete.return_value = Mock(status_code=200)
+
+        with patch.object(server, "is_supabase_matrix_enabled", return_value=True), patch.object(
+            server, "get_supabase_client", return_value=client
+        ), patch.object(server, "_maybe_pull_matrix_and_logs_from_supabase", return_value={"ok": True}):
+            with server.app.app_context():
+                result = server._reconcile_matrix_before_clone()
+
+        self.assertTrue(result["ok"])
+        with server.app.app_context():
+            self.assertIsNone(server.ProductMatrix.query.filter_by(
+                question_wiki_id="KB-OLD", product_name="A30 3.0"
+            ).one_or_none())
+        client.delete.assert_called_once_with(
+            "product_matrix", {"question_wiki_id": "not.is.null"},
+        )
+        self.assertEqual(client.select_all.call_args_list[-1].kwargs["order_by"], "id")
+
+    def test_v1_reconcile_rejects_success_response_when_final_set_is_incomplete(self):
+        client = Mock()
+        client.select_all.side_effect = [
+            [{
+                "question_wiki_id": "KB-1",
+                "question": "问题",
+                "answer": "答案",
+                "product_name": "A30 3.0",
+                "product_category_name": "洗地机",
+                "update_time": "2026-09-11",
+            }],
+            [],
+        ]
+        client.upsert.return_value = Mock(status_code=200)
+        client.delete.return_value = Mock(status_code=200)
+
+        with server.app.app_context():
+            with self.assertRaisesRegex(RuntimeError, "缺少 1 条"):
+                server._reconcile_authoritative_matrix_from_v1(client, client.select_all("knowledge_base_v1"))
+
     @staticmethod
     def _tag_client(mappings):
         client = Mock()
 
         def select_all(table, **kwargs):
+            if table == "knowledge_base_v1":
+                return [
+                    {
+                        "question_wiki_id": "KB-OLD",
+                        "question": "问题",
+                        "answer": "答案",
+                        "product_name": "P20",
+                        "product_category_name": "扫地机",
+                        "update_time": "2026-09-11",
+                    },
+                    {
+                        "question_wiki_id": "KB-TAGGED",
+                        "question": "不应克隆",
+                        "answer": "排除",
+                        "product_name": "P20",
+                        "product_category_name": "扫地机",
+                        "update_time": "2026-09-11",
+                    },
+                ]
+            if table == "product_matrix":
+                return [
+                    {"question_wiki_id": "KB-OLD", "product_name": "P20", "is_configured": True},
+                    {"question_wiki_id": "KB-TAGGED", "product_name": "P20", "is_configured": True},
+                ]
             if table == "kb_tags":
                 return [
                     {"id": "tag-skip", "name": "不克隆"},
@@ -123,6 +211,9 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
             raise AssertionError(f"unexpected table: {table}")
 
         client.select_all.side_effect = select_all
+        client.upsert.return_value = Mock(status_code=200)
+        client.delete.return_value = Mock(status_code=200)
+        client.update.return_value = Mock(status_code=200)
         return client
 
     def test_clone_preview_excludes_any_selected_tag_once(self):
@@ -243,7 +334,9 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(body["parameter_refresh"]["comparison_run_id"], "run-latest")
         refresh_call.assert_called_once_with("扫地机")
-        rules_call.assert_called_once_with("P20", "P30 Pro")
+        rules_call.assert_called_once_with(
+            "P20", "P30 Pro", snapshot_id="snapshot-latest", category_name=None,
+        )
         detail = self.client.get(f"/api/matrix/clone-review/{body['review_batch_id']}").get_json()
         self.assertEqual(detail["parameter_refresh"]["snapshot_id"], "snapshot-latest")
 
@@ -375,6 +468,95 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
         payload = self.client.get("/api/matrix/clone-review/risk-summary-batch").get_json()
         self.assertEqual(payload["risk_summary"], summary)
 
+    def test_detection_error_is_closed_only_by_a_final_manual_decision(self):
+        def item(decision, apply_status, decided_by="admin", detection_status="scan_failed"):
+            return server.MatrixCloneReviewItem(
+                detection_status=detection_status,
+                decision=decision,
+                apply_status=apply_status,
+                decided_by=decided_by,
+            )
+
+        resolved = [
+            item("keep", "not_required"),
+            item("link_existing", "applied"),
+            item("remove_target", "applied"),
+        ]
+        unresolved = [
+            item("pending", "not_applied", decided_by=None),
+            item("defer", "not_applied"),
+            item("link_existing", "not_applied"),
+            item("remove_target", "failed"),
+            item("keep", "not_required", decided_by=None),
+            item("remove_target", "applied", detection_status="stale"),
+        ]
+
+        self.assertTrue(all(
+            not server._clone_review_item_has_unresolved_detection_error(row)
+            for row in resolved
+        ))
+        self.assertTrue(all(
+            server._clone_review_item_has_unresolved_detection_error(row)
+            for row in unresolved
+        ))
+
+    def test_source_conflict_rule_is_closed_when_all_linked_items_are_final(self):
+        batch_id = "source-conflict-resolved-batch"
+        batch = server.MatrixCloneReviewBatch(
+            batch_id=batch_id,
+            operation_id="source-conflict-resolved-operation",
+            source_mode="model",
+            source_value="P20",
+            target_models_json='["P30 Pro"]',
+            detection_methods_json='["parameter_check"]',
+            status="reviewing",
+            source_count=1,
+            item_count=1,
+            created_by="admin",
+        )
+        rule = server.MatrixCloneDifferenceRule(
+            rule_id="source-conflict-resolved-rule",
+            batch_id=batch_id,
+            target_model="P30 Pro",
+            feature_id="body_height",
+            feature_name="机身高度",
+            source_value="265mm",
+            target_value="232mm",
+            status="source_conflict",
+        )
+        item = server.MatrixCloneReviewItem(
+            item_id="source-conflict-resolved-item",
+            batch_id=batch_id,
+            question_wiki_id="KB-OLD",
+            source_model="P20",
+            target_model="P30 Pro",
+            knowledge_revision=server._clone_review_revision("最大吸力是多少？", "最大吸力为 22000Pa。"),
+            detection_status="scan_failed",
+            decision="keep",
+            apply_status="not_required",
+            decided_by="admin",
+            difference_rule_ids_json='["source-conflict-resolved-rule"]',
+        )
+        pending_item = server.MatrixCloneReviewItem(
+            detection_status="scan_failed",
+            decision="defer",
+            apply_status="not_applied",
+            difference_rule_ids_json='["source-conflict-resolved-rule"]',
+        )
+        self.assertFalse(server._clone_review_hard_rule_is_unresolved(rule, [item]))
+        self.assertTrue(server._clone_review_hard_rule_is_unresolved(rule, [item, pending_item]))
+        self.assertFalse(server._clone_review_hard_rule_is_unresolved(rule, []))
+        with server.app.app_context():
+            server.db.session.add_all([batch, rule, item])
+            server.db.session.commit()
+
+        completed = self.client.post(
+            f"/api/matrix/clone-review/{batch_id}/complete",
+            json={},
+        )
+        self.assertEqual(completed.status_code, 200, completed.get_data(as_text=True))
+        self.assertEqual(completed.get_json()["status"], "ready_to_submit")
+
     def test_async_parameter_review_passes_request_actor_to_worker(self):
         with patch.object(server, "_matrix_clone_review_async_enabled", return_value=True), patch.object(
             server, "threading"
@@ -500,6 +682,91 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
             })
         self.assertEqual(blocked.status_code, 409)
         self.assertEqual(blocked.get_json()["code"], "clone_review_required")
+
+    def test_reparse_rules_rebuilds_unsubmitted_batch(self):
+        response = self._clone("clone-op-reparse-rules")
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        batch_id = response.get_json()["review_batch_id"]
+        with server.app.app_context():
+            batch = server.db.session.get(server.MatrixCloneReviewBatch, batch_id)
+            rule = server.MatrixCloneDifferenceRule.query.filter_by(batch_id=batch_id).first()
+            rule.status = "source_conflict"
+            batch.status = "reviewing"
+            server.db.session.commit()
+
+        with patch.object(server, "load_ai_config", return_value={}):
+            reparsed = self.client.post(f"/api/matrix/clone-review/{batch_id}/reparse-rules", json={})
+
+        self.assertEqual(reparsed.status_code, 200, reparsed.get_data(as_text=True))
+        body = reparsed.get_json()
+        self.assertTrue(body["reparsed"])
+        self.assertEqual(body["reparsed_rule_count"], 1)
+        self.assertEqual(body["rules"][0]["status"], "needs_confirmation")
+        self.assertEqual(body["items"][0]["detection_status"], "scanned")
+
+    def test_reparse_rules_accepts_updated_difference_text(self):
+        response = self._clone("clone-op-reparse-updated-text")
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        batch_id = response.get_json()["review_batch_id"]
+
+        with patch.object(server, "load_ai_config", return_value={}):
+            reparsed = self.client.post(
+                f"/api/matrix/clone-review/{batch_id}/reparse-rules",
+                json={"manual_difference_text": "旧型号喷淋 8 孔，新品 16 孔"},
+            )
+
+        self.assertEqual(reparsed.status_code, 200, reparsed.get_data(as_text=True))
+        body = reparsed.get_json()
+        self.assertEqual(body["manual_difference_text"], "旧型号喷淋 8 孔，新品 16 孔")
+        self.assertGreaterEqual(body["difference_rule_version"], 2)
+        self.assertEqual(body["rules"][0]["feature_name"], "喷淋孔数")
+
+    def test_rewrite_difference_returns_editable_draft_without_saving(self):
+        response = self._clone("clone-op-rewrite-difference")
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        batch_id = response.get_json()["review_batch_id"]
+        source_text = "最大吸力：P20 22000Pa；P30 Pro 40000Pa"
+        ai_result = {
+            "draft_text": "最大吸力：P20 22000Pa；P30 Pro 40000Pa",
+            "unresolved_questions": [{
+                "question": "40000Pa 是否为最大吸力？",
+                "evidence": "P30 Pro 40000Pa",
+            }],
+        }
+        with patch.object(server, "load_ai_config", return_value={"api_key": "test", "base_url": "test", "model": "test"}), patch.object(
+            server, "_clone_review_parameter_difference_rules", return_value=([], None)
+        ), patch.object(server, "_ai_call_llm", return_value=json.dumps(ai_result, ensure_ascii=False)):
+            rewritten = self.client.post(
+                f"/api/matrix/clone-review/{batch_id}/rewrite-difference",
+                json={"text": source_text},
+            )
+
+        self.assertEqual(rewritten.status_code, 200, rewritten.get_data(as_text=True))
+        body = rewritten.get_json()
+        self.assertFalse(body["saved"])
+        self.assertEqual(body["draft_text"], ai_result["draft_text"])
+        self.assertEqual(body["unresolved_questions"], ai_result["unresolved_questions"])
+        with server.app.app_context():
+            batch = server.db.session.get(server.MatrixCloneReviewBatch, batch_id)
+            self.assertEqual(batch.manual_difference_text, "旧型号最大吸力 22000Pa，新品 40000Pa")
+
+    def test_rewrite_difference_rejects_invented_numeric_values(self):
+        response = self._clone("clone-op-rewrite-invented-number")
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        batch_id = response.get_json()["review_batch_id"]
+        with patch.object(server, "load_ai_config", return_value={"api_key": "test", "base_url": "test", "model": "test"}), patch.object(
+            server, "_clone_review_parameter_difference_rules", return_value=([], None)
+        ), patch.object(server, "_ai_call_llm", return_value=json.dumps({
+            "draft_text": "最大吸力：P20 22000Pa；P30 Pro 50000Pa",
+            "unresolved_questions": [],
+        }, ensure_ascii=False)):
+            rewritten = self.client.post(
+                f"/api/matrix/clone-review/{batch_id}/rewrite-difference",
+                json={"text": "最大吸力：P20 22000Pa；P30 Pro 40000Pa"},
+            )
+
+        self.assertEqual(rewritten.status_code, 502)
+        self.assertIn("原文没有的数值", rewritten.get_json()["message"])
 
     def test_clone_rejects_reusing_an_operation_id_for_different_request(self):
         created = self._clone("clone-op-reused").get_json()
@@ -1552,6 +1819,35 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
         self.assertEqual(completed.status_code, 409)
         self.assertEqual(completed.get_json()["code"], "clone_review_incomplete")
 
+        item_id = detail["items"][0]["item_id"]
+        decided = self.client.post(f"/api/matrix/clone-review/items/{item_id}/decision", json={
+            "decision": "remove_target",
+            "decision_reason": "人工确认目标型号不应保留该知识",
+        })
+        self.assertEqual(decided.status_code, 200, decided.get_data(as_text=True))
+
+        completed_before_apply = self.client.post(
+            f"/api/matrix/clone-review/{batch_id}/complete",
+            json={"manual_scope_confirmed": True, "rules_confirmed": True},
+        )
+        self.assertEqual(
+            completed_before_apply.status_code,
+            409,
+            completed_before_apply.get_data(as_text=True),
+        )
+        self.assertIn("尚未执行成功", "；".join(completed_before_apply.get_json()["errors"]))
+
+        applied = self.client.post(f"/api/matrix/clone-review/{batch_id}/apply", json={})
+        self.assertEqual(applied.status_code, 200, applied.get_data(as_text=True))
+
+        completed = self.client.post(f"/api/matrix/clone-review/{batch_id}/complete", json={
+            "manual_scope_confirmed": True,
+            "rules_confirmed": True,
+        })
+        self.assertEqual(completed.status_code, 200, completed.get_data(as_text=True))
+        self.assertEqual(completed.get_json()["status"], "ready_to_submit")
+        self.assertEqual(completed.get_json()["expected_submit_changes"], [])
+
     def test_parameter_catalog_audit_marks_consistent_suspected_and_missing_values(self):
         manual_rules = [
             {"feature_id": "body_height", "feature_name": "机身高度", "source_value": "11.9cm", "target_value": "8.98cm"},
@@ -1560,10 +1856,22 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
             {"feature_id": "spray_hole_count", "feature_name": "喷淋孔数", "source_value": "8孔", "target_value": "16孔"},
         ]
         snapshots = {
-            "P20 Ultra活水版": ({"机身高度": "机身高度为119mm", "最大吸力": "22000Pa"}, {}, None),
-            "P30 Pro": ({"机身高度": "机身高度为89.8mm", "最大吸力": "36000pa"}, {}, None),
+            "P20 Ultra活水版": (
+                {"机身高度": "机身高度为119mm", "最大吸力": "22000Pa"},
+                {"height-id": "机身高度", "suction-id": "最大吸力", "spray-id": "喷淋孔数"},
+                None,
+            ),
+            "P30 Pro": (
+                {"机身高度": "机身高度为89.8mm", "最大吸力": "36000pa"},
+                {"height-id": "机身高度", "suction-id": "最大吸力", "spray-id": "喷淋孔数"},
+                None,
+            ),
         }
-        with patch.object(server, "_clone_review_catalog_snapshot", side_effect=lambda model: snapshots[model]):
+        with patch.object(
+            server,
+            "_clone_review_catalog_snapshot",
+            side_effect=lambda model, **kwargs: snapshots[model],
+        ):
             rows, error = server._clone_review_parameter_catalog_audit(
                 manual_rules, "P20 Ultra活水版", "P30 Pro",
             )
@@ -1576,6 +1884,136 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
         self.assertEqual(by_feature["suction_power"]["catalog_feature_name"], "最大吸力")
         self.assertEqual(by_feature["suction_power"]["target_result"], "catalog_suspected")
         self.assertEqual(by_feature["spray_hole_count"]["result"], "missing_parameter")
+
+    def test_parameter_catalog_audit_matches_max_suction_to_catalog_suction(self):
+        manual_rules = [
+            {
+                "feature_id": "max_suction",
+                "feature_name": "最大吸力",
+                "source_value": "25000Pa",
+                "target_value": "30000Pa",
+            },
+        ]
+        snapshots = {
+            "A30 CE 增强版": ({"吸力": "最大25000Pa"}, {"suction-id": "吸力"}, None),
+            "A30 CE Plus": ({"吸力": "最大30000Pa"}, {"suction-id": "吸力"}, None),
+        }
+        with patch.object(
+            server,
+            "_clone_review_catalog_snapshot",
+            side_effect=lambda model, **kwargs: snapshots[model],
+        ):
+            rows, error = server._clone_review_parameter_catalog_audit(
+                manual_rules, "A30 CE 增强版", "A30 CE Plus",
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["catalog_feature_name"], "吸力")
+        self.assertEqual(rows[0]["source_catalog_value"], "最大25000Pa")
+        self.assertEqual(rows[0]["target_catalog_value"], "最大30000Pa")
+        self.assertEqual(rows[0]["result"], "consistent")
+
+    def test_parameter_catalog_audit_resolves_all_current_washer_fields(self):
+        manual_rules = server.parse_manual_difference_text(
+            """1. 吸力：智净2.0 30000Pa；智净 25000Pa
+2. 风机转速：智净2.0 150000rpm；智净 120000rpm
+3. 产品净重（不含桩）：智净2.0 5.8kg；智净 4.2kg
+4. 主机尺寸：智净2.0 264*241*1100mm；智净 265mm*232mm*1100mm
+5. 底座尺寸：智净2.0 352*316*110mm；智净 330mm*316mm*112mm
+6. 物流中转箱（外包装）尺寸：智净2.0 735*283*336mm；智净 720mm*329mm*300mm
+7. 物流中转箱（外包装）重量：智净2.0 7.65kg；智净 7.5Kg
+8. 轻拖模式工作噪音：智净2.0 约74dB；智净 约71dB
+9. 极速烘干噪音：智净2.0 约74dB；智净 约75dB
+10. 静音烘干噪音：智净2.0 约48dB；智净 约55dB""",
+            target_model="智净2.0",
+        )
+        feature_names = {
+            "suction": "吸力",
+            "fan-speed": "风机转速",
+            "body-weight": "主机重量",
+            "body-size": "主机尺寸",
+            "dock-size": "充电座占地",
+            "package-size": "包装尺寸",
+            "package-weight": "包装重量",
+            "cleaning-noise": "清洁时的噪音",
+            "drying-noise": "烘干时的噪音",
+        }
+        snapshots = {
+            "智净": ({
+                "吸力": "最大25000Pa",
+                "风机转速": "最大120000rpm",
+                "主机重量": "4.2kg",
+                "主机尺寸": "265mm*232mm*1100mm",
+                "充电座占地": "330*316*112mm",
+                "包装尺寸": "720*329*300 mm",
+                "包装重量": "7.5kg",
+                "清洁时的噪音": "自动模式和吸水模式：74dB\n强力模式：75dB\n轻拖模式：71dB",
+                "烘干时的噪音": "极速烘干：75db\n静音烘干：55db",
+            }, feature_names, None),
+            "智净2.0": ({
+                "吸力": "最大30000Pa",
+                "风机转速": "最大150000rpm",
+                "主机重量": "5.8kg",
+                "主机尺寸": "264mm*241mm*1100mm",
+                "充电座占地": "352*316*110mm",
+                "包装尺寸": "735*283*336 mm",
+                "包装重量": "7.65kg",
+                "清洁时的噪音": "自动模式和吸水模式：74dB\n强力模式：75dB\n轻拖模式：74dB",
+                "烘干时的噪音": "极速烘干：75db\n静音烘干：48db",
+            }, feature_names, None),
+        }
+        with patch.object(
+            server,
+            "_clone_review_catalog_snapshot",
+            side_effect=lambda model, **kwargs: snapshots[model],
+        ):
+            rows, error = server._clone_review_parameter_catalog_audit(
+                manual_rules, "智净", "智净2.0",
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(
+            [row["catalog_feature_name"] for row in rows],
+            [
+                "吸力", "风机转速", "主机重量", "主机尺寸", "充电座占地",
+                "包装尺寸", "包装重量", "清洁时的噪音", "烘干时的噪音", "烘干时的噪音",
+            ],
+        )
+        self.assertEqual([row["catalog_match_status"] for row in rows], ["matched"] * 10)
+        self.assertEqual(rows[8]["result"], "catalog_suspected")
+        self.assertTrue(all(row["result"] == "consistent" for row in rows[:8]))
+        self.assertEqual(rows[9]["result"], "consistent")
+
+    def test_parameter_catalog_audit_reports_duplicate_catalog_fields_as_ambiguous(self):
+        manual_rules = [{
+            "feature_id": "manual_feature_link",
+            "feature_name": "产品官网链接",
+            "source_value": "https://source.example",
+            "target_value": "https://target.example",
+        }]
+        duplicate_features = {
+            "filter-link": "产品官网链接",
+            "battery-link": "产品官网链接",
+        }
+        snapshots = {
+            "旧型号": ({"产品官网链接": "https://source.example"}, duplicate_features, None),
+            "新型号": ({"产品官网链接": "https://target.example"}, duplicate_features, None),
+        }
+        with patch.object(
+            server,
+            "_clone_review_catalog_snapshot",
+            side_effect=lambda model, **kwargs: snapshots[model],
+        ):
+            rows, error = server._clone_review_parameter_catalog_audit(
+                manual_rules, "旧型号", "新型号",
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(rows[0]["result"], "field_ambiguous")
+        self.assertEqual(rows[0]["catalog_match_status"], "ambiguous")
+        self.assertEqual(len(rows[0]["catalog_match_candidates"]), 2)
 
     def test_parameter_difference_rules_ignore_placeholders_and_keep_plain_description(self):
         source_values = {"最大吸力": "22000Pa", "清洁液盒容量": "600ml"}
@@ -1595,6 +2033,74 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
         self.assertEqual(len(rules), 1)
         self.assertEqual(rules[0]["feature_name"], "最大吸力")
         self.assertEqual(rules[0]["feature_description"], "最大吸力说明")
+
+    def test_parameter_difference_rules_stay_on_batch_snapshot(self):
+        source_values = {"最大吸力": "22000Pa"}
+        target_values = {"最大吸力": "40000Pa"}
+        model_data = Mock(side_effect=[(source_values, {}, None), (target_values, {}, None)])
+        with patch.object(server, "_clone_review_catalog_model_data", model_data):
+            rules, error = server._clone_review_parameter_difference_rules(
+                "P20",
+                "P30 Pro",
+                snapshot_id="snapshot-fixed",
+                category_name="扫地机",
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(
+            model_data.call_args_list,
+            [
+                call(
+                    "P20", snapshot_id="snapshot-fixed", category_name="扫地机",
+                ),
+                call(
+                    "P30 Pro", snapshot_id="snapshot-fixed", category_name="扫地机",
+                ),
+            ],
+        )
+
+    def test_catalog_model_data_names_the_pending_mapping_candidate(self):
+        cursor = Mock()
+        cursor.__enter__ = Mock(return_value=cursor)
+        cursor.__exit__ = Mock(return_value=False)
+        cursor.fetchall.return_value = [{
+            "model_id": "model-tech",
+            "status": "pending",
+            "evidence_json": {"target_model_name": "拓界Tech"},
+            "content_json": {},
+        }]
+        connection = Mock()
+        connection.cursor.return_value = cursor
+
+        with patch.object(server, "connect_main_database", return_value=connection):
+            values, features, error = server._clone_review_catalog_model_data(
+                "拓界 Tech", snapshot_id="snapshot-current", category_name="洗地机",
+            )
+
+        self.assertEqual(values, {})
+        self.assertEqual(features, {})
+        self.assertEqual(error, "型号“拓界 Tech”已匹配参数型号“拓界Tech”，但映射仍待确认")
+        connection.close.assert_called_once()
+
+    def test_catalog_model_data_rejects_multiple_confirmed_model_ids(self):
+        cursor = Mock()
+        cursor.__enter__ = Mock(return_value=cursor)
+        cursor.__exit__ = Mock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"model_id": "model-1", "status": "confirmed", "evidence_json": {}, "content_json": {}},
+            {"model_id": "model-2", "status": "confirmed", "evidence_json": {}, "content_json": {}},
+        ]
+        connection = Mock()
+        connection.cursor.return_value = cursor
+
+        with patch.object(server, "connect_main_database", return_value=connection):
+            values, features, error = server._clone_review_catalog_model_data("拓界 Tech")
+
+        self.assertEqual(values, {})
+        self.assertEqual(features, {})
+        self.assertIn("2 个已确认参数映射", error)
+        connection.close.assert_called_once()
 
     def test_parameter_difference_rules_keep_boolean_and_extended_value_changes(self):
         source_values = {
@@ -1756,6 +2262,31 @@ class MatrixCloneReviewApiTests(unittest.TestCase):
             "source_value": "11.9cm", "target_value": "89.8mm", "evidence_sources": ["parameter_check"],
         }
         self.assertFalse(server._clone_review_has_source_conflict([manual, parameter]))
+
+    def test_source_conflict_comparison_matches_labeled_obstacle_heights(self):
+        manual = {
+            "feature_id": "obstacle_crossing_height", "feature_name": "越障高度",
+            "source_value": "双层门槛最高 8.8cm，日常越障 4.5cm（双层为 4.5+4.3cm）",
+            "target_value": "双层门槛最高 8cm，日常越障 4cm（双层为 4+4cm）",
+            "evidence_sources": ["user_input"],
+        }
+        parameter = {
+            "feature_id": "obstacle_crossing_height", "feature_name": "越障高度",
+            "source_value": "双层门槛最高可达 8.8cm，日常越障 4.5cm",
+            "target_value": "双层门槛最高可达 8cm，日常越障 4cm",
+            "evidence_sources": ["parameter_check"],
+        }
+
+        self.assertTrue(server._clone_review_catalog_value_matches(
+            "越障高度", manual["source_value"], parameter["source_value"],
+        ))
+        self.assertTrue(server._clone_review_catalog_value_matches(
+            "越障高度", manual["target_value"], parameter["target_value"],
+        ))
+        self.assertFalse(server._clone_review_has_source_conflict([manual, parameter]))
+        self.assertFalse(server._clone_review_catalog_value_matches(
+            "越障高度", manual["target_value"], "双层门槛最高可达 8cm，日常越障 3.5cm",
+        ))
 
     def test_object_recognition_comparison_ignores_other_numbers(self):
         self.assertTrue(server._clone_review_catalog_value_matches(

@@ -188,6 +188,31 @@ class MatrixSubmitRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409, response.get_data(as_text=True))
         self.assertEqual(response.get_json()["code"], "clone_review_required")
 
+    def test_submit_column_sync_registers_local_models_before_unified_writer(self):
+        remote_client = MagicMock()
+        remote_client.upsert.return_value = SimpleNamespace(status_code=200, text='')
+
+        with server.app.app_context():
+            synced = server._sync_submit_matrix_columns(remote_client, [{
+                "product_name": "G30S Ultra",
+            }])
+
+        self.assertEqual(synced, 1)
+        remote_client.upsert.assert_called_once_with(
+            'matrix_column',
+            [{'product_name': 'G30S Ultra', 'sort_order': 2}],
+            on_conflict='product_name',
+        )
+
+    def test_submit_column_sync_fails_closed_when_registry_write_fails(self):
+        remote_client = MagicMock()
+        remote_client.upsert.return_value = SimpleNamespace(status_code=500, text='write failed')
+
+        with server.app.app_context(), self.assertRaisesRegex(RuntimeError, '主库型号列同步失败'):
+            server._sync_submit_matrix_columns(remote_client, [{
+                "product_name": "G30S Ultra",
+            }])
+
     def test_local_postgresql_rpc_commits_function_writes(self):
         client = object.__new__(server.LocalPostgreSQLClient)
         client.connection = SimpleNamespace(commit=MagicMock())

@@ -176,6 +176,74 @@ def test_legacy_source_code_in_source_module_gets_display_label():
     assert item['source_code'] == 'product_matrix'
 
 
+def test_release_model_id_is_preserved_in_formal_modification_details():
+    item = server._normalize_mod_record({
+        'kb_id': 'KB-RELEASE-MODEL',
+        'source_module': '新品录入',
+        'change_type': 'matrix_association',
+        'change_meta': json.dumps({
+            'model_id': 'P30 Member',
+            'before': {'configured': False},
+            'after': {'configured': True},
+        }, ensure_ascii=False),
+    })
+
+    assert item['model_id'] == 'P30 Member'
+    assert item['products'] == 'P30 Member'
+    assert item['before']['products'] == ''
+    assert item['after']['products'] == 'P30 Member'
+    assert item['changed_fields'] == ['products']
+
+
+def test_hidden_product_model_is_removed_from_modification_display_only():
+    item = server._normalize_mod_record({
+        'kb_id': 'KB-HIDDEN-MODEL',
+        'product_name': 'Z1 Ultra, Z1 Ultra 超水解, Z1 Max Ultra',
+        'change_meta': json.dumps({
+            'before': {'products': 'Z1 Ultra 超水解, Z1 Ultra'},
+            'after': {'products': 'Z1 Ultra, Z1 Ultra 超水解, Z1 Max Ultra'},
+            'changed_fields': ['products'],
+        }, ensure_ascii=False),
+    })
+
+    assert item['products'] == 'Z1 Ultra, Z1 Max Ultra'
+    assert item['before']['products'] == 'Z1 Ultra'
+    assert item['after']['products'] == 'Z1 Ultra, Z1 Max Ultra'
+    assert 'Z1 Ultra 超水解' not in json.dumps(item, ensure_ascii=False)
+
+
+def test_hidden_product_filter_keeps_similar_model_names():
+    assert server._without_hidden_product_models('Z1 Ultra 超水解') == ''
+    assert server._without_hidden_product_models('Z1 Ultra') == 'Z1 Ultra'
+    assert server._without_hidden_product_models('Z1 Max Ultra') == 'Z1 Max Ultra'
+
+
+def test_hidden_product_model_is_removed_from_catalog_boundaries():
+    catalog = server._without_hidden_models_in_catalog({
+        '洗衣机': ['Z1 Ultra 超水解', 'Z1 Ultra', 'Z1 Max Ultra'],
+    })
+
+    assert catalog == {'洗衣机': ['Z1 Ultra', 'Z1 Max Ultra']}
+
+
+def test_hidden_product_model_is_removed_from_legacy_snapshot_and_associations():
+    item = server._normalize_mod_record({
+        'kb_id': 'KB-HIDDEN-LEGACY',
+        'product_name': 'Z1 Ultra 超水解, Z1 Ultra',
+        'change_meta': json.dumps({
+            'association_changes': [
+                {'target_model': 'Z1 Ultra 超水解'},
+                {'target_model': 'Z1 Ultra'},
+            ],
+        }, ensure_ascii=False),
+    })
+
+    assert item['products'] == 'Z1 Ultra'
+    assert item['after']['products'] == 'Z1 Ultra'
+    assert item['association_changes'] == [{'target_model': 'Z1 Ultra'}]
+    assert 'Z1 Ultra 超水解' not in json.dumps(item, ensure_ascii=False)
+
+
 class _SmartExportClient:
     def __init__(self, modifications, current_rows):
         self.modifications = modifications
@@ -241,8 +309,138 @@ def test_smart_export_blocks_deleted_row_without_complete_snapshot(monkeypatch):
     assert response.get_json()['repair_required'] is True
 
 
+def test_smart_export_uses_create_snapshot_when_current_row_is_missing(monkeypatch):
+    creation = {
+        'id': 1,
+        'kb_id': 'ICWIKI202609220001',
+        'question_wiki_id': 'ICWIKI202609220001',
+        'change_type': 'create',
+        'modification_time': '2026-09-22T10:00:00+08:00',
+        'change_meta': json.dumps({
+            'after': {
+                'question': '如何开启自动清洁？',
+                'question_type': '文本',
+                'answer': '在 App 中打开自动清洁开关。',
+                'answer_type': '文本',
+                'products': 'G20,G20S',
+                'if_bm25': False,
+            },
+        }, ensure_ascii=False),
+    }
+
+    response = _call_smart_export(monkeypatch, [creation], [])
+    response.direct_passthrough = False
+    frame = pd.read_excel(io.BytesIO(response.get_data()))
+
+    row = frame.loc[frame['问题编号'] == 'ICWIKI202609220001'].iloc[0]
+    assert row['操作'] == '增加'
+    assert row['问题'] == '如何开启自动清洁？'
+    assert row['答案'] == '在 App 中打开自动清洁开关。'
+    assert row['机型'] == 'G20,G20S'
+
+
+def test_smart_export_paginates_tied_timestamps_without_losing_rows(monkeypatch):
+    modifications = [
+        {
+            'id': index + 1,
+            'kb_id': f'KB-{index:04d}',
+            'question_wiki_id': f'KB-{index:04d}',
+            'change_type': 'edit',
+            'modification_time': '2026-09-17T09:26:06+08:00',
+        }
+        for index in range(1003)
+    ]
+    modifications[0]['change_type'] = 'create'
+    modifications[0]['modification_time'] = '2026-09-17T10:00:00+08:00'
+    modifications.append({
+        'id': 1004,
+        'kb_id': 'KB-0000',
+        'question_wiki_id': 'KB-0000',
+        'change_type': 'edit',
+        'modification_time': '2026-09-17T08:00:00+08:00',
+    })
+
+    class PagedClient:
+        def select_all(self, table, **kwargs):
+            if table == 'knowledge_base_v1':
+                return [
+                    {'question_wiki_id': f'KB-{index:04d}', 'question': '问题', 'answer': '答案'}
+                    for index in range(1003)
+                ]
+            assert table == 'knowledge_base_modifications'
+            if kwargs['order_by'] != 'id':
+                # A tied timestamp can overlap successive offset pages.
+                return modifications[:1000] + modifications[850:854]
+            return sorted(modifications, key=lambda row: row['id'], reverse=True)
+
+    monkeypatch.setattr(server, 'get_supabase_client', PagedClient)
+    monkeypatch.setattr(server, '_get_archived_mod_keys', lambda: set())
+    with server.app.test_request_context('/api/kb/modifications/smart_merge_export'):
+        response = server.export_kb_modifications_smart_merge.__wrapped__()
+    response.direct_passthrough = False
+    frame = pd.read_excel(io.BytesIO(response.get_data()))
+
+    assert len(frame) == 1003
+    assert frame.loc[frame['问题编号'] == 'KB-0000', '操作'].iloc[0] == '增加'
+
+
+def test_archive_candidates_use_stable_id_order_and_dedupe_rows():
+    rows = [
+        {
+            'id': 'mod-1',
+            'kb_id': 'KB-1',
+            'question_wiki_id': 'KB-1',
+            'change_type': 'edit',
+            'modification_time': '2026-09-17T09:26:06+08:00',
+        },
+        {
+            'id': 'mod-2',
+            'kb_id': 'KB-2',
+            'question_wiki_id': 'KB-2',
+            'change_type': 'edit',
+            'modification_time': '2026-09-17T09:26:06+08:00',
+        },
+        {
+            'id': 'mod-1',
+            'kb_id': 'KB-1',
+            'question_wiki_id': 'KB-1',
+            'change_type': 'edit',
+            'modification_time': '2026-09-17T09:26:06+08:00',
+        },
+    ]
+
+    class ArchiveClient:
+        def select_all(self, table, **kwargs):
+            assert table == 'knowledge_base_modifications'
+            assert kwargs['order_by'] == 'id'
+            return rows
+
+    normalized, raw_ids = server._collect_archive_candidates(ArchiveClient())
+
+    assert [item['supabase_id'] for item in normalized] == ['mod-1', 'mod-2']
+    assert raw_ids == ['mod-1', 'mod-2']
+
+
 def test_new_product_frontend_sends_stable_source_code():
     frontend = (Path(server.__file__).parent / 'link_viewer' / 'app_v8.js').read_text(encoding='utf-8')
 
     assert "source_code: opts.sourceCode || 'product_matrix'" in frontend
     assert "sourceCode: 'new_product_entry'" in frontend
+
+
+def test_matrix_submit_migration_seeds_published_products_before_applying_changes():
+    sql_path = (
+        Path(server.__file__).parent
+        / '🗄️ 数据库'
+        / 'SQL脚本'
+        / '20260911_preserve_kb_products_on_matrix_submit.sql'
+    )
+    sql = sql_path.read_text(encoding='utf-8')
+
+    seed_marker = "FROM regexp_split_to_table(before_products, '[,，]') AS existing_model"
+    change_marker = 'FOR change IN'
+    aggregate_marker = "WHERE question_wiki_id = wiki_id AND is_configured = true"
+
+    assert seed_marker in sql
+    assert sql.index(seed_marker) < sql.index(change_marker)
+    assert aggregate_marker in sql

@@ -1,4 +1,6 @@
 #!/bin/bash
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 
 # MD文档整理脚本
 # 将根目录的MD文档移动到合适的分类目录

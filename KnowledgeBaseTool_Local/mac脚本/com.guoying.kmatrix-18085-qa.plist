@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.guoying.kmatrix-18085-qa</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/tuzi/个人项目/One/knowbase_hub_8085/KnowledgeBaseTool_Local/mac脚本/启动18085-本地测试实例.command</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/tuzi/个人项目/One/knowbase_hub_8085/KnowledgeBaseTool_Local</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>/tmp/knowbasehub-18085-qa.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/knowbasehub-18085-qa.err</string>
+</dict>
+</plist>

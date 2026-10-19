@@ -15,6 +15,8 @@ ALTER TABLE public.knowledge_base_modifications
     ADD COLUMN IF NOT EXISTS operation_id text,
     ADD COLUMN IF NOT EXISTS source_code text,
     ADD COLUMN IF NOT EXISTS source_module text,
+    ADD COLUMN IF NOT EXISTS record_scope text,
+    ADD COLUMN IF NOT EXISTS record_source text,
     ADD COLUMN IF NOT EXISTS base_version integer,
     ADD COLUMN IF NOT EXISTS committed_version integer,
     ADD COLUMN IF NOT EXISTS submitted_version integer,
@@ -32,6 +34,25 @@ UPDATE public.knowledge_base_modifications
        ELSE 'knowledge_base'
    END
  WHERE source_code IS NULL OR btrim(source_code) = '';
+
+UPDATE public.knowledge_base_modifications
+   SET record_source = COALESCE(
+       NULLIF(btrim(record_source), ''),
+       NULLIF(btrim(source_code), ''),
+       NULLIF(btrim(source_module), ''),
+       'knowledge_base'
+   )
+ WHERE record_source IS NULL OR btrim(record_source) = '';
+
+UPDATE public.knowledge_base_modifications
+   SET record_scope = 'formal'
+ WHERE record_scope IS NULL OR btrim(record_scope) = '';
+
+ALTER TABLE public.knowledge_base_modifications
+    ALTER COLUMN record_scope SET DEFAULT 'formal',
+    ALTER COLUMN record_scope SET NOT NULL,
+    ALTER COLUMN record_source SET DEFAULT 'knowledge_base',
+    ALTER COLUMN record_source SET NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_mod_operation_wiki
     ON public.knowledge_base_modifications (operation_id, question_wiki_id)
@@ -170,12 +191,14 @@ BEGIN
             RAISE EXCEPTION 'version conflict for %', wiki_id;
         END IF;
         INSERT INTO public.knowledge_base_modifications(
-            kb_id, question_wiki_id, product_name, question, answer, source_code, source_module,
+            kb_id, question_wiki_id, product_name, question, answer, source_code, source_module, record_scope, record_source,
             operation_id, base_version, committed_version, submitted_version, conflict_resolution,
             modifier, modification_time, change_type, change_meta
         ) VALUES (
             wiki_id, wiki_id, COALESCE(after_products, ''), kb_row.question, kb_row.answer, source_code,
             CASE source_code WHEN 'new_product_entry' THEN '新品录入' ELSE '机型矩阵管理' END,
+            'formal',
+            source_code,
             p_operation_id, before_version, committed, committed, 'normal', p_actor, now(), 'edit',
             jsonb_build_object('source', CASE source_code WHEN 'new_product_entry' THEN '新品录入' ELSE '机型矩阵管理' END,
                                'source_code', source_code, 'operation_id', p_operation_id,

@@ -1,9 +1,11 @@
 #!/bin/bash
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 # 将测试和工具脚本移动到 DevTools 目录
 
 set -e
 
-BASE_DIR="/Users/guoying/AI建设和学习/One/knowbase_hub_8085"
+BASE_DIR="/Users/tuzi/个人项目/One/knowbase_hub_8085"
 PROJECT_DIR="$BASE_DIR/KnowledgeBaseTool_Local"
 DEVTOOLS_DIR="$PROJECT_DIR/DevTools"
 

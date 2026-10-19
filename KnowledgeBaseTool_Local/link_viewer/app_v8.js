@@ -69,10 +69,10 @@ function throttle(func, wait = 300) {
 async function api(path, method = 'GET', body = null) {
   const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin' };
   if (body) opts.body = JSON.stringify(body);
-  
+
   const url = API_BASE + path;
   const isGet = method.toUpperCase() === 'GET';
-  
+
   async function doFetch() {
     let res;
     try {
@@ -86,7 +86,7 @@ async function api(path, method = 'GET', body = null) {
       showLogin(true);
       throw new Error('Unauthorized');
     }
-    
+
     const text = await res.text();
     try {
       const obj = text ? JSON.parse(text) : {};
@@ -104,9 +104,9 @@ async function api(path, method = 'GET', body = null) {
       throw new Error(`响应不是 JSON: ${url} (HTTP ${res.status})`);
     }
   }
-  
+
   if (!isGet) return doFetch();
-  
+
   try {
     return await doFetch();
   } catch (e) {
@@ -114,6 +114,652 @@ async function api(path, method = 'GET', body = null) {
     return await doFetch();
   }
 }
+
+window.newProductReleaseContext = window.newProductReleaseContext || {
+  modelId: 'A-100',
+  requestId: '',
+  previewToken: '',
+  previewModelId: '',
+  previewExpiresAt: 0,
+  batchId: '',
+};
+
+const NEW_PRODUCT_RELEASE_ENDPOINTS = {
+  capabilities: '/api/new-product-release/capabilities',
+  workspace: '/api/new-product-release/workspace',
+  preview: '/api/new-product-release/models/:modelId/preview',
+  publish: '/api/new-product-release/models/:modelId/publish',
+  cancel: '/api/new-product-release/models/:modelId/cancel',
+  reapply: '/api/new-product-release/models/:modelId/reapply',
+  outboxRetry: '/api/new-product-release/outbox/retry',
+  reconcile: '/api/new-product-release/reconcile',
+};
+
+function buildNewProductReleaseModelRoute(template, modelId) {
+  const safeId = String(modelId || '').trim() || 'A-100';
+  return template.replace(':modelId', encodeURIComponent(safeId));
+}
+
+function getNewProductReleaseConfirmationState() {
+  const impact = document.getElementById('newProductReleaseConfirmImpact');
+  const formal = document.getElementById('newProductReleaseConfirmFormal');
+  const checkedImpact = !!(impact && impact.checked);
+  const checkedFormal = !!(formal && formal.checked);
+  return {
+    impact: checkedImpact,
+    formal: checkedFormal,
+    allConfirmed: checkedImpact && checkedFormal,
+  };
+}
+
+function hasCurrentNewProductReleasePreview() {
+  const context = window.newProductReleaseContext;
+  return Boolean(
+    context.previewToken
+    && context.previewModelId === context.modelId
+    && Number(context.previewExpiresAt) > Math.floor(Date.now() / 1000) + 5
+  );
+}
+
+function clearNewProductReleasePreview() {
+  const context = window.newProductReleaseContext;
+  context.previewToken = '';
+  context.previewModelId = '';
+  context.previewExpiresAt = 0;
+  const token = document.getElementById('newProductReleasePreviewToken');
+  if (token) token.textContent = '未生成';
+}
+
+function selectNewProductReleaseModel(modelId) {
+  const nextModelId = String(modelId || '').trim();
+  if (!nextModelId) return;
+  if (nextModelId !== window.newProductReleaseContext.modelId) {
+    window.newProductReleaseContext.modelId = nextModelId;
+    clearNewProductReleasePreview();
+    window.newProductReleaseContext.idempotencyKey = '';
+  }
+  syncNewProductReleasePublishAvailability();
+}
+
+function getNewProductReleaseWorkspaceModelId(state, currentModelId) {
+  const pendingModels = Array.isArray(state && state.pending_models) ? state.pending_models : [];
+  const pendingRequests = Array.isArray(state && state.pending_requests) ? state.pending_requests : [];
+  const modelIdOf = item => String(item && (item.model_id || item.model) || '').trim();
+  const currentPendingModel = pendingModels.find(item => modelIdOf(item) === String(currentModelId || '').trim());
+  if (currentPendingModel) return modelIdOf(currentPendingModel);
+  const firstPendingModel = pendingModels.find(item => modelIdOf(item));
+  if (firstPendingModel) return modelIdOf(firstPendingModel);
+  const firstPendingRequest = pendingRequests.find(item => item.status === 'pending_release' && modelIdOf(item));
+  return firstPendingRequest ? modelIdOf(firstPendingRequest) : '';
+}
+
+function syncNewProductReleasePublishAvailability() {
+  const workspace = document.getElementById('newProductReleaseWorkspace');
+  const publishBtn = document.getElementById('newProductReleasePublishBtn');
+  const enabled = workspace && workspace.dataset.enabled === 'true';
+  const confirmation = getNewProductReleaseConfirmationState();
+  if (publishBtn) {
+    publishBtn.disabled = !enabled || !confirmation.allConfirmed || !hasCurrentNewProductReleasePreview();
+  }
+}
+
+function setNewProductReleaseBlocked(reason, options = {}) {
+  const blockReason = document.getElementById('newProductReleaseBlockReason');
+  const status = document.getElementById('newProductReleaseStatus');
+  const workspace = document.getElementById('newProductReleaseWorkspace');
+  if (!workspace || !status || !blockReason) return;
+
+  const message = reason || '能力门禁未满足，当前功能已禁用。';
+  workspace.dataset.readonly = 'true';
+  workspace.dataset.enabled = 'false';
+  workspace.classList.add('is-blocked');
+  status.textContent = options.statusText || '功能被门禁拦截';
+  blockReason.textContent = message;
+  blockReason.classList.remove('d-none');
+
+  const buttons = [
+    'newProductReleasePublishBtn',
+    'newProductReleaseCancelBtn',
+    'newProductReleaseReapplyBtn',
+    'newProductReleaseRetryOutboxBtn',
+    'newProductReleaseReconcileBtn',
+    'newProductReleasePreviewBtn',
+  ];
+  buttons.forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = true;
+  });
+  syncNewProductReleasePublishAvailability();
+}
+
+function setNewProductReleaseActionState(enabled, reason = '', recoveryEnabled = enabled) {
+  const workspace = document.getElementById('newProductReleaseWorkspace');
+  const blockReason = document.getElementById('newProductReleaseBlockReason');
+  if (!workspace) return;
+  const readonly = !enabled;
+  workspace.dataset.enabled = String(enabled);
+  workspace.dataset.readonly = String(readonly);
+  workspace.classList.toggle('is-blocked', readonly);
+  if (blockReason) {
+    blockReason.textContent = reason || '';
+    blockReason.classList.toggle('d-none', !reason);
+  }
+  const actionButtons = [
+    'newProductReleasePublishBtn',
+    'newProductReleaseCancelBtn',
+    'newProductReleaseReapplyBtn',
+    'newProductReleasePreviewBtn',
+  ];
+  actionButtons.forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = readonly;
+  });
+  ['newProductReleaseRetryOutboxBtn', 'newProductReleaseReconcileBtn'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = !recoveryEnabled;
+  });
+  syncNewProductReleasePublishAvailability();
+}
+
+function renderNewProductReleaseWorkspace(data) {
+  const root = document.getElementById('newProductReleaseWorkspace');
+  if (!root) return;
+
+  const state = data || {};
+  const enabled = Boolean(state.enabled);
+  const readOnly = Boolean(state.read_only || !enabled);
+  const list = document.getElementById('newProductReleaseWorkspaceList');
+  const pendingChain = state.pending_requests || [];
+  const pendingModels = Array.isArray(state.pending_models) ? state.pending_models : [];
+  const tabState = document.getElementById('newProductReleaseTabState');
+  const readOnlyLabel = document.getElementById('newProductReleaseReadOnly');
+  const methodEl = document.getElementById('newProductReleaseEffectiveMethod');
+  const triggerEl = document.getElementById('newProductReleaseTriggerModel');
+  const publicKbEl = document.getElementById('newProductReleasePublicKb');
+  const pendingEl = document.getElementById('newProductReleasePendingChain');
+  const idempotentEl = document.getElementById('newProductReleaseIdempotent');
+  const previewTokenEl = document.getElementById('newProductReleasePreviewToken');
+  const conflictEl = document.getElementById('newProductReleaseConflictState');
+  const batchEl = document.getElementById('newProductReleaseBatchId');
+  const downstreamEl = document.getElementById('newProductReleaseDownstream');
+  const statusEl = document.getElementById('newProductReleaseStatus');
+  const blockReasonEl = document.getElementById('newProductReleaseBlockReason');
+
+  root.dataset.readonly = String(readOnly);
+  root.dataset.enabled = String(enabled);
+  if (tabState) tabState.textContent = enabled ? '待上线' : '只读';
+  if (readOnlyLabel) readOnlyLabel.textContent = String(readOnly);
+  if (methodEl) methodEl.textContent = pendingChain.length ? pendingChain[0].effective_method || 'online' : 'online';
+  if (triggerEl) triggerEl.textContent = pendingChain.length
+    ? pendingChain[0].trigger_model || '-'
+    : (pendingModels[0] && (pendingModels[0].model_id || pendingModels[0].model)) || '-';
+  if (publicKbEl) publicKbEl.textContent = pendingChain.length ? '已确认' : '未确认';
+  if (pendingEl) pendingEl.textContent = JSON.stringify(pendingChain.map(item => item.pending_version || item.request_id || item)) || '[]';
+  if (idempotentEl) idempotentEl.textContent = pendingChain.length ? '支持' : '待检测';
+  if (previewTokenEl) previewTokenEl.textContent = window.newProductReleaseContext.previewToken || '未生成';
+  if (conflictEl) conflictEl.textContent = pendingChain.length ? 'clean' : 'clean';
+  if (batchEl) batchEl.textContent = pendingChain.length ? pendingChain[0].batch_id || '-' : '-';
+  if (downstreamEl) downstreamEl.textContent = pendingChain.length ? pendingChain[0].downstream_status || 'queued' : 'queued';
+  if (statusEl) {
+    statusEl.textContent = enabled
+      ? (hasCurrentNewProductReleasePreview() ? '模型预览已生成令牌，准备发布。' : '请先预览当前型号，再发布。')
+      : '功能默认关闭，当前为只读状态。';
+  }
+  if (blockReasonEl && state.block_reason) {
+    blockReasonEl.textContent = state.block_reason;
+    blockReasonEl.classList.remove('d-none');
+  } else if (blockReasonEl) {
+    blockReasonEl.textContent = '';
+    blockReasonEl.classList.add('d-none');
+  }
+
+  if (list) {
+    const selectedModelId = getNewProductReleaseWorkspaceModelId(state, window.newProductReleaseContext.modelId);
+    if (selectedModelId) {
+      selectNewProductReleaseModel(selectedModelId);
+      if (triggerEl) triggerEl.textContent = selectedModelId;
+    }
+    if (!pendingChain.length && !pendingModels.length) {
+      list.innerHTML = '<div class="new-product-release-empty">型号库中暂无待上线型号。请先在“型号库管理”新增型号并标记为“待上线”。新品录入是内容补充工具，不是发布前置条件。</div>';
+    } else {
+      const pendingModelIds = new Set(pendingModels.map(item => String(item.model_id || item.model || '').trim()).filter(Boolean));
+      const requestByModel = new Map(
+        pendingChain
+          .map(item => [String(item.model_id || '').trim(), item])
+          .filter(([modelId]) => modelId)
+      );
+      const modelCards = pendingModels.map(item => {
+        const modelId = String(item.model_id || item.model || '').trim();
+        const request = requestByModel.get(modelId);
+        return `
+      <div class="new-product-release-row-card new-product-release-catalog-row" data-model-id="${escapeHtml(modelId)}">
+        <div><strong>${escapeHtml(item.model || item.model_id || '-')}</strong><span class="new-product-release-status-badge">待上线</span></div>
+        <div>分类：${escapeHtml(item.category || '-')}</div>
+        <div>来源：型号库管理</div>
+        ${request ? `<div>申请：${escapeHtml(request.request_id || '-')}；状态：${escapeHtml(request.status || 'pending_release')}；版本：${escapeHtml(String(request.generation || request.pending_version || 1))}</div>` : ''}
+        <div class="new-product-release-catalog-hint">可选择该型号后进行预览和发布，无需先创建“新品录入”批次。</div>
+      </div>
+      `;
+      }).join('');
+      const requestCards = pendingChain.filter(item => !pendingModelIds.has(String(item.model_id || '').trim())).map(item => `
+      <div class="new-product-release-row-card">
+        <div><strong>${escapeHtml(item.request_id || 'request')}</strong></div>
+        <div>模型：${escapeHtml(item.model_id || '-')}</div>
+        <div>状态：${escapeHtml(item.status || 'pending')}</div>
+        <div>版本：${escapeHtml(String(item.pending_version || 1))}</div>
+      </div>
+      `).join('');
+      list.innerHTML = modelCards + requestCards;
+      list.querySelectorAll('[data-model-id]').forEach(card => {
+      card.addEventListener('click', () => {
+        const modelId = card.dataset.modelId || '';
+        if (!modelId) return;
+        selectNewProductReleaseModel(modelId);
+        const trigger = document.getElementById('newProductReleaseTriggerModel');
+        if (trigger) trigger.textContent = modelId;
+        document.querySelectorAll('.new-product-release-catalog-row').forEach(row => row.classList.remove('is-selected'));
+        card.classList.add('is-selected');
+        const status = document.getElementById('newProductReleaseStatus');
+        if (status) status.textContent = `已选择待上线型号 ${modelId}，请先预览再发布。`;
+      });
+      });
+    }
+  }
+
+  const shouldEnable = enabled && !readOnly;
+  setNewProductReleaseActionState(shouldEnable, state.block_reason || '', Boolean(state.recovery_enabled));
+}
+
+async function loadNewProductReleaseWorkspace() {
+  try {
+    const data = await api(NEW_PRODUCT_RELEASE_ENDPOINTS.workspace.replace('/api', ''), 'GET');
+    if (!data || data.ok === false) {
+      const reason = data && (data.block_reason || data.message) ? data.block_reason || data.message : 'workspace API不可用';
+      setNewProductReleaseBlocked(reason, { statusText: '工作区读取失败' });
+      return;
+    }
+    renderNewProductReleaseWorkspace(data);
+  } catch (error) {
+    setNewProductReleaseBlocked(error && error.message ? error.message : '工作区请求失败', { statusText: '工作区请求失败' });
+  }
+}
+
+const pendingModificationState = { records: [], page: 1, pageSize: 20, loading: false, error: '' };
+
+function normalizePendingModificationSource(value) {
+  const source = String(value || '').trim();
+  return source.includes('知识库管理') ? '知识库管理' : source;
+}
+
+function getFilteredPendingModificationRecords() {
+  const idQuery = String(document.getElementById('pendingModificationIdFilter')?.value || '').trim().toLowerCase();
+  const sourceQuery = String(document.getElementById('pendingModificationSourceFilter')?.value || '');
+  const modelQuery = String(document.getElementById('pendingModificationModelFilter')?.value || '').trim().toLowerCase();
+  return pendingModificationState.records.filter(record => {
+    const ids = `${record.record_id || record.pending_id || ''} ${record.question_wiki_id || record.kb_id || ''}`.toLowerCase();
+    const source = normalizePendingModificationSource(record.source_module || '知识库管理');
+    const model = String(record.target_model || record.product_name || '').toLowerCase();
+    return (!idQuery || ids.includes(idQuery))
+      && (!sourceQuery || source === sourceQuery)
+      && (!modelQuery || model.includes(modelQuery));
+  });
+}
+
+const PENDING_MODIFICATION_FIELD_LABELS = {
+  question: '问题', answer: '答案', similar_questions: '相似问', question_type: '问题类型',
+  answer_type: '答案类型', error_list: '错误列表', keyword_list: '关键词', if_bm25: 'BM25',
+  product_name: '关联型号', product_category_name: '产品分类', image_urls: '图片',
+  video_urls: '视频', file_urls: '文件', link_type: '链接类型', link_url: '链接地址',
+};
+
+function pendingModificationSnapshotObject(value) {
+  if (typeof value !== 'string') return value && typeof value === 'object' ? value : {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function pendingModificationValueText(value) {
+  if (value === null || value === undefined || value === '') return '（空）';
+  if (Array.isArray(value)) return value.map(item => pendingModificationValueText(item)).join('、');
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function pendingModificationDiff(record) {
+  const before = pendingModificationSnapshotObject(record.before ?? record.before_json ?? record.baseline_snapshot);
+  const after = pendingModificationSnapshotObject(record.after ?? record.after_json ?? record.pending_snapshot);
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])];
+  return keys.filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key])).map(key => ({
+    key,
+    label: PENDING_MODIFICATION_FIELD_LABELS[key] || key,
+    before: pendingModificationValueText(before[key]),
+    after: pendingModificationValueText(after[key]),
+  }));
+}
+
+function renderPendingModificationChange(record) {
+  const diffs = pendingModificationDiff(record);
+  if (!diffs.length) {
+    const kind = record.change_type || record.pending_change_type || '';
+    return `<span>${escapeHtml(kind ? `内容变更（${kind}）` : '无可显示的字段差异')}</span>`;
+  }
+  const preview = diffs.slice(0, 2).map(diff => {
+    const value = diff.after.length > 64 ? `${diff.after.slice(0, 64)}…` : diff.after;
+    return `${diff.label}：${value}`;
+  }).join('；');
+  const details = diffs.map(diff => `
+    <div class="pending-modification-diff-row">
+      <strong>${escapeHtml(diff.label)}</strong>
+      <span><em>原</em>${escapeHtml(diff.before)}</span>
+      <span><em>新</em>${escapeHtml(diff.after)}</span>
+    </div>`).join('');
+  return `<details class="pending-modification-change">
+    <summary><strong>${diffs.length} 项</strong> ${escapeHtml(preview)}</summary>
+    <div class="pending-modification-diff-list">${details}</div>
+  </details>`;
+}
+
+function renderPendingModificationRecords() {
+  const body = document.getElementById('pendingModificationsTableBody');
+  if (!body) return;
+  const filtered = getFilteredPendingModificationRecords();
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pendingModificationState.pageSize));
+  pendingModificationState.page = Math.min(pendingModificationState.page, pageCount);
+  const pageStart = (pendingModificationState.page - 1) * pendingModificationState.pageSize;
+  const pageRecords = filtered.slice(pageStart, pageStart + pendingModificationState.pageSize);
+  const pageInfo = document.getElementById('pendingModificationPageInfo');
+  const previous = document.getElementById('pendingModificationPrev');
+  const next = document.getElementById('pendingModificationNext');
+
+  if (pendingModificationState.loading) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-message">正在读取待上线修改记录...</td></tr>';
+  } else if (pendingModificationState.error) {
+    body.innerHTML = `<tr><td colspan="8" class="empty-message">待上线修改记录读取失败：${escapeHtml(pendingModificationState.error)}</td></tr>`;
+  } else if (!pendingModificationState.records.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-message">暂无待上线修改记录</td></tr>';
+  } else if (!filtered.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-message">没有符合条件的记录</td></tr>';
+  } else {
+    body.innerHTML = pageRecords.map(record => {
+      return `<tr>
+        <td>${escapeHtml(record.record_id || record.pending_id || '-')}</td>
+        <td>${escapeHtml(normalizePendingModificationSource(record.source_module || '知识库管理'))}</td>
+        <td>${escapeHtml(record.question_wiki_id || record.kb_id || '-')}</td>
+        <td>${escapeHtml(record.target_model || record.product_name || '-')}</td>
+        <td class="pending-modification-change-cell">${renderPendingModificationChange(record)}</td>
+        <td>${escapeHtml(record.created_by || record.modifier || '-')}</td>
+        <td>${escapeHtml(record.created_at ? new Date(record.created_at).toLocaleString() : '-')}</td>
+        <td><span class="mod-source-pill">待上线</span></td>
+      </tr>`;
+    }).join('');
+  }
+
+  if (pageInfo) {
+    pageInfo.textContent = filtered.length
+      ? `共 ${filtered.length} 条，第 ${pendingModificationState.page}/${pageCount} 页（${pageStart + 1}-${Math.min(pageStart + pendingModificationState.pageSize, filtered.length)}）`
+      : `共 ${filtered.length} 条`;
+  }
+  if (previous) previous.disabled = pendingModificationState.loading || Boolean(pendingModificationState.error) || pendingModificationState.page <= 1;
+  if (next) next.disabled = pendingModificationState.loading || Boolean(pendingModificationState.error) || pendingModificationState.page >= pageCount || !filtered.length;
+}
+
+function filterPendingModificationRecords() {
+  pendingModificationState.page = 1;
+  renderPendingModificationRecords();
+}
+
+function clearPendingModificationFilters() {
+  ['pendingModificationIdFilter', 'pendingModificationSourceFilter', 'pendingModificationModelFilter'].forEach(id => {
+    const control = document.getElementById(id);
+    if (control) control.value = '';
+  });
+  filterPendingModificationRecords();
+}
+
+function changePendingModificationPage(delta) {
+  const filteredCount = getFilteredPendingModificationRecords().length;
+  const pageCount = Math.max(1, Math.ceil(filteredCount / pendingModificationState.pageSize));
+  pendingModificationState.page = Math.max(1, Math.min(pageCount, pendingModificationState.page + Number(delta || 0)));
+  renderPendingModificationRecords();
+}
+
+function changePendingModificationPageSize() {
+  const size = Number(document.getElementById('pendingModificationPageSize')?.value || 20);
+  pendingModificationState.pageSize = [10, 20, 50].includes(size) ? size : 20;
+  pendingModificationState.page = 1;
+  renderPendingModificationRecords();
+}
+
+async function loadPendingModificationRecords() {
+  if (!document.getElementById('pendingModificationsTableBody')) return;
+  pendingModificationState.loading = true;
+  pendingModificationState.error = '';
+  renderPendingModificationRecords();
+  try {
+    const result = await api('/pending-records', 'GET');
+    pendingModificationState.records = Array.isArray(result?.records) ? result.records : [];
+    pendingModificationState.page = 1;
+  } catch (error) {
+    pendingModificationState.error = error?.message || '未知错误';
+    pendingModificationState.records = [];
+    pendingModificationState.page = 1;
+  } finally {
+    pendingModificationState.loading = false;
+    renderPendingModificationRecords();
+  }
+}
+window.loadPendingModificationRecords = loadPendingModificationRecords;
+window.filterPendingModificationRecords = filterPendingModificationRecords;
+window.clearPendingModificationFilters = clearPendingModificationFilters;
+window.changePendingModificationPage = changePendingModificationPage;
+window.changePendingModificationPageSize = changePendingModificationPageSize;
+
+async function refreshNewProductReleaseCapabilities() {
+  try {
+    const data = await api(NEW_PRODUCT_RELEASE_ENDPOINTS.capabilities.replace('/api', ''), 'GET');
+    if (!data || data.ok === false) {
+      const reason = data && (data.block_reason || data.message) ? data.block_reason || data.message : '能力门禁检查失败';
+      setNewProductReleaseBlocked(reason, { statusText: '能力门禁未通过' });
+      return;
+    }
+    setNewProductReleaseActionState(Boolean(data.enabled), data.block_reason || '', Boolean(data.recovery_enabled));
+    await loadNewProductReleaseWorkspace();
+  } catch (error) {
+    setNewProductReleaseBlocked(error && error.message ? error.message : '能力门禁请求失败', { statusText: '能力门禁异常' });
+  }
+}
+
+async function previewNewProductReleaseModel() {
+  const modelId = window.newProductReleaseContext.modelId || 'A-100';
+  clearNewProductReleasePreview();
+  syncNewProductReleasePublishAvailability();
+  try {
+    const result = await api(buildNewProductReleaseModelRoute(NEW_PRODUCT_RELEASE_ENDPOINTS.preview, modelId).replace('/api', ''), 'GET');
+    if (!result || result.ok === false) {
+      const reason = result && (result.block_reason || result.message) ? result.block_reason || result.message : '预览接口缺失或 404';
+      document.getElementById('newProductReleaseStatus').textContent = '预览失败';
+      document.getElementById('newProductReleaseBlockReason').textContent = reason;
+      document.getElementById('newProductReleaseBlockReason').classList.remove('d-none');
+      return;
+    }
+    const token = result.preview && result.preview.preview_token ? result.preview.preview_token : '';
+    if (!token || !result.preview.expires_at) throw new Error('预览响应缺少有效令牌或到期时间');
+    window.newProductReleaseContext.previewToken = token;
+    window.newProductReleaseContext.previewModelId = modelId;
+    window.newProductReleaseContext.previewExpiresAt = Number(result.preview.expires_at);
+    document.getElementById('newProductReleasePreviewToken').textContent = token || '未生成';
+    document.getElementById('newProductReleaseEffectiveMethod').textContent = result.preview && result.preview.effective_method ? result.preview.effective_method : 'online';
+    document.getElementById('newProductReleaseTriggerModel').textContent = result.preview && result.preview.trigger_model ? result.preview.trigger_model : modelId;
+    document.getElementById('newProductReleaseStatus').textContent = '模型预览已生成令牌，准备发布。';
+    document.getElementById('newProductReleaseBlockReason').textContent = '';
+    document.getElementById('newProductReleaseBlockReason').classList.add('d-none');
+    syncNewProductReleasePublishAvailability();
+  } catch (error) {
+    document.getElementById('newProductReleaseStatus').textContent = '预览失败';
+    document.getElementById('newProductReleaseBlockReason').textContent = error && error.message ? error.message : '模型预览失败';
+    document.getElementById('newProductReleaseBlockReason').classList.remove('d-none');
+  }
+}
+
+async function publishNewProductRelease() {
+  const modelId = window.newProductReleaseContext.modelId || 'A-100';
+  const confirmation = getNewProductReleaseConfirmationState();
+  if (!confirmation.allConfirmed) {
+    document.getElementById('newProductReleaseStatus').textContent = '发布被阻止';
+    document.getElementById('newProductReleaseBlockReason').textContent = '必须先确认公共 KB 影响，并确认正式发布后才能提交。';
+    document.getElementById('newProductReleaseBlockReason').classList.remove('d-none');
+    return;
+  }
+  if (!hasCurrentNewProductReleasePreview()) {
+    clearNewProductReleasePreview();
+    syncNewProductReleasePublishAvailability();
+    document.getElementById('newProductReleaseStatus').textContent = '需要重新预览';
+    document.getElementById('newProductReleaseBlockReason').textContent = '请先对当前型号执行预览，生成有效令牌后再发布。';
+    document.getElementById('newProductReleaseBlockReason').classList.remove('d-none');
+    return;
+  }
+  const payload = {
+    model_id: modelId,
+    trigger_model: modelId,
+    public_kb_confirmed: confirmation.allConfirmed,
+    preview_token: window.newProductReleaseContext.previewToken || '',
+    idempotency_key: window.newProductReleaseContext.idempotencyKey
+      || (window.crypto?.randomUUID ? window.crypto.randomUUID() : `release-${modelId}-${Date.now()}`),
+  };
+  window.newProductReleaseContext.idempotencyKey = payload.idempotency_key;
+  try {
+    const result = await api(buildNewProductReleaseModelRoute(NEW_PRODUCT_RELEASE_ENDPOINTS.publish, modelId).replace('/api', ''), 'POST', payload);
+    if (!result || result.ok === false) {
+      const reason = result && (result.block_reason || result.message) ? result.block_reason || result.message : '发布 API 失败';
+      clearNewProductReleasePreview();
+      syncNewProductReleasePublishAvailability();
+      document.getElementById('newProductReleaseStatus').textContent = '发布被阻止';
+      document.getElementById('newProductReleaseBlockReason').textContent = reason;
+      document.getElementById('newProductReleaseBlockReason').classList.remove('d-none');
+      return;
+    }
+    window.newProductReleaseContext.requestId = (result.request && result.request.request_id) || '';
+    window.newProductReleaseContext.batchId = (result.batch && result.batch.batch_id) || '';
+    document.getElementById('newProductReleaseStatus').textContent = '型号上线事务已提交。';
+    await loadNewProductReleaseWorkspace();
+  } catch (error) {
+    clearNewProductReleasePreview();
+    syncNewProductReleasePublishAvailability();
+    document.getElementById('newProductReleaseStatus').textContent = '发布异常';
+    document.getElementById('newProductReleaseBlockReason').textContent = error && error.message ? error.message : '发布请求失败';
+    document.getElementById('newProductReleaseBlockReason').classList.remove('d-none');
+  }
+}
+
+async function cancelNewProductRelease() {
+  const modelId = window.newProductReleaseContext.modelId || 'A-100';
+  const requestId = window.newProductReleaseContext.requestId || '';
+  if (!requestId) {
+    setNewProductReleaseBlocked('没有可取消的请求 ID。', { statusText: '取消被阻止' });
+    return;
+  }
+  try {
+    const route = buildNewProductReleaseModelRoute(NEW_PRODUCT_RELEASE_ENDPOINTS.cancel, modelId);
+    const result = await api(route.replace('/api', ''), 'POST', { request_id: requestId });
+    if (!result || result.ok === false) {
+      const reason = result && (result.block_reason || result.message) ? result.block_reason || result.message : '取消失败';
+      setNewProductReleaseBlocked(reason, { statusText: '取消失败' });
+      return;
+    }
+    await loadNewProductReleaseWorkspace();
+  } catch (error) {
+    setNewProductReleaseBlocked(error && error.message ? error.message : '取消请求失败', { statusText: '取消失败' });
+  }
+}
+
+async function reapplyNewProductRelease() {
+  const modelId = window.newProductReleaseContext.modelId || 'A-100';
+  const requestId = window.newProductReleaseContext.requestId || '';
+  if (!requestId) {
+    setNewProductReleaseBlocked('没有待重新申请的请求。', { statusText: '重新申请被阻止' });
+    return;
+  }
+  try {
+    const route = buildNewProductReleaseModelRoute(NEW_PRODUCT_RELEASE_ENDPOINTS.reapply, modelId);
+    const result = await api(route.replace('/api', ''), 'POST', { request_id: requestId });
+    if (!result || result.ok === false) {
+      const reason = result && (result.block_reason || result.message) ? result.block_reason || result.message : '重新申请失败';
+      setNewProductReleaseBlocked(reason, { statusText: '重新申请失败' });
+      return;
+    }
+    window.newProductReleaseContext.requestId = result.request && result.request.request_id ? result.request.request_id : requestId;
+    await loadNewProductReleaseWorkspace();
+  } catch (error) {
+    setNewProductReleaseBlocked(error && error.message ? error.message : '重新申请失败', { statusText: '重新申请异常' });
+  }
+}
+
+async function retryNewProductReleaseOutbox() {
+  const batchId = window.newProductReleaseContext.batchId || '';
+  try {
+    const result = await api(NEW_PRODUCT_RELEASE_ENDPOINTS.outboxRetry.replace('/api', ''), 'POST', { batch_id: batchId || 'BATCH-UNKNOWN' });
+    if (!result || result.ok === false) {
+      const reason = result && (result.block_reason || result.message) ? result.block_reason || result.message : 'Outbox 重试失败';
+      setNewProductReleaseBlocked(reason, { statusText: 'Outbox 恢复失败' });
+      return;
+    }
+    document.getElementById('newProductReleaseStatus').textContent = 'Outbox 已触发重试。';
+    await loadNewProductReleaseWorkspace();
+  } catch (error) {
+    setNewProductReleaseBlocked(error && error.message ? error.message : 'Outbox 重试失败', { statusText: 'Outbox 重试异常' });
+  }
+}
+
+async function reconcileNewProductRelease() {
+  try {
+    const result = await api(NEW_PRODUCT_RELEASE_ENDPOINTS.reconcile.replace('/api', ''), 'POST', {});
+    if (!result || result.ok === false) {
+      const reason = result && (result.block_reason || result.message) ? result.block_reason || result.message : '对账 API 失败';
+      setNewProductReleaseBlocked(reason, { statusText: '对账失败' });
+      return;
+    }
+    document.getElementById('newProductReleaseStatus').textContent = result.message || '对账已完成。';
+    await loadNewProductReleaseWorkspace();
+  } catch (error) {
+    setNewProductReleaseBlocked(error && error.message ? error.message : '对账请求失败', { statusText: '对账失败' });
+  }
+}
+
+function initializeNewProductReleaseUI() {
+  const workspace = document.getElementById('newProductReleaseWorkspace');
+  if (!workspace) return;
+
+  const refreshBtn = document.getElementById('newProductReleaseRefreshBtn');
+  const previewBtn = document.getElementById('newProductReleasePreviewBtn');
+  const publishBtn = document.getElementById('newProductReleasePublishBtn');
+  const cancelBtn = document.getElementById('newProductReleaseCancelBtn');
+  const reapplyBtn = document.getElementById('newProductReleaseReapplyBtn');
+  const outboxBtn = document.getElementById('newProductReleaseRetryOutboxBtn');
+  const reconcileBtn = document.getElementById('newProductReleaseReconcileBtn');
+
+  refreshBtn && refreshBtn.addEventListener('click', refreshNewProductReleaseCapabilities);
+  previewBtn && previewBtn.addEventListener('click', previewNewProductReleaseModel);
+  publishBtn && publishBtn.addEventListener('click', publishNewProductRelease);
+  cancelBtn && cancelBtn.addEventListener('click', cancelNewProductRelease);
+  reapplyBtn && reapplyBtn.addEventListener('click', reapplyNewProductRelease);
+  outboxBtn && outboxBtn.addEventListener('click', retryNewProductReleaseOutbox);
+  reconcileBtn && reconcileBtn.addEventListener('click', reconcileNewProductRelease);
+
+  const impactCheck = document.getElementById('newProductReleaseConfirmImpact');
+  const formalCheck = document.getElementById('newProductReleaseConfirmFormal');
+  [impactCheck, formalCheck].forEach(el => {
+    if (el) el.addEventListener('change', syncNewProductReleasePublishAvailability);
+  });
+
+  syncNewProductReleasePublishAvailability();
+  refreshNewProductReleaseCapabilities();
+}
+
+document.addEventListener('DOMContentLoaded', initializeNewProductReleaseUI);
 
 function escapeHtml(text) {
     if (text === null || text === undefined) return '';
@@ -137,16 +783,17 @@ function normalizeSafeHttpUrl(value) {
     }
 }
 
-function appendSearchableKbIds(container, rawValue) {
+function appendSearchableKbIds(container, rawValue, action = 'search-id') {
+    const isCopyAction = action === 'copy-id';
     String(rawValue ?? '').split(/[,，]/).map(value => value.trim()).filter(Boolean).forEach((wikiId) => {
         const row = document.createElement('div');
         row.className = 'clickable-id-row';
         const control = document.createElement('button');
         control.type = 'button';
         control.className = 'clickable-id';
-        control.title = '点击搜索此ID';
-        control.setAttribute('aria-label', `按 KB ID ${wikiId} 搜索`);
-        control.dataset.kbAction = 'search-id';
+        control.title = isCopyAction ? '点击复制ID' : '点击搜索此ID';
+        control.setAttribute('aria-label', isCopyAction ? `复制 KB ID ${wikiId}` : `按 KB ID ${wikiId} 搜索`);
+        control.dataset.kbAction = action;
         control.dataset.kbValue = wikiId;
         control.textContent = wikiId;
         row.appendChild(control);
@@ -201,6 +848,8 @@ let currentTab = 'kbView';
 // Link View State
 let currentLinks = [];
 let linksLoaded = false;
+let linksLoadPromise = null;
+let linkFilterKey = '';
 let activeFilterTags = [];
 let selectedIds = new Set();
 let linkCurrentPage = 1;
@@ -313,6 +962,91 @@ let kbSelectedProductCategories = new Set();
 let kbSelectedTags = new Set();
 let kbAllTags = [];
 let kbTagsLoadPromise = null;
+let kbMappingTagsConfig = null;
+let kbMappingCategoryOrder = [];
+
+function orderedMappingCategories(mappings, order = []) {
+    const keys = Object.keys(mappings || {});
+    const saved = Array.isArray(order) ? order : [];
+    const valid = [...new Set(saved.filter(category => Object.hasOwn(mappings || {}, category)))];
+    const seen = new Set(valid);
+    return [...valid, ...keys.filter(category => !seen.has(category)).sort()];
+}
+
+async function fetchOrderedModelMappings() {
+    const result = await api('/model_mappings?include_order=1');
+    const wrapped = result?.mappings && typeof result.mappings === 'object' && !Array.isArray(result.mappings);
+    const config = wrapped ? result.mappings : result;
+    if (!config || typeof config !== 'object' || Array.isArray(config) || config.error || config.success === false) {
+        throw new Error('分类映射加载失败');
+    }
+    return { mappings: config, category_order: orderedMappingCategories(config, wrapped ? result.category_order : []) };
+}
+
+function kbMappingModelKeys(value) {
+    let models = value;
+    if (typeof models === 'string') {
+        try {
+            const parsed = JSON.parse(models);
+            if (Array.isArray(parsed)) models = parsed;
+        } catch {}
+    }
+    if (!Array.isArray(models)) models = String(models ?? '').split(/[,，\n\r]+/);
+    return new Set(models.map(model => String(model ?? '').replace(/\s+/g, '').toLowerCase()).filter(Boolean));
+}
+
+function getKBMappingTags(productValue, config = kbMappingTagsConfig) {
+    const keys = kbMappingModelKeys(productValue);
+    if (!keys.size || !config) return [];
+    return orderedMappingCategories(config, kbMappingCategoryOrder).filter(category => {
+        const models = config[category];
+        if (!category.trim() || !Array.isArray(models)) return false;
+        const mappingKeys = kbMappingModelKeys(models);
+        return mappingKeys.size === keys.size && [...keys].every(key => mappingKeys.has(key));
+    });
+}
+
+function kbMappingTagHtml(category) {
+    return `<span class="kb-mapping-tag" title="${escapeHtml(`分类映射：${category}；型号完全一致时自动生成`)}"><i class="fas fa-map-signs" aria-hidden="true"></i> 映射 · ${escapeHtml(category)}</span>`;
+}
+
+function renderKBMappingTagFilter() {
+    const select = document.getElementById('kbMappingTagFilter');
+    if (!select || !kbMappingTagsConfig) return;
+    const selected = select.value;
+    select.replaceChildren(new Option('全部映射标签', ''));
+    orderedMappingCategories(kbMappingTagsConfig, kbMappingCategoryOrder).forEach(category => {
+        select.add(new Option(category, category));
+    });
+    // Keep a removed category selected until reset; it must yield no results.
+    if (selected && !Object.hasOwn(kbMappingTagsConfig, selected)) {
+        select.add(new Option(`${selected}（已删除）`, selected));
+    }
+    select.value = selected;
+    // Native selects can still truncate very long category names; retain the
+    // full current value in the browser tooltip for discoverability.
+    select.title = select.options?.[select.selectedIndex]?.textContent || '全部映射标签';
+}
+
+async function refreshKBMappingTagsConfig() {
+    const { mappings: config, category_order: order } = await fetchOrderedModelMappings();
+    if (JSON.stringify(config) !== JSON.stringify(kbMappingTagsConfig)
+        || JSON.stringify(order) !== JSON.stringify(kbMappingCategoryOrder)) clearKBCache();
+    kbMappingTagsConfig = config;
+    kbMappingCategoryOrder = order;
+    renderKBMappingTagFilter();
+    return config;
+}
+
+function renderKBEditMappingTags(productValue) {
+    ['kbEditMappingTags', 'kbEditPreviewMappingTags'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const tags = getKBMappingTags(productValue);
+        el.innerHTML = tags.length ? tags.map(kbMappingTagHtml).join('')
+            : `<span class="kb-mapping-tags-empty">${kbMappingTagsConfig ? '无完全匹配的分类映射' : '映射标签暂不可用'}</span>`;
+    });
+}
 let kbSortBy = 'question_wiki_id';
 let kbSortDir = 'desc';
 let kbShowSelectedOnly = false;
@@ -599,9 +1333,14 @@ function clearKBActionFilters() {
     });
     const draftFilter = document.getElementById('kbDraftStatusFilter');
     if (draftFilter) draftFilter.value = '';
-    document.querySelectorAll('#reviewStatusChips .tag-chip').forEach(chip => chip.classList.remove('active'));
+    document.querySelectorAll('#reviewStatusChips .tag-chip').forEach(chip => {
+        chip.classList.remove('active');
+        chip.setAttribute('aria-pressed', 'false');
+    });
     kbSelectedProductCategories.clear();
     kbSelectedTags.clear();
+    const mappingFilter = document.getElementById('kbMappingTagFilter');
+    if (mappingFilter) mappingFilter.value = '';
     if (typeof syncKBDraftStatusChips === 'function') syncKBDraftStatusChips();
     if (typeof syncKBProductCategoryChipActive === 'function') syncKBProductCategoryChipActive();
     if (typeof updateKbTagFilterButton === 'function') updateKbTagFilterButton();
@@ -707,13 +1446,13 @@ function getCacheKey(page, params) {
 function getFromCache(cacheKey) {
     const cached = kbPageCache.get(cacheKey);
     if (!cached) return null;
-    
+
     // 检查是否过期
     if (Date.now() - cached.timestamp > CACHE_EXPIRY_MS) {
         kbPageCache.delete(cacheKey);
         return null;
     }
-    
+
     return cached.data;
 }
 
@@ -723,7 +1462,7 @@ function saveToCache(cacheKey, data) {
         const firstKey = kbPageCache.keys().next().value;
         kbPageCache.delete(firstKey);
     }
-    
+
     kbPageCache.set(cacheKey, {
         data: data,
         timestamp: Date.now()
@@ -739,32 +1478,32 @@ async function prefetchKBNextPage(currentPage, params) {
     try {
         const nextPage = currentPage + 1;
         const totalPages = Math.ceil(kbTotal / kbPageSize);
-        
+
         // 只有在有下一页时才预加载
         if (nextPage > totalPages) return;
-        
+
         // 构建下一页的参数
         const nextParams = new URLSearchParams(params.toString());
         nextParams.set('page', nextPage);
-        
+
         const cacheKey = getCacheKey(nextPage, nextParams);
-        
+
         // 如果已经缓存，跳过
         if (getFromCache(cacheKey)) return;
-        
+
         // 静默请求下一页数据
         const res = await fetch(`${API_BASE}/kb/data?${nextParams.toString()}`, {
             method: 'GET',
             credentials: 'same-origin'
         });
-        
+
         if (!res.ok) return; // 预加载失败不影响主流程
-        
+
         const data = await res.json();
-        
+
         // 保存到缓存
         saveToCache(cacheKey, data);
-        
+
         console.log(`✓ 预加载第 ${nextPage} 页成功`);
     } catch (e) {
         // 预加载失败不影响主流程，静默处理
@@ -799,135 +1538,332 @@ async function fetchKBAllTags() {
 }
 
 let tempKbSelectedTags = new Set();
+let kbTagFilterLoadState = 'loaded';
 
-function renderKbTagFilterModalList(state = 'loaded') {
-    const listContainer = document.getElementById('kbTagFilterModalList');
-    if (!listContainer) return;
-    listContainer.innerHTML = '';
-
+function renderKbTagFilterList(state = kbTagFilterLoadState) {
+    kbTagFilterLoadState = state;
+    const list = document.getElementById('kbTagFilterList');
+    if (!list) return;
+    list.replaceChildren();
+    const count = document.getElementById('kbTagFilterSelectionCount');
+    if (count) count.textContent = tempKbSelectedTags.size ? `已选 ${tempKbSelectedTags.size} 个标签` : '未选择标签';
     if (state === 'loading') {
-        listContainer.innerHTML = '<div class="kb-tag-load-state" role="status">正在读取标签...</div>';
+        list.innerHTML = '<div class="kb-tag-load-state" role="status">正在读取标签...</div>';
         return;
     }
     if (state === 'error') {
-        listContainer.innerHTML = '<div class="kb-tag-load-state is-error" role="alert"><span>标签加载失败，请重试</span><button type="button" class="tag-load-retry" onclick="retryKbTagFilterModal()">重新加载</button></div>';
+        list.innerHTML = '<div class="kb-tag-load-state is-error" role="alert"><span>标签加载失败，请重试</span><button type="button" class="tag-load-retry" onclick="retryKbTagFilterDropdown()">重新加载</button></div>';
         return;
     }
-    if (!kbAllTags.length) {
-        listContainer.innerHTML = '<div class="kb-tag-load-state">知识库管理中暂无标签</div>';
+    const query = (document.getElementById('kbTagFilterSearch')?.value || '').trim().toLocaleLowerCase();
+    const visibleTags = kbAllTags.filter(tag => tag.toLocaleLowerCase().includes(query));
+    if (!visibleTags.length) {
+        list.innerHTML = `<div class="kb-tag-load-state">${query ? '没有匹配标签' : '知识库管理中暂无标签'}</div>`;
         return;
     }
-
-    kbAllTags.forEach(tag => {
-            const label = document.createElement('label');
-            label.style.display = 'flex';
-            label.style.alignItems = 'center';
-            label.style.gap = '6px';
-            label.style.padding = '6px 12px';
-            label.style.background = '#f8fafc';
-            label.style.border = '1px solid #e2e8f0';
-            label.style.borderRadius = '16px';
-            label.style.cursor = 'pointer';
-            label.style.userSelect = 'none';
-            label.style.transition = 'all 0.2s';
-            
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.checked = tempKbSelectedTags.has(tag);
-            cb.onchange = (e) => {
-                if (cb.checked) tempKbSelectedTags.add(tag);
-                else tempKbSelectedTags.delete(tag);
-                
-                if (cb.checked) {
-                    label.style.background = '#e0e7ff';
-                    label.style.borderColor = '#c7d2fe';
-                } else {
-                    label.style.background = '#f8fafc';
-                    label.style.borderColor = '#e2e8f0';
-                }
-            };
-            
-            // initial style
-            if (cb.checked) {
-                label.style.background = '#e0e7ff';
-                label.style.borderColor = '#c7d2fe';
-            }
-            
-            const text = document.createElement('span');
-            text.textContent = tag;
-            text.style.color = '#334155';
-            text.style.fontSize = '13px';
-            
-            label.appendChild(cb);
-            label.appendChild(text);
-            listContainer.appendChild(label);
+    visibleTags.forEach(tag => {
+        const label = document.createElement('label');
+        label.className = 'kb-tag-filter-option';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = tempKbSelectedTags.has(tag);
+        label.classList.toggle('is-selected', checkbox.checked);
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) tempKbSelectedTags.add(tag);
+            else tempKbSelectedTags.delete(tag);
+            label.classList.toggle('is-selected', checkbox.checked);
+            if (count) count.textContent = tempKbSelectedTags.size ? `已选 ${tempKbSelectedTags.size} 个标签` : '未选择标签';
+        });
+        const text = document.createElement('span');
+        text.textContent = tag;
+        label.append(checkbox, text);
+        list.appendChild(label);
     });
 }
 
-async function retryKbTagFilterModal() {
-    renderKbTagFilterModalList('loading');
+async function retryKbTagFilterDropdown() {
+    renderKbTagFilterList('loading');
     try {
         await loadKnowledgeBaseTags(true);
-        renderKbTagFilterModalList('loaded');
+        renderKbTagFilterList('loaded');
     } catch (error) {
         console.error('Failed to load KB tags:', error);
-        renderKbTagFilterModalList('error');
-        showToast('知识库标签加载失败，请重试', 'error');
+        renderKbTagFilterList('error');
     }
+    positionKbTagFilterDropdown();
 }
-window.retryKbTagFilterModal = retryKbTagFilterModal;
 
-async function openKbTagFilterModal() {
-    const modal = document.getElementById('kbTagFilterModal');
-    if (!modal) return;
+function positionKbTagFilterDropdown() {
+    const panel = document.getElementById('kbTagFilterDropdown');
+    const button = document.getElementById('kbTagFilterBtn');
+    if (!panel || panel.hidden || !button) return;
+    const rect = button.getBoundingClientRect();
+    const margin = 12;
+    const gap = 6;
+    const width = Math.min(360, window.innerWidth - margin * 2);
+    panel.style.width = `${width}px`;
+    panel.style.left = `${Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin))}px`;
+    const below = window.innerHeight - rect.bottom - gap - margin;
+    const above = rect.top - gap - margin;
+    const openBelow = below >= Math.min(panel.scrollHeight, 360) || below >= above;
+    panel.style.maxHeight = `${Math.max(0, openBelow ? below : above)}px`;
+    panel.style.top = `${openBelow ? rect.bottom + gap : Math.max(margin, rect.top - gap - panel.offsetHeight)}px`;
+}
 
+async function toggleKbTagFilterDropdown() {
+    const panel = document.getElementById('kbTagFilterDropdown');
+    const button = document.getElementById('kbTagFilterBtn');
+    if (!panel || !button) return;
+    if (!panel.hidden) {
+        closeKbTagFilterDropdown();
+        return;
+    }
     tempKbSelectedTags = new Set(kbSelectedTags);
-    modal.style.display = 'flex';
-    await retryKbTagFilterModal();
+    const mode = document.querySelector('input[name="kbTagFilterMode"]')?.value || 'OR';
+    document.querySelectorAll('input[name="kbTagFilterModeDraft"]').forEach(input => {
+        input.checked = input.value === mode;
+    });
+    const search = document.getElementById('kbTagFilterSearch');
+    if (search) search.value = '';
+    panel.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    renderKbTagFilterList('loading');
+    positionKbTagFilterDropdown();
+    search?.focus({ preventScroll: true });
+    await retryKbTagFilterDropdown();
 }
 
-function closeKbTagFilterModal() {
-    const modal = document.getElementById('kbTagFilterModal');
-    if (modal) modal.style.display = 'none';
+function closeKbTagFilterDropdown(returnFocus = false) {
+    const panel = document.getElementById('kbTagFilterDropdown');
+    const button = document.getElementById('kbTagFilterBtn');
+    if (panel) panel.hidden = true;
+    button?.setAttribute('aria-expanded', 'false');
+    if (returnFocus) button?.focus({ preventScroll: true });
 }
 
-function applyKbTagFilterModal() {
+function applyKbTagFilterDropdown() {
     kbSelectedTags = new Set(tempKbSelectedTags);
+    const mode = document.querySelector('input[name="kbTagFilterMode"]');
+    if (mode) mode.value = document.querySelector('input[name="kbTagFilterModeDraft"]:checked')?.value || 'OR';
     updateKbTagFilterButton();
-    closeKbTagFilterModal();
+    closeKbTagFilterDropdown(true);
+    clearKBCache();
     loadKBTable(1);
 }
 
-function clearKbTagFilterModal() {
+function clearKbTagFilterDropdown() {
     tempKbSelectedTags.clear();
-    const cbs = document.querySelectorAll('#kbTagFilterModalList input[type="checkbox"]');
-    cbs.forEach(cb => {
-        cb.checked = false;
-        cb.dispatchEvent(new Event('change'));
-    });
+    renderKbTagFilterList();
 }
 
 function updateKbTagFilterButton() {
-    const countSpan = document.getElementById('kbTagFilterCount');
-    const btn = document.getElementById('kbTagFilterModalBtn');
-    if (!countSpan || !btn) return;
-    
-    if (kbSelectedTags.size > 0) {
-        countSpan.textContent = kbSelectedTags.size;
-        countSpan.style.display = 'inline-block';
-        btn.classList.add('is-active');
-        btn.style.borderColor = 'var(--primary-color)';
-        btn.style.color = 'var(--primary-color)';
-    } else {
-        countSpan.style.display = 'none';
-        btn.classList.remove('is-active');
-        btn.style.borderColor = '';
-        btn.style.color = '';
+    const count = document.getElementById('kbTagFilterCount');
+    const button = document.getElementById('kbTagFilterBtn');
+    const value = document.getElementById('kbTagFilterValue');
+    const selected = Array.from(kbSelectedTags);
+    if (count) {
+        count.textContent = selected.length;
+        count.hidden = !selected.length;
+    }
+    if (value) value.textContent = selected.length === 0 ? '全部标签' : selected.length <= 2 ? selected.join('、') : `已选 ${selected.length} 个标签`;
+    if (button) {
+        button.classList.toggle('is-active', selected.length > 0);
+        button.title = selected.length ? selected.join('、') : '按标签筛选';
     }
 }
 
 function setupKBTagDropdown() {
     updateKbTagFilterButton();
+    const button = document.getElementById('kbTagFilterBtn');
+    if (!button || button.dataset.dropdownReady) return;
+    button.dataset.dropdownReady = 'true';
+    const panel = document.getElementById('kbTagFilterDropdown');
+    document.addEventListener('pointerdown', event => {
+        if (panel && !panel.hidden && !panel.contains(event.target) && !button.contains(event.target)) closeKbTagFilterDropdown();
+    });
+    document.addEventListener('focusin', event => {
+        if (panel && !panel.hidden && !panel.contains(event.target) && !button.contains(event.target)) closeKbTagFilterDropdown();
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && panel && !panel.hidden) {
+            event.preventDefault();
+            closeKbTagFilterDropdown(true);
+        }
+    });
+    window.addEventListener('resize', positionKbTagFilterDropdown);
+    document.addEventListener('scroll', event => {
+        if (!panel?.contains(event.target)) positionKbTagFilterDropdown();
+    }, true);
+}
+
+const kbTagManagerState = { tags: [], loading: false, busy: false, action: null, error: '', sequence: 0 };
+
+async function openKbTagManager() {
+    if (kbTagManagerState.busy) return;
+    closeKbTagFilterDropdown();
+    const dialog = document.getElementById('kbTagManagerDialog');
+    if (!dialog) return;
+    kbTagManagerState.action = null;
+    document.getElementById('kbTagManagerAction').hidden = true;
+    document.getElementById('kbTagManagerSearch').value = '';
+    if (!dialog.open) dialog.showModal();
+    await loadKbTagManager();
+}
+
+function closeKbTagManager() {
+    if (!kbTagManagerState.busy) document.getElementById('kbTagManagerDialog')?.close();
+}
+
+async function loadKbTagManager() {
+    if (kbTagManagerState.busy) return;
+    const sequence = ++kbTagManagerState.sequence;
+    kbTagManagerState.loading = true;
+    kbTagManagerState.error = '';
+    cancelKbTagManagerAction();
+    renderKbTagManager();
+    try {
+        const result = await api('/kb/tags/manage');
+        if (!result?.success || !Array.isArray(result.tags)) throw new Error(result?.message || '标签列表加载失败，请重试');
+        if (sequence !== kbTagManagerState.sequence) return;
+        kbTagManagerState.tags = result.tags;
+        kbAllTags = normalizeKnowledgeBaseTags(result.tags.map(tag => tag.name));
+    } catch (error) {
+        if (sequence !== kbTagManagerState.sequence) return;
+        kbTagManagerState.error = error.message;
+    } finally {
+        if (sequence === kbTagManagerState.sequence) {
+            kbTagManagerState.loading = false;
+            renderKbTagManager();
+        }
+    }
+}
+
+function renderKbTagManager() {
+    const state = kbTagManagerState;
+    const body = document.getElementById('kbTagManagerBody');
+    if (!body) return;
+    const query = (document.getElementById('kbTagManagerSearch')?.value || '').trim().toLocaleLowerCase();
+    const visible = state.tags.filter(tag => tag.name.toLocaleLowerCase().includes(query));
+    document.getElementById('kbTagManagerCount').textContent = `共 ${state.tags.length} 个标签`;
+    const status = document.getElementById('kbTagManagerStatus');
+    status.textContent = state.error || (state.loading ? '正在读取标签…' : state.busy ? '正在保存，请稍候…' : '');
+    status.classList.toggle('is-error', Boolean(state.error));
+    body.replaceChildren();
+    if (state.loading || state.error && !state.tags.length || !visible.length) {
+        const row = body.insertRow();
+        const cell = row.insertCell();
+        cell.colSpan = 3;
+        cell.className = 'kb-tag-manager-empty';
+        cell.textContent = state.loading ? '正在读取标签…' : state.error ? '请点击刷新重新加载标签' : query ? '没有匹配的标签' : '暂无知识库标签';
+    } else {
+        visible.forEach(tag => {
+            const row = body.insertRow();
+            row.insertCell().textContent = tag.name;
+            row.insertCell().textContent = `${tag.knowledge_count} 条`;
+            const actions = row.insertCell();
+            ['rename', 'delete'].forEach(action => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = action === 'delete' ? 'kb-tag-manager-delete' : 'kb-tag-manage-link';
+                button.textContent = action === 'delete' ? '删除' : '修改名称';
+                button.setAttribute('aria-label', `${button.textContent}：${tag.name}`);
+                button.addEventListener('click', () => startKbTagManagerAction(tag.id, action));
+                actions.appendChild(button);
+            });
+        });
+    }
+    document.querySelectorAll('#kbTagManagerDialog button, #kbTagManagerDialog input').forEach(element => {
+        element.disabled = state.busy || state.loading;
+    });
+}
+
+function startKbTagManagerAction(id, kind) {
+    if (kbTagManagerState.busy || kbTagManagerState.loading) return;
+    const tag = kbTagManagerState.tags.find(tag => tag.id === id);
+    if (!tag) return;
+    kbTagManagerState.action = { tag, kind };
+    kbTagManagerState.error = '';
+    const deleting = kind === 'delete';
+    const form = document.getElementById('kbTagManagerAction');
+    form.hidden = false;
+    form.classList.toggle('is-delete', deleting);
+    document.getElementById('kbTagManagerActionTitle').textContent = `${deleting ? '删除标签' : '修改名称'}：${tag.name}`;
+    document.getElementById('kbTagManagerImpact').textContent = deleting
+        ? `将删除此标签及其与 ${tag.knowledge_count} 条知识的关联，知识内容保留。此操作无法撤销。`
+        : `修改后，${tag.knowledge_count} 条关联知识会同步显示新的标签名称。`;
+    document.getElementById('kbTagManagerNameField').hidden = deleting;
+    const input = document.getElementById('kbTagManagerName');
+    input.value = tag.name;
+    input.required = !deleting;
+    const submit = document.getElementById('kbTagManagerSubmit');
+    submit.textContent = deleting ? '确认删除标签' : '保存名称';
+    renderKbTagManager();
+    if (deleting) submit.focus();
+    else { input.focus(); input.select(); }
+}
+
+function cancelKbTagManagerAction() {
+    if (kbTagManagerState.busy) return;
+    kbTagManagerState.action = null;
+    const form = document.getElementById('kbTagManagerAction');
+    if (form) form.hidden = true;
+}
+
+function syncKbManagedTag(oldName, newName) {
+    const replace = values => Array.from(new Set(Array.from(values || []).flatMap(name => name === oldName ? newName ? [newName] : [] : [name])));
+    kbSelectedTags = new Set(replace(kbSelectedTags));
+    tempKbSelectedTags = new Set(replace(tempKbSelectedTags));
+    kbAllTags = normalizeKnowledgeBaseTags(replace(kbAllTags));
+    updateKbTagFilterButton();
+    clearKBCache();
+    if (typeof copyConfigState !== 'undefined') {
+        copyConfigState.selectedExcludeTags = new Set(replace(copyConfigState.selectedExcludeTags));
+        copyConfigState.availableExcludeTags = [...kbAllTags];
+        copyConfigState.excludeTagsLoaded = true;
+        copyConfigState.excludeTagsStatus = 'loaded';
+        renderCopyExcludeTags();
+    }
+}
+
+async function submitKbTagManagerAction() {
+    const state = kbTagManagerState;
+    if (state.busy || !state.action) return;
+    const { tag, kind } = state.action;
+    const name = document.getElementById('kbTagManagerName').value.trim();
+    if (kind === 'rename' && (!name || name.length > 100 || /[,，\r\n]/.test(name))) {
+        state.error = '标签名称不能为空，最多 100 个字符，不能包含逗号或换行';
+        renderKbTagManager();
+        return;
+    }
+    if (kind === 'rename' && state.tags.some(item => item.id !== tag.id && item.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+        state.error = '该标签名称已存在，请使用其他名称';
+        renderKbTagManager();
+        return;
+    }
+    state.busy = true;
+    state.error = '';
+    renderKbTagManager();
+    let saved = false;
+    try {
+        const result = await api(`/kb/tags/manage/${encodeURIComponent(tag.id)}`, kind === 'delete' ? 'DELETE' : 'PUT', {
+            name, expected_name: tag.name, expected_count: tag.knowledge_count,
+        });
+        if (!result?.success) throw new Error(result?.message || '标签操作失败，请重试');
+        saved = true;
+        syncKbManagedTag(result.old_name, result.name);
+        state.tags = kind === 'delete' ? state.tags.filter(item => item.id !== tag.id)
+            : state.tags.map(item => item.id === tag.id ? { ...item, name: result.name } : item);
+        showToast(kind === 'delete' ? '标签已删除，知识内容已保留' : '标签名称已更新', 'success');
+    } catch (error) {
+        state.error = error.message;
+    } finally {
+        state.busy = false;
+        if (saved) cancelKbTagManagerAction();
+        renderKbTagManager();
+    }
+    if (saved && !document.getElementById('kbView')?.classList.contains('d-none')) {
+        loadKBTable(kbCurrentPage || 1);
+    }
 }
 
 function updateKBPreviewSelectedButton() {
@@ -1104,7 +2040,7 @@ function saveKBConfig() {
             }
         });
     }
-    
+
     const widths = {};
     kbColumns.forEach(col => {
         widths[col.key] = col.width;
@@ -1125,7 +2061,7 @@ function openColumnSettingsModal() {
     if (!modal || !list) return;
 
     list.innerHTML = '';
-    
+
     kbColumns.forEach(col => {
         // Skip checkbox and ID if you want them always visible, but user might want to hide ID
         if (col.key === 'checkbox') return;
@@ -1133,24 +2069,24 @@ function openColumnSettingsModal() {
         const div = document.createElement('div');
         div.style.display = 'flex';
         div.style.alignItems = 'center';
-        
+
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.id = 'col-vis-' + col.key;
         checkbox.checked = col.visible !== false;
         checkbox.onchange = () => toggleColumnVisibility(col.key);
-        
+
         const label = document.createElement('label');
         label.htmlFor = 'col-vis-' + col.key;
         label.innerText = col.title || col.key;
         label.style.marginLeft = '8px';
         label.style.cursor = 'pointer';
-        
+
         div.appendChild(checkbox);
         div.appendChild(label);
         list.appendChild(div);
     });
-    
+
     modal.style.display = 'block';
 }
 
@@ -1182,41 +2118,41 @@ window.onclick = function(event) {
 function makeTableResizable(tableId) {
     const table = document.getElementById(tableId);
     if (!table) return;
-    
+
     // For KB table, we want to save widths to localStorage
     const isKBTable = tableId === 'kbTable';
     const isLinkTable = tableId === 'linkTable';
-    
+
     const ths = table.querySelectorAll('th');
-    
+
     ths.forEach((th, index) => {
         // Dynamic tables may already use the newer .col-resizer handler.
         // Avoid stacking two mousedown listeners on the same header cell.
         if (th.querySelector('.resizer, .col-resizer')) return;
-        
+
         // Skip checkbox column for resizing if desired
         // if (th.classList.contains('col-checkbox')) return;
-        
+
         const resizer = document.createElement('div');
         resizer.classList.add('resizer');
         th.appendChild(resizer);
-        
+
         let x = 0;
         let w = 0;
         let resizeFrame = 0;
         let latestClientX = 0;
-        
+
         const mouseDownHandler = function(e) {
             e.stopPropagation();
             x = e.clientX;
             const styles = window.getComputedStyle(th);
             w = parseInt(styles.width, 10);
-            
+
             document.addEventListener('mousemove', mouseMoveHandler);
             document.addEventListener('mouseup', mouseUpHandler);
             resizer.classList.add('resizing');
         };
-        
+
         const mouseMoveHandler = function(e) {
             latestClientX = e.clientX;
             if (resizeFrame) return;
@@ -1236,7 +2172,7 @@ function makeTableResizable(tableId) {
                 }
             });
         };
-        
+
         const mouseUpHandler = function() {
             if (resizeFrame) {
                 cancelAnimationFrame(resizeFrame);
@@ -1245,7 +2181,7 @@ function makeTableResizable(tableId) {
             document.removeEventListener('mousemove', mouseMoveHandler);
             document.removeEventListener('mouseup', mouseUpHandler);
             resizer.classList.remove('resizing');
-            
+
             // Save width if it's KB table
             if (isKBTable) {
                 saveKBConfig();
@@ -1255,7 +2191,7 @@ function makeTableResizable(tableId) {
                 saveLinkTableWidths();
             }
         };
-        
+
         resizer.addEventListener('mousedown', mouseDownHandler);
     });
 }
@@ -1315,7 +2251,7 @@ let scoringRunState = {
 function showLogin(show) {
   const loginPanel = document.getElementById('loginPanel');
   const mainContent = document.getElementById('mainContent');
-  
+
   if (loginPanel) {
       if (show) {
           loginPanel.style.display = '';
@@ -1325,7 +2261,7 @@ function showLogin(show) {
           loginPanel.classList.add('d-none');
       }
   }
-  
+
   if (mainContent) {
       if (show) {
           mainContent.style.display = 'none';
@@ -1341,7 +2277,7 @@ let isLoggingIn = false;
 async function handleLogin() {
     if (isLoggingIn) return;
     isLoggingIn = true;
-    
+
     const btn = document.getElementById('loginBtn');
     if (btn) {
         btn.disabled = true;
@@ -1390,82 +2326,92 @@ async function logout() {
 const TAB_META = {
     kbView: {
         title: '知识库管理',
-        group: '核心数据',
+        group: '知识预览 · 看',
         description: '维护 V1 知识库内容，支持搜索、编辑、导出与下游同步。',
     },
     kbCompareView: {
         title: '知识对比',
-        group: '核心数据',
+        group: '知识维护 · 编',
         description: '按 ID 批量导入记录，完成匹配校验、差异摘要与字段详细对比。',
     },
     kbDuplicateCheckView: {
         title: '知识查重',
-        group: '核心数据',
+        group: '知识维护 · 编',
         description: '对拟新增 FAQ 执行语义召回、范围校验、覆盖判断与人工确认。',
     },
     knowledgeGraphView: {
-        title: '知识图谱',
-        group: '核心数据',
+        title: '关系图谱',
+        group: '知识维护 · 编',
         description: '按品类与主题查看知识范围和治理状态，并保留单条关系的精确复核。',
     },
     matrixView: {
-        title: '机型矩阵管理',
-        group: '核心数据',
+        title: '机型矩阵视图',
+        group: '知识预览 · 看',
         description: '管理机型矩阵配置、批量提交变更，并查看提交日志。',
     },
+    productManagerView: {
+        title: '型号库视图',
+        group: '知识预览 · 看',
+        description: '统一维护型号目录、分类映射和新品发布状态。',
+    },
     linkView: {
-        title: '多媒体预览',
-        group: '核心数据',
-        description: '集中维护图片、视频与文件链接，支持筛选、录入与批量导入。',
+        title: '多媒体视图',
+        group: '知识预览 · 看',
+        description: '集中维护图片、视频与文件链接。',
     },
     scoringView: {
-        title: '知识库评分',
-        group: '质量管控',
+        title: '质量评分',
+        group: '更新处理 · 流转',
         description: '执行知识库抽样、评分与导出，统一管理评分配置。',
     },
     governanceView: {
-        title: '知识库治理',
-        group: '质量管控',
+        title: '质量治理',
+        group: '更新处理 · 流转',
         description: '按月份与质量指标治理知识库，查看筛选摘要与召回关联结果。',
     },
     controlCenterView: {
         title: '管控中心',
-        group: '质量管控',
+        group: '平台维护 · 管系统',
         description: '管理质量任务池、原始问题聚合与任务整改闭环。',
     },
     parameterCheckView: {
         title: '参数校对',
-        group: '质量管控',
+        group: '知识维护 · 编',
         description: '以智能参数汇总为基准，校对当前知识库中的参数声明并定位一致与冲突。',
     },
     dataSettingsView: {
         title: '数据设置',
-        group: '工具与映射',
-        description: '集中管理导入、同步、AI 配置、型号库与知识库表格展示设置。',
+        group: '平台维护 · 管系统',
+        description: '集中管理导入、同步、AI 配置与知识库表格展示设置。',
+    },
+    pendingModificationsView: {
+        title: '待上线记录',
+        group: '更新处理 · 流转',
+        description: '查看尚未上线的知识库、矩阵与新品变更，并跟进发布状态。',
     },
     modificationsView: {
         title: '修改记录',
-        group: '日志与归档',
+        group: '更新处理 · 流转',
         description: '查看各模块修改记录、变更明细与提交链路。',
     },
     archiveView: {
         title: '归档管理',
-        group: '日志与归档',
+        group: '更新处理 · 流转',
         description: '管理归档批次，查询历史记录并执行归档操作。',
     },
     activityArchiveView: {
         title: '活动暂存',
-        group: '日志与归档',
+        group: '更新处理 · 流转',
         description: '暂存活动内容并管理已暂存批次的恢复操作。',
     },
     smartMappingView: {
         title: '智能映射',
-        group: '工具与映射',
+        group: '知识维护 · 编',
         description: '按准备、比对、人工决策与提交归档的流程处理智能映射任务。',
     },
     newProductEntryView: {
         title: '新品录入',
-        group: '工具与映射',
+        group: '知识维护 · 编',
         description: '完成复制机型配置、克隆后差异校验、人工确认与矩阵提交。',
     },
 };
@@ -1489,12 +2435,117 @@ function updateWorkbenchHeader(tabId) {
     if (labelEl) labelEl.textContent = `${group} / ${title}`;
 
     document.title = `${title} - K-Matrix 助手`;
+    updateWorkbenchFlowIndicator(group);
 }
 
 let workbenchSidebarHeightRaf = null;
-const WORKBENCH_SIDEBAR_STORAGE_KEY = 'link_viewer_workbench_sidebar_collapsed_v1';
+const WORKBENCH_SIDEBAR_STORAGE_KEY = 'sidebar.collapsed';
+const WORKBENCH_GROUP_STORAGE_KEY = 'sidebar.groups.collapsed';
 let workbenchSidebarCollapsed = false;
 let activeWorkbenchTabButton = null;
+
+const WORKBENCH_GROUP_KEYS = {
+    '知识预览': 'view',
+    '知识维护': 'edit',
+    '更新处理': 'flow',
+    '平台维护': 'sys',
+};
+
+function getWorkbenchGroupKey(groupLabel) {
+    const name = String(groupLabel || '').split('·')[0].trim();
+    return WORKBENCH_GROUP_KEYS[name] || '';
+}
+
+function readWorkbenchCollapsedGroups() {
+    try {
+        const value = JSON.parse(localStorage.getItem(WORKBENCH_GROUP_STORAGE_KEY) || '[]');
+        return Array.isArray(value) ? value.filter(key => ['view', 'edit', 'flow', 'sys'].includes(key)) : [];
+    } catch (_) {
+        return [];
+    }
+}
+
+function persistWorkbenchCollapsedGroups(keys) {
+    try { localStorage.setItem(WORKBENCH_GROUP_STORAGE_KEY, JSON.stringify(keys)); } catch (_) {}
+}
+
+function applyWorkbenchCollapsedGroups(keys = readWorkbenchCollapsedGroups()) {
+    document.querySelectorAll('.workbench-nav-group[data-nav-group]').forEach(group => {
+        const key = group.dataset.navGroup;
+        const collapsed = keys.includes(key);
+        group.classList.toggle('is-collapsed', collapsed);
+        const header = group.querySelector('.workbench-nav-group-title');
+        if (header) header.setAttribute('aria-expanded', String(!collapsed));
+    });
+}
+
+function toggleWorkbenchNavGroup(key, forceCollapsed) {
+    const keys = readWorkbenchCollapsedGroups();
+    const shouldCollapse = typeof forceCollapsed === 'boolean' ? forceCollapsed : !keys.includes(key);
+    const next = shouldCollapse ? [...new Set([...keys, key])] : keys.filter(item => item !== key);
+    persistWorkbenchCollapsedGroups(next);
+    applyWorkbenchCollapsedGroups(next);
+}
+
+function focusWorkbenchNavGroup(key) {
+    const group = document.querySelector(`.workbench-nav-group[data-nav-group="${key}"]`);
+    if (!group) return;
+    toggleWorkbenchNavGroup(key, false);
+    const firstButton = group.querySelector('.workbench-nav-btn');
+    if (firstButton) firstButton.click();
+}
+
+function updateWorkbenchFlowIndicator(groupLabel) {
+    const activeKey = getWorkbenchGroupKey(groupLabel);
+    document.querySelectorAll('.workbench-flow-step').forEach(step => {
+        step.classList.toggle('is-active', step.dataset.flowKey === activeKey);
+    });
+}
+
+function filterWorkbenchNav(query) {
+    const value = String(query || '').trim().toLocaleLowerCase();
+    document.querySelectorAll('.workbench-nav-group').forEach(group => {
+        let visible = 0;
+        group.querySelectorAll('.workbench-nav-btn').forEach(button => {
+            const label = String(button.dataset.navLabel || button.textContent || '').toLocaleLowerCase();
+            const matches = !value || label.includes(value);
+            button.hidden = !matches;
+            if (matches) visible += 1;
+        });
+        group.hidden = !!value && visible === 0;
+        if (value && visible > 0) toggleWorkbenchNavGroup(group.dataset.navGroup, false);
+    });
+}
+
+function initWorkbenchNavEnhancements() {
+    applyWorkbenchCollapsedGroups();
+    document.querySelectorAll('.workbench-nav-btn').forEach(button => {
+        const groupName = button.closest('.workbench-nav-group')?.querySelector('.workbench-nav-group-name')?.textContent?.trim() || '';
+        const label = button.dataset.navLabel || button.textContent.trim();
+        button.dataset.tooltip = `${groupName} · ${label}`;
+        button.setAttribute('aria-label', `${groupName} · ${label}`);
+    });
+    const search = document.getElementById('workbenchNavSearch');
+    if (search && !search.dataset.bound) {
+        search.dataset.bound = '1';
+        search.addEventListener('input', () => filterWorkbenchNav(search.value));
+        search.addEventListener('keydown', event => {
+            if (event.key === 'Escape') { search.value = ''; filterWorkbenchNav(''); search.blur(); }
+            if (event.key === 'Enter') search.closest('.workbench-sidebar-search')?.classList.add('is-focused');
+        });
+        search.addEventListener('focus', () => search.closest('.workbench-sidebar-search')?.classList.add('is-focused'));
+        search.addEventListener('blur', () => search.closest('.workbench-sidebar-search')?.classList.remove('is-focused'));
+    }
+    if (!document.body.dataset.workbenchNavKeyBound) {
+        document.body.dataset.workbenchNavKeyBound = '1';
+        document.addEventListener('keydown', event => {
+            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+                event.preventDefault();
+                if (!workbenchSidebarCollapsed) document.getElementById('workbenchNavSearch')?.focus();
+            }
+        });
+    }
+}
 
 function getWorkbenchSidebarElements() {
     return {
@@ -1567,9 +2618,10 @@ function toggleWorkbenchSidebar(forceCollapsed) {
 function initWorkbenchSidebarState() {
     let collapsed = false;
     try {
-        collapsed = localStorage.getItem(WORKBENCH_SIDEBAR_STORAGE_KEY) === '1';
+        collapsed = localStorage.getItem(WORKBENCH_SIDEBAR_STORAGE_KEY) === '1' || localStorage.getItem('link_viewer_workbench_sidebar_collapsed_v1') === '1';
     } catch (_) {}
     setWorkbenchSidebarCollapsed(collapsed, { persist: false });
+    initWorkbenchNavEnhancements();
 }
 
 function getElementDocumentTop(el) {
@@ -1617,7 +2669,7 @@ function scheduleWorkbenchSidebarHeightUpdate() {
 function normalizeWorkbenchViews() {
     const viewsWrap = document.querySelector('.workbench-views');
     if (!viewsWrap) return;
-    const viewIds = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'modificationsView', 'archiveView', 'activityArchiveView', 'smartMappingView', 'newProductEntryView'];
+    const viewIds = ['kbView', 'kbDuplicateCheckView', 'kbCompareView', 'knowledgeGraphView', 'matrixView', 'productManagerView', 'linkView', 'scoringView', 'governanceView', 'controlCenterView', 'parameterCheckView', 'dataSettingsView', 'pendingModificationsView', 'modificationsView', 'archiveView', 'activityArchiveView', 'smartMappingView', 'newProductEntryView'];
     viewIds.forEach(id => {
         const el = document.getElementById(id);
         if (el && el.parentElement !== viewsWrap) viewsWrap.appendChild(el);
@@ -1630,6 +2682,16 @@ function switchTab(tabId) {
     const activeView = document.getElementById(tabId);
     if (!viewsWrap || !activeView) return;
     const isQualityControlCenter = tabId === 'controlCenterView';
+    const isProductManager = tabId === 'productManagerView';
+    [
+        document.getElementById('mainContent'),
+        document.getElementById('workbenchLayout'),
+        document.querySelector('.workbench-main'),
+        document.querySelector('.workbench-content-panel'),
+        viewsWrap
+    ].forEach(el => {
+        if (el) el.classList.toggle('product-manager-active', isProductManager);
+    });
     [
         document.getElementById('workbenchLayout'),
         document.querySelector('.workbench-main'),
@@ -1638,7 +2700,7 @@ function switchTab(tabId) {
     ].forEach(el => {
         if (el) el.classList.toggle('qc-active-workbench', isQualityControlCenter);
     });
-    
+
     // currentTab can become stale after async initialization or DOM moves.
     // Enforce the actual invariant: exactly one workbench view is visible.
     Array.from(viewsWrap.children).forEach(view => {
@@ -1649,7 +2711,7 @@ function switchTab(tabId) {
     });
     const section = activeView.querySelector('.kb-section');
     if (section) section.classList.remove('d-none');
-    
+
     const activeBtn = document.getElementById('tab-' + tabId);
     document.querySelectorAll('.workbench-nav-btn').forEach(button => {
         const isActive = button === activeBtn;
@@ -1662,20 +2724,23 @@ function switchTab(tabId) {
     } else {
         activeWorkbenchTabButton = null;
     }
-    
+
     currentTab = tabId;
     updateWorkbenchHeader(tabId);
     stopModAutoRefresh();
 
     if (viewsWrap) viewsWrap.scrollTop = 0;
     window.scrollTo({ top: 0, behavior: 'instant' });
-    
+
     // Load data for the tab
     if (tabId === 'matrixView') {
         if (typeof loadMatrixData === 'function') loadMatrixData(matrixCurrentPage || 1, { reuse: true });
+    } else if (tabId === 'productManagerView') {
+        if (typeof loadProductManagerData === 'function') loadProductManagerData();
     } else if (tabId === 'linkView') {
         if (typeof loadLinks === 'function') loadLinks({ reuse: true });
     } else if (tabId === 'kbView') {
+        clearKBCache();
         if (typeof loadKBTable === 'function') loadKBTable(kbCurrentPage || 1);
     } else if (tabId === 'kbCompareView') {
         if (typeof renderKBCompareResults === 'function') renderKBCompareResults();
@@ -1701,6 +2766,8 @@ function switchTab(tabId) {
         if (typeof loadModifications === 'function') loadModifications(1);
         const toggle = document.getElementById('modAutoRefreshToggle');
         setModAutoRefreshEnabled(!!toggle && toggle.checked);
+    } else if (tabId === 'pendingModificationsView') {
+        if (typeof loadPendingModificationRecords === 'function') loadPendingModificationRecords();
     } else if (tabId === 'dataSettingsView') {
         if (typeof updateDataSettingsState === 'function') updateDataSettingsState();
     } else if (tabId === 'archiveView') {
@@ -1711,6 +2778,7 @@ function switchTab(tabId) {
     } else if (tabId === 'smartMappingView') {
         if (typeof smInitSmartMapping === 'function') smInitSmartMapping();
     } else if (tabId === 'newProductEntryView') {
+        if (typeof loadCopySources === 'function') loadCopySources();
         if (typeof loadNewProductEntryBatches === 'function') loadNewProductEntryBatches();
     }
     if (typeof enableAllTableColumnResize === 'function') enableAllTableColumnResize();
@@ -3917,6 +4985,46 @@ function smRestoreCompareCache() {
     return smWorkbenchRows.length > 0;
 }
 
+async function smRestoreLatestPersistedRun() {
+    // The comparison results are also persisted in the runtime SQLite job
+    // table.  Recover them when localStorage is empty (for example after a
+    // browser-origin change or a cleared site cache).
+    try {
+        const res = await api('/smart_mapping/compare/latest');
+        if (!res || !res.success || !res.found || !Array.isArray(res.results) || res.results.length === 0) {
+            return false;
+        }
+        smCompareJobId = res.job_id || null;
+        smFaqItems = [];
+        smKbItems = [];
+        smExcelFileObj = null;
+        smWorkbenchRows = res.results.filter(Boolean).map((r) => ({
+            faq: r.faq || {},
+            match: r.match || {},
+            reason: r.reason || '',
+            decision: r.decision || 'pending',
+            mode: r.mode || 'update',
+            models: Array.isArray(r.models) ? r.models.filter(Boolean) : [],
+            other_info: (r.other_info && typeof r.other_info === 'object') ? r.other_info : {},
+            reasonEdited: !!r.reasonEdited,
+            manualContentEdited: !!r.manualContentEdited,
+            manual_kb_id: r.manual_kb_id,
+            other_info_loaded: !!r.other_info_loaded
+        }));
+        smWorkbenchSelected = new Set();
+        smWorkbenchExpanded = new Set();
+        smWorkbenchOtherInfoOpen = new Set();
+        smWorkbenchFilter = smGetDefaultWorkbenchFilter(smWorkbenchFilter.pageSize || 50);
+        smLastOperationId = null;
+        smSetStatusText('smExcelStatus', `✅ 已从服务器恢复上次智能映射结果（${smWorkbenchRows.length} 条）`);
+        smSetProgress(100, '已从服务器恢复');
+        smSaveCompareCache();
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
 function smClearCompareCache() {
     const keys = smGetCompareCacheKeys();
     keys.forEach((k) => {
@@ -4359,6 +5467,7 @@ async function smInitSmartMapping() {
         if (confirm(msg)) restored = smRestoreCompareCache();
         else smClearCompareCache();
     }
+    if (!restored && !cache) restored = await smRestoreLatestPersistedRun();
     await Promise.all([
         smLoadCatalogAndRenderSelector(),
         smLoadEmbeddingConfig()
@@ -5871,9 +6980,9 @@ function previewUrl(url) {
         if (modal) {
              const contentContainer = modal.querySelector('.modal-content-container') || modal;
              // Check if we can replace content
-             // Since I can't easily change modal HTML structure without seeing it, 
+             // Since I can't easily change modal HTML structure without seeing it,
              // and existing openModal sets modalImg.src
-             // I'll try to use a simple approach: if it's video/youtube, use window.open for now, 
+             // I'll try to use a simple approach: if it's video/youtube, use window.open for now,
              // unless I modify openModal.
              // But the user said "与多媒体预览是联动的", which implies using the preview logic.
              // I'll stick to window.open for non-images for safety, or try to implement a better modal later.
@@ -5885,23 +6994,63 @@ function previewUrl(url) {
     }
 }
 
+async function fetchAllLinkItems() {
+  const items = [];
+  const pageSize = 1000;
+  for (let page = 1; ; page += 1) {
+    // Use the unique ID as a stable order across fetches. Filtering, duplicate
+    // detection and export all operate on this complete shared collection.
+    const res = await api(`/links?page=${page}&pageSize=${pageSize}&sortBy=id&sortDir=asc`);
+    const rows = Array.isArray(res) ? res : res?.data;
+    if (!Array.isArray(rows) || res?.success === false || res?.__meta?.status >= 400) {
+      throw new Error(res?.message || '读取链接失败');
+    }
+    items.push(...rows);
+    const total = Array.isArray(res) ? null : Number(res.total);
+    if (Array.isArray(res) || (Number.isFinite(total) && items.length >= total)) return items;
+    if (!rows.length) throw new Error('链接未完整加载，请重试');
+    if (!Number.isFinite(total) && rows.length < pageSize) return items;
+  }
+}
+
+function setLinkLoadStatus(message, failed = false) {
+  const status = document.getElementById('linkLoadStatus');
+  if (status) {
+    status.hidden = !message;
+    status.classList.toggle('is-error', failed);
+  }
+  const text = document.getElementById('linkLoadStatusText');
+  if (text) text.textContent = message;
+  const retry = document.getElementById('retryLoadLinksBtn');
+  if (retry) retry.hidden = !failed;
+}
+
 async function loadLinks(options = {}) {
+  if (linksLoadPromise) return linksLoadPromise;
   if (options.reuse && linksLoaded) {
     linkTableWidths = loadLinkTableWidths();
     renderLinkTable();
     return;
   }
-  try {
-    const [res] = await Promise.all([
-        api('/links'),
-        fetchGlobalTags()
-    ]);
-    // Ensure we handle both array (legacy) and object response
-    currentLinks = Array.isArray(res) ? res : (res.data || []);
-    linksLoaded = true;
-    linkTableWidths = loadLinkTableWidths();
-    renderLinkTable();
-  } catch {}
+  linksLoadPromise = (async () => {
+    setLinkLoadStatus('正在加载全部链接…');
+    try {
+      const [items] = await Promise.all([fetchAllLinkItems(), fetchGlobalTags()]);
+      currentLinks = items;
+      const ids = new Set(items.map(item => item.id));
+      selectedIds.forEach(id => { if (!ids.has(id)) selectedIds.delete(id); });
+      linksLoaded = true;
+      linkTableWidths = loadLinkTableWidths();
+      setLinkLoadStatus('');
+      renderLinkTable();
+    } catch (error) {
+      linksLoaded = false;
+      setLinkLoadStatus(`加载失败：${error.message}${currentLinks.length ? '。当前保留上次加载的列表。' : ''}`, true);
+    } finally {
+      linksLoadPromise = null;
+    }
+  })();
+  return linksLoadPromise;
 }
 
 async function addLink(url, tags) {
@@ -6144,7 +7293,7 @@ async function deleteLink(id) {
 async function batchDeleteLinks() {
   if (selectedIds.size === 0) return;
   if (!confirm(`确定删除选中的 ${selectedIds.size} 项内容吗？`)) return;
-  
+
   await api('/links/delete_batch', 'POST', { ids: Array.from(selectedIds) });
   selectedIds.clear();
   await loadLinks();
@@ -6182,14 +7331,14 @@ async function syncKBPreview() {
 
 async function batchCopyPreviews() {
     if (selectedIds.size === 0) return;
-    
+
     // Find selected items
     const items = currentLinks.filter(i => selectedIds.has(i.id));
     if (items.length === 0) return;
 
     // Build HTML table for clipboard
     let html = '<table border="1"><thead><tr><th>预览</th><th>链接信息</th><th>链接类型</th><th>KB ID</th><th>标签</th></tr></thead><tbody>';
-    
+
     items.forEach(item => {
       const kbId = item.kb_id && String(item.kb_id).trim() ? String(item.kb_id).trim() : '无ID';
       const typeLabel = _getLinkSourceLabel(item);
@@ -6207,18 +7356,18 @@ async function batchCopyPreviews() {
       const linkCell = safeUrl ? `<a href="${escapeHtml(safeUrl)}">${displayUrl}</a>` : displayUrl;
       html += `</td><td>${linkCell}</td><td>${escapeHtml(typeLabel)}</td><td>${escapeHtml(kbId)}</td><td>${escapeHtml(tags)}</td></tr>`;
     });
-    
+
     html += '</tbody></table>';
-    
+
     try {
       const blobHtml = new Blob([html], { type: 'text/html' });
       const blobText = new Blob([items.map(i => `${_getLinkSourceLabel(i)}\t${i.url || ''}`).join('\n')], { type: 'text/plain' });
-      
-      const data = [new ClipboardItem({ 
+
+      const data = [new ClipboardItem({
         'text/html': blobHtml,
-        'text/plain': blobText 
+        'text/plain': blobText
       })];
-      
+
       await navigator.clipboard.write(data);
       alert(`已复制 ${items.length} 项预览内容！\n现在可以在 Excel/飞书/Word 中直接粘贴。`);
     } catch (err) {
@@ -6231,13 +7380,13 @@ function updateBatchUI() {
   const btn = document.getElementById('batchDeleteBtn');
   const copyBtn = document.getElementById('batchCopyBtn');
   const selectAll = document.getElementById('selectAll');
-  
+
   if (btn) {
       if (selectedIds.size > 0) {
         btn.classList.remove('d-none');
         btn.style.display = 'inline-block';
         btn.textContent = `🗑️ 批量删除 (${selectedIds.size})`;
-        
+
         if (copyBtn) {
             copyBtn.classList.remove('d-none');
             copyBtn.style.display = 'inline-block';
@@ -6246,19 +7395,19 @@ function updateBatchUI() {
       } else {
         btn.classList.add('d-none');
         btn.style.display = 'none';
-        
+
         if (copyBtn) {
             copyBtn.classList.add('d-none');
             copyBtn.style.display = 'none';
         }
       }
   }
-  
+
   if (selectAll) {
       const pageItems = getLinkPageItems();
       const visibleIds = pageItems.map(i => i.id);
       const selectedVisibleCount = visibleIds.filter(id => selectedIds.has(id)).length;
-      
+
       if (visibleIds.length > 0 && selectedVisibleCount === visibleIds.length) {
         selectAll.checked = true;
         selectAll.indeterminate = false;
@@ -6278,11 +7427,11 @@ function openModal(url) {
   const modalImg = document.getElementById('modalImg');
   const modalVideo = document.getElementById('modalVideo');
   const downloadBtn = document.getElementById('downloadBtn');
-  
+
   if (modal) {
       modal.style.display = 'block';
       const type = detectType(url);
-      
+
       if (type === 'video') {
           if (modalVideo) {
               modalVideo.src = url;
@@ -6302,7 +7451,7 @@ function openModal(url) {
               modalVideo.classList.add('d-none');
           }
       }
-      
+
       if (downloadBtn) downloadBtn.onclick = () => downloadImage(url);
   }
 }
@@ -6550,7 +7699,7 @@ function renderLinkRow(item) {
   tdPreview.className = 'preview-cell';
   const box = document.createElement('div');
   box.className = 'preview-box';
-  
+
   const safePreviewUrl = normalizeSafeHttpUrl(item.url);
   if (item.type === 'image' && safePreviewUrl) {
     const img = document.createElement('img');
@@ -6578,7 +7727,7 @@ function renderLinkRow(item) {
     container.style.justifyContent = 'center';
     container.style.cursor = 'pointer';
     container.style.backgroundColor = '#000';
-    
+
     // Poster/Placeholder
     const poster = document.createElement('img');
     poster.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM5OTkiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cG9seWdvbiBwb2ludHM9IjUgMyAxOSAxMiA1IDIxIDUgMyI+PC9wb2x5Z29uPjwvc3ZnPg==';
@@ -6610,7 +7759,7 @@ function renderLinkRow(item) {
       event.preventDefault();
       container.click();
     });
-    
+
     box.appendChild(container);
   } else if (item.type === 'youtube' && safePreviewUrl) {
     const f = document.createElement('iframe');
@@ -6627,9 +7776,9 @@ function renderLinkRow(item) {
   tdKbId.className = 'id-cell';
   tdKbId.style.maxWidth = '200px'; // Increased slightly
   // Removed overflow:hidden and text-overflow:ellipsis to allow full display
-  tdKbId.style.whiteSpace = 'normal'; 
+  tdKbId.style.whiteSpace = 'normal';
   tdKbId.title = item.kb_id || '';
-  
+
   if (item.kb_id) {
       appendSearchableKbIds(tdKbId, item.kb_id);
   } else {
@@ -6640,7 +7789,7 @@ function renderLinkRow(item) {
   // Info
   const tdLink = document.createElement('td');
   tdLink.className = 'link-cell';
-  
+
   const createdAtSeconds = parseCreatedAtSeconds(item);
   const createdAtText = createdAtSeconds ? new Date(createdAtSeconds * 1000).toLocaleString() : '-';
   appendKbUrlRow(tdLink, item.url);
@@ -6677,7 +7826,7 @@ function renderLinkRow(item) {
     el.appendChild(removeTag);
     tagList.appendChild(el);
   });
-  
+
   const addRow = document.createElement('div');
   addRow.className = 'add-tag-row';
   const inp = document.createElement('input');
@@ -6693,10 +7842,10 @@ function renderLinkRow(item) {
     updateTags(item.id, unique);
   });
   addRow.append(inp, btn);
-  
+
   // Setup auto-complete for row input
   setupRowTagInput(inp, addRow, (item.tags || []).filter(t => !_isSysLinkTag(t)));
-  
+
   tdTags.append(tagList, addRow);
   tr.appendChild(tdTags);
 
@@ -6715,17 +7864,40 @@ function renderLinkRow(item) {
 }
 
 function changeLinkPage(offset) {
-    linkCurrentPage += offset;
-    if (linkCurrentPage < 1) linkCurrentPage = 1;
+    linkCurrentPage = Math.min(getLinkPageCount(), Math.max(1, linkCurrentPage + offset));
     renderLinkTable();
+    resetLinkTableScroll();
+}
+
+function getLinkPageCount() {
+  return Math.max(1, Math.ceil(getFilteredLinkItems().length / linkPageSize));
+}
+
+function resetLinkTableScroll() {
+  const table = document.querySelector('#allLinksView .link-table-container');
+  if (table) table.scrollTop = 0;
+}
+
+function jumpLinkPage(value = document.getElementById('linkPageJumpInput')?.value) {
+  const page = Number(value);
+  if (!Number.isInteger(page) || page < 1) {
+    const input = document.getElementById('linkPageJumpInput');
+    if (input) input.value = String(linkCurrentPage);
+    return;
+  }
+  linkCurrentPage = Math.min(page, getLinkPageCount());
+  renderLinkTable();
+  resetLinkTableScroll();
 }
 
 function changeLinkPageSize() {
     const sel = document.getElementById('linkPageSizeSelect');
     if (sel) {
-        linkPageSize = parseInt(sel.value);
+        const size = Number(sel.value);
+        linkPageSize = [10, 20, 50, 100].includes(size) ? size : 20;
         linkCurrentPage = 1;
         renderLinkTable();
+        resetLinkTableScroll();
     }
 }
 
@@ -6940,14 +8112,35 @@ function renderLinkTable() {
   const tbody = document.getElementById('tableBody');
   if (!tbody) return;
   tbody.innerHTML = '';
-  
+
+  const filterKey = JSON.stringify([
+    ...['linkSearchKBID', 'linkSearchURL', 'linkFilterStatus', 'linkFilterType'].map(id => document.getElementById(id)?.value || ''),
+    activeFilterTags, document.querySelector('input[name="tagFilterMode"]:checked')?.value || 'any', linkShowDuplicateUrlsOnly
+  ]);
+  if (linkFilterKey !== filterKey) {
+    linkCurrentPage = 1;
+    linkFilterKey = filterKey;
+    resetLinkTableScroll();
+  }
   const items = getFilteredLinkItems();
   applyLinkTableWidths();
 
   // Update Pagination Info
   const total = items.length;
+  const pageCount = Math.max(1, Math.ceil(total / linkPageSize));
+  linkCurrentPage = Math.min(Math.max(1, linkCurrentPage), pageCount);
   const pageInfo = document.getElementById('linkPageInfo');
-  if (pageInfo) pageInfo.textContent = `共 ${total} 条`;
+  if (pageInfo) pageInfo.textContent = total
+    ? `共 ${total} 条 · 第 ${linkCurrentPage} / ${pageCount} 页 · 显示 ${(linkCurrentPage - 1) * linkPageSize + 1}–${Math.min(linkCurrentPage * linkPageSize, total)} 条`
+    : '共 0 条 · 第 0 / 0 页';
+  const jumpInput = document.getElementById('linkPageJumpInput');
+  if (jumpInput) {
+    jumpInput.max = String(pageCount);
+    jumpInput.value = String(linkCurrentPage);
+    jumpInput.disabled = !total;
+  }
+  const jumpBtn = document.getElementById('linkPageJumpBtn');
+  if (jumpBtn) jumpBtn.disabled = !total;
 
   // Pagination Logic
   const start = (linkCurrentPage - 1) * linkPageSize;
@@ -6959,6 +8152,10 @@ function renderLinkTable() {
   const nextBtn = document.getElementById('nextLinkPageBtn');
   if (prevBtn) prevBtn.disabled = linkCurrentPage <= 1;
   if (nextBtn) nextBtn.disabled = end >= total;
+  const firstBtn = document.getElementById('firstLinkPageBtn');
+  const lastBtn = document.getElementById('lastLinkPageBtn');
+  if (firstBtn) firstBtn.disabled = linkCurrentPage <= 1;
+  if (lastBtn) lastBtn.disabled = end >= total;
 
   if (!pageItems.length) {
     tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;color:#666">暂无数据</td></tr>';
@@ -6976,7 +8173,7 @@ function renderLinkTable() {
       });
   }
   updateLinkTagSelectorSummary();
-  
+
   updateBatchUI();
   makeTableResizable('linkTable');
   applyLinkTableWidths();
@@ -7393,7 +8590,7 @@ async function loadGovMonths(preferredMonth = '', options = {}) {
                 govMonths.push(preferredMonth);
             }
             govMonths = Array.from(new Set(govMonths)).sort((a, b) => b.localeCompare(a));
-            
+
             if (startSelect) {
                 _govPopulateMonthSelect(startSelect, govMonths, '起始月份');
                 if (preferredMonth && govMonths.includes(preferredMonth)) {
@@ -7404,7 +8601,7 @@ async function loadGovMonths(preferredMonth = '', options = {}) {
                     startSelect.value = govMonths[0];
                 }
             }
-            
+
             if (endSelect) {
                 _govPopulateMonthSelect(endSelect, govMonths, '结束月份');
                 if (preferredMonth) {
@@ -7435,7 +8632,7 @@ async function loadGovMonths(preferredMonth = '', options = {}) {
                     dashboardEndSelect.value = savedEnd;
                 }
             }
-            
+
             if (importMonth) {
                 // Populate import month selector (maybe last month by default?)
                 if (!importMonth.value) {
@@ -7446,7 +8643,7 @@ async function loadGovMonths(preferredMonth = '', options = {}) {
                     importMonth.value = `${y}-${m}`;
                 }
             }
-            
+
             if (govMonths.length > 0) {
                 await loadGovernanceData(options);
                 await loadGovDashboardData(options);
@@ -7462,7 +8659,7 @@ async function loadGovMonths(preferredMonth = '', options = {}) {
 async function loadGovernanceData(options = {}) {
     const startMonth = document.getElementById('govStartMonth')?.value;
     const endMonth = document.getElementById('govEndMonth')?.value;
-    
+
     if (!startMonth) {
         if (govMonths.length === 0) await loadGovMonths();
         return;
@@ -7470,7 +8667,7 @@ async function loadGovernanceData(options = {}) {
 
     const tbody = document.getElementById('govTableBody');
     if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="empty-message">加载中...</td></tr>';
-    
+
     try {
         const url = `/governance/data?month=${startMonth}&end_month=${endMonth || ''}`;
         if (options.reuse && govLastDataKey === url && Array.isArray(govData)) {
@@ -7480,7 +8677,7 @@ async function loadGovernanceData(options = {}) {
             return;
         }
         const res = await api(url);
-        
+
         if (res.success) {
             // Process data: Keep raw data for dynamic rendering
             currentGovMonths = res.months || [];
@@ -7886,13 +9083,13 @@ function renderGovTable() {
     const tbody = document.getElementById('govTableBody');
     const thead = document.getElementById('govThead');
     if (!tbody || !thead) return;
-    
+
     // 1. Rebuild Headers dynamically
     thead.innerHTML = '';
-    
+
     // Row 1
     const tr1 = document.createElement('tr');
-    
+
     // Selection plus fixed columns (WikiID, Question, AI Score)
     const selectTh = document.createElement('th');
     selectTh.rowSpan = 2;
@@ -7921,7 +9118,7 @@ function renderGovTable() {
         }
         tr1.appendChild(th);
     });
-    
+
     // Dynamic Month Columns
     currentGovMonths.forEach(month => {
         const th = document.createElement('th');
@@ -7940,7 +9137,7 @@ function renderGovTable() {
     thWeighted.style.backgroundColor = '#e0f2fe';
     thWeighted.innerHTML = '<b>大盘周期加权汇总</b>';
     tr1.appendChild(thWeighted);
-    
+
     // Status Column
     const thStatus = document.createElement('th');
     thStatus.rowSpan = 2;
@@ -7949,9 +9146,9 @@ function renderGovTable() {
     thStatus.innerHTML = _govSortableHeaderHtml('状态', 'status');
     thStatus.className = 'col-status';
     tr1.appendChild(thStatus);
-    
+
     thead.appendChild(tr1);
-    
+
     // Row 2 (Sub-columns)
     const tr2 = document.createElement('tr');
     currentGovMonths.forEach(month => {
@@ -7986,14 +9183,14 @@ function renderGovTable() {
 
     // 2. Render Rows
     tbody.innerHTML = '';
-    
+
     const data = _getFilteredGovData();
-    
+
     // Pagination
     const start = (govCurrentPage - 1) * govPageSize;
     const end = start + govPageSize;
     const pageData = data.slice(start, end);
-    
+
     if (pageData.length === 0) {
          // Calculate colspan: 3 (fixed) + months * 5 + 5 (weighted summary) + 1 (status)
          const totalCols = 3 + (currentGovMonths.length * 5) + 5 + 1;
@@ -8003,20 +9200,20 @@ function renderGovTable() {
          document.getElementById('nextGovPageBtn').disabled = true;
          return;
     }
-    
+
     pageData.forEach(item => {
         const tr = document.createElement('tr');
-        
+
         const id = String(item.id || '');
         const selected = selectedGovRows.has(id);
         tr.innerHTML += `<td class="text-center"><input type="checkbox" data-gov-id="${escapeHtml(id)}" aria-label="选择 ${escapeHtml(id)}" ${selected ? 'checked' : ''}></td>`;
 
         // ID
         tr.innerHTML += `<td>${escapeHtml(id)}</td>`;
-        
+
         // Question
         tr.innerHTML += `<td class="gov-question-cell" title="${escapeHtml(item.question)}">${escapeHtml(item.question)}</td>`;
-        
+
         // Score
         const score = item.ai_score;
         let scoreClass = 'score-na';
@@ -8024,21 +9221,21 @@ function renderGovTable() {
         else if (score >= 60) scoreClass = 'score-medium';
         else if (score > 0) scoreClass = 'score-low';
         tr.innerHTML += `<td><span class="score-badge ${scoreClass}">${score || '-'}</span></td>`;
-        
+
         // Monthly Data
         currentGovMonths.forEach(month => {
             const mData = item.monthly_data && item.monthly_data[month] ? item.monthly_data[month] : { recall_count: 0, valid_recall_count: 0 };
             const recall = mData.recall_count || 0;
             const valid = mData.valid_recall_count || 0;
-            
+
             // Ratios need total for that month
             const monthTotalRecall = currentGovSummary[month]?.total_recall || 0;
             const monthTotalValid = currentGovSummary[month]?.total_valid || 0;
-            
+
             const recallRatio = monthTotalRecall > 0 ? ((recall / monthTotalRecall) * 100).toFixed(2) + '%' : '0.00%';
             const validRecallRatio = monthTotalValid > 0 ? ((valid / monthTotalValid) * 100).toFixed(2) + '%' : '0.00%';
             const validRate = recall > 0 ? ((valid / recall) * 100).toFixed(2) + '%' : '0.00%';
-            
+
             tr.innerHTML += `
                 <td class="text-center">${recall}</td>
                 <td class="text-center">${valid}</td>
@@ -8052,11 +9249,11 @@ function renderGovTable() {
         _govGetWeightedMetricSpecs().forEach(spec => {
             tr.innerHTML += `<td class="text-center gov-weighted-cell">${_govFormatWeightedMetric(weightedMetrics?.[spec.metric], spec.type)}</td>`;
         });
-        
+
         // Status
         const statusClass = item.status === '使用中' ? 'status-active' : 'status-deleted';
         tr.innerHTML += `<td><span class="status-badge ${statusClass}">${item.status}</span></td>`;
-        
+
         tbody.appendChild(tr);
     });
 
@@ -8307,24 +9504,24 @@ async function deleteGovernanceData() {
 async function confirmGovImport() {
     const month = document.getElementById('govImportMonth').value;
     const fileInput = document.getElementById('govImportFileModal');
-    
+
     if (!month) { alert('请选择月份'); return; }
     if (!fileInput.files.length) { alert('请选择文件'); return; }
-    
+
     const formData = new FormData();
     formData.append('month', month);
     formData.append('file', fileInput.files[0]);
-    
+
     const btn = document.getElementById('confirmImportBtn');
     btn.disabled = true;
     btn.innerText = '导入中...';
-    
+
     try {
         const res = await fetch('/api/governance/import', {
             method: 'POST',
             body: formData
         }).then(r => r.json());
-        
+
         if (res.success) {
             alert(`导入成功！共导入 ${res.count} 条数据`);
             closeGovImportModal();
@@ -10203,7 +11400,7 @@ window.setModAutoRefreshEnabled = setModAutoRefreshEnabled;
 async function loadModifications(page = 1) {
     const tbody = document.getElementById('modTableBody');
     if (tbody) tbody.innerHTML = '<tr><td colspan="20" class="empty-message">加载中...</td></tr>';
-    
+
     // 读取“仅显示重复 question_wiki_id”开关，若开启则一次性拉取更多数据用于前端判重
     const dupToggle = document.getElementById('modDupOnlyToggle');
     modDupOnly = !!(dupToggle && dupToggle.checked);
@@ -10218,7 +11415,7 @@ async function loadModifications(page = 1) {
     const operation = document.getElementById('modOpSelect')?.value || '';
     const startTime = document.getElementById('modStartTime')?.value || '';
     const endTime = document.getElementById('modEndTime')?.value || '';
-    
+
     const params = new URLSearchParams({
         page: effectivePage,
         pageSize: effectivePageSize,
@@ -10233,7 +11430,7 @@ async function loadModifications(page = 1) {
         sort_by: modSortBy || '',
         sort_dir: modSortDir || ''
     });
-    
+
     try {
         const res = await api(`/kb/modifications?${params.toString()}`);
         if (res.success) {
@@ -10368,7 +11565,7 @@ function renderModificationsTable() {
     const tbody = document.getElementById('modTableBody');
     if (!tbody) return;
     tbody.innerHTML = '';
-    
+
     const dupToggle = document.getElementById('modDupOnlyToggle');
     modDupOnly = !!(dupToggle && dupToggle.checked);
     const { rows, duplicateIds } = getRenderedModificationsRows();
@@ -10381,7 +11578,7 @@ function renderModificationsTable() {
         updateModSelectAllCheckbox();
         return;
     }
-    
+
     rows.forEach((item, idx) => {
         const tr = document.createElement('tr');
         const rowKey = _getModRowKey(item, idx);
@@ -10389,7 +11586,7 @@ function renderModificationsTable() {
         const wikiId = String(item.question_wiki_id || item.kb_id || '').trim();
         const isDuplicate = wikiId && duplicateIds.has(wikiId);
         if (isDuplicate) tr.classList.add('mod-row-duplicate');
-        
+
         const tdCheck = document.createElement('td');
         tdCheck.style.textAlign = 'center';
         const cb = document.createElement('input');
@@ -10399,13 +11596,13 @@ function renderModificationsTable() {
         cb.onchange = () => toggleModRowSelection(rowKey, cb.checked);
         tdCheck.appendChild(cb);
         tr.appendChild(tdCheck);
-        
+
         const changeType = item.change_type || item.operation || item.modification_type || 'edit';
         const opLabel = changeType === 'create' ? '增加' : (changeType === 'delete' ? '删除' : '修改');
         let badgeClass = 'badge-warning';
         if (changeType === 'create') badgeClass = 'badge-success';
         else if (changeType === 'delete') badgeClass = 'badge-danger';
-        
+
         const tdOp = document.createElement('td');
         const actionKind = item.action_kind || '';
         const actionLabel = actionKind === 'association' ? '型号关联' : (actionKind === 'model_scope_edit' ? '适用型号' : (actionKind === 'content_edit' ? '内容修改' : opLabel));
@@ -10578,10 +11775,10 @@ function renderModificationsTable() {
             </div>
         `;
         tr.appendChild(tdActions);
-        
+
         tbody.appendChild(tr);
     });
-    
+
     const selectAllEl = document.getElementById('modSelectAll');
     if (selectAllEl && !selectAllEl.dataset.bound) {
         selectAllEl.dataset.bound = '1';
@@ -10614,7 +11811,7 @@ function initModSortHeaders() {
     });
 }
 
-function _formatDetailsKV(obj, changedFields, diffMap, side) {
+function _formatDetailsKV(obj, changedFields, diffMap, side, associationChange = false) {
     const fields = [
         'question', 'answer', 'products', 'question_type', 'answer_type', 'error_list',
         'image_urls', 'video_urls', 'file_urls', 'link_type', 'link_url',
@@ -10623,7 +11820,7 @@ function _formatDetailsKV(obj, changedFields, diffMap, side) {
     const labelMap = {
         question: '问题',
         answer: '答案',
-        products: '机型',
+        products: associationChange ? '关联型号' : '机型',
         question_type: '问题类型',
         answer_type: '答案类型',
         error_list: '错误列表',
@@ -10708,6 +11905,43 @@ function _formatDetailsKV(obj, changedFields, diffMap, side) {
     return wrap;
 }
 
+function parseModDetailsObject(value) {
+    if (typeof value !== 'string') return value && typeof value === 'object' ? value : {};
+    try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function getModDetailsModelLabel(item = {}) {
+    const meta = parseModDetailsObject(item.change_meta);
+    const after = parseModDetailsObject(item.after || meta.after);
+    return String(item.model_id || item.target_model || item.products
+        || meta.model_id || meta.target_model
+        || after.product_name || after.products || '').trim() || '-';
+}
+
+function getModAssociationSummary(item = {}) {
+    const meta = parseModDetailsObject(item.change_meta);
+    const before = parseModDetailsObject(item.before || meta.before);
+    const after = parseModDetailsObject(item.after || meta.after);
+    const isAssociation = item.action_kind === 'association' || meta.action_kind === 'association'
+        || Object.prototype.hasOwnProperty.call(before, 'configured')
+        || Object.prototype.hasOwnProperty.call(after, 'configured');
+    if (!isAssociation) return '';
+    const values = value => (Array.isArray(value) ? value : String(value || '').split(/[,，\n\r]+/))
+        .map(model => String(model || '').trim()).filter(Boolean);
+    const beforeModels = values(before.products || before.product_name);
+    const afterModels = values(after.products || after.product_name);
+    const added = afterModels.filter(model => !beforeModels.includes(model));
+    const removed = beforeModels.filter(model => !afterModels.includes(model));
+    if (added.length && !removed.length) return `新增关联型号：${added.join('、')}`;
+    if (removed.length && !added.length) return `移除关联型号：${removed.join('、')}`;
+    return '关联型号调整';
+}
+
 function _openModDetailsByItem(item) {
     if (!item) return;
     const modal = document.getElementById('modDetailsModal');
@@ -10719,8 +11953,11 @@ function _openModDetailsByItem(item) {
 
     const wikiId = item.question_wiki_id || item.kb_id || '-';
     const source = item.source_module || item.source || '-';
+    const modelId = getModDetailsModelLabel(item);
+    const associationSummary = getModAssociationSummary(item);
     const timeText = item.modification_time ? new Date(item.modification_time).toLocaleString() : '-';
-    metaEl.textContent = `问题编号: ${wikiId} ｜ 来源: ${source} ｜ 修改时间: ${timeText}`;
+    const modelLabel = associationSummary ? '本次关联型号' : '型号';
+    metaEl.textContent = `问题编号: ${wikiId} ｜ ${modelLabel}: ${modelId} ｜ 来源: ${source} ｜ 修改时间: ${timeText}`;
 
     const rawChangedFields = item.changed_fields || item.changedFields || [];
     const beforeObj = item.before || {};
@@ -10773,8 +12010,8 @@ function _openModDetailsByItem(item) {
             link_type: '跳转链接类型',
             link_url: '跳转链接（url/key）'
         };
-        const changedText = changedFields.map(k => labelMap[k] || k).join(', ');
-        changedEl.innerHTML = `<span style="color:#666;">变更字段：</span><span class="mod-value-changed">${changedText}</span>`;
+        const changedText = associationSummary || changedFields.map(k => labelMap[k] || k).join(', ');
+        changedEl.innerHTML = `<span style="color:#666;">${associationSummary ? '变更内容：' : '变更字段：'}</span><span class="mod-value-changed">${escapeHtml(changedText)}</span>`;
     } else {
         changedEl.innerHTML = `<span style="color:#666;">变更字段：</span>-`;
     }
@@ -10792,11 +12029,11 @@ function _openModDetailsByItem(item) {
 
     if (beforeEl) {
         beforeEl.innerHTML = '';
-        beforeEl.appendChild(_formatDetailsKV(beforeObj, changedFields, diffMap, 'before'));
+        beforeEl.appendChild(_formatDetailsKV(beforeObj, changedFields, diffMap, 'before', Boolean(associationSummary)));
     }
     if (afterEl) {
         afterEl.innerHTML = '';
-        afterEl.appendChild(_formatDetailsKV(afterObj, changedFields, diffMap, 'after'));
+        afterEl.appendChild(_formatDetailsKV(afterObj, changedFields, diffMap, 'after', Boolean(associationSummary)));
     }
 
     modal.style.display = 'block';
@@ -10819,7 +12056,7 @@ function updateModPagination() {
     const prev = document.getElementById('prevModPageBtn');
     const next = document.getElementById('nextModPageBtn');
     const totalPages = modDupOnly ? 1 : Math.max(1, Math.ceil((modTotal || 0) / Math.max(modPageSize || 1, 1)));
-    
+
     if (modDupOnly) {
         if (prev) prev.disabled = true;
         if (next) next.disabled = true;
@@ -11522,46 +12759,53 @@ function parseSmartListValue(value, options = {}) {
     const splitOnAsciiComma = options.splitOnAsciiComma !== undefined ? !!options.splitOnAsciiComma : true;
     const splitOnChineseCommaWhenUrlList = !!options.splitOnChineseCommaWhenUrlList;
     const isUrlList = !!options.isUrlList;
-    
+
     const toStr = (v) => (v === null || v === undefined) ? '' : String(v);
-    
+
     if (Array.isArray(value)) {
         return value.map(v => toStr(v).trim()).filter(Boolean);
     }
-    
+
     if (typeof value === 'string') {
         const raw = value.trim();
         if (!raw || raw === '[]' || raw === '{}' || raw.toLowerCase() === 'null') return [];
-        
+
         if ((raw.startsWith('[') && raw.endsWith(']')) || (raw.startsWith('{') && raw.endsWith('}'))) {
             try {
                 const parsed = JSON.parse(raw);
                 if (Array.isArray(parsed)) return parsed.map(v => toStr(v).trim()).filter(Boolean);
             } catch { }
         }
-        
+
         const hasNewline = /\r?\n/.test(raw);
         if (hasNewline) {
             return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
         }
-        
+
         if (splitOnAsciiComma && raw.includes(',')) {
             return raw.split(',').map(s => s.trim()).filter(Boolean);
         }
-        
+
         if (splitOnChineseCommaWhenUrlList && isUrlList && raw.includes('，')) {
             const roughTokens = raw.split('，').map(s => s.trim()).filter(Boolean);
             const urlLikeCount = roughTokens.filter(t => /^https?:\/\//i.test(t) || /^www\./i.test(t)).length;
             if (urlLikeCount >= 2) return roughTokens;
         }
-        
+
         return [raw];
     }
-    
+
     return [];
 }
 
 async function loadKBTable(page = 1) {
+    try {
+        await refreshKBMappingTagsConfig();
+    } catch (error) {
+        kbMappingTagsConfig = null;
+        clearKBCache();
+        console.error('Failed to load mapping tags:', error);
+    }
     const tableInputs = document.querySelectorAll('input[name="kbTable"]');
     let table = 'knowledge_base_v1';
     tableInputs.forEach(input => { if (input.checked) table = input.value; });
@@ -11574,11 +12818,11 @@ async function loadKBTable(page = 1) {
     const url = document.getElementById('urlSearch') ? document.getElementById('urlSearch').value.trim() : '';
     const localDraftFilter = document.getElementById('kbDraftStatusFilter') ? document.getElementById('kbDraftStatusFilter').value : '';
     const selectedTagNames = Array.from(kbSelectedTags).map(t => String(t ?? '').trim()).filter(Boolean);
-    const tagMode = document.querySelector('input[name="kbTagFilterMode"]:checked')?.value || 'OR';
-    
+    const tagMode = document.querySelector('input[name="kbTagFilterMode"]')?.value || 'OR';
+
     const statusChips = document.querySelectorAll('#reviewStatusChips .tag-chip.active');
     const statuses = Array.from(statusChips).map(chip => chip.dataset.value);
-    
+
     const sizeSelect = document.getElementById('kbPageSizeSelect');
     if (sizeSelect) kbPageSize = parseInt(sizeSelect.value);
 
@@ -11591,7 +12835,7 @@ async function loadKBTable(page = 1) {
         params.append('sortBy', kbSortBy);
         params.append('sortDir', kbSortDir);
     }
-    
+
     if (kbShowSelectedOnly) {
         params.append('ids', Array.from(selectedKBRows).join(','));
     } else {
@@ -11607,12 +12851,14 @@ async function loadKBTable(page = 1) {
         params.append('tagNames', selectedTagNames.join(','));
         params.append('tagMode', tagMode);
     }
-    
+    const mappingCategory = document.getElementById('kbMappingTagFilter')?.value || '';
+    if (mappingCategory) params.append('mappingCategory', mappingCategory);
+
     if (!kbShowSelectedOnly) {
         if (statuses.length > 0) {
             params.append('review_status', statuses.join(','));
         }
-        
+
         if (kbSelectedProductCategories.size > 0) {
             params.append('product_categories', Array.from(kbSelectedProductCategories).join(','));
         }
@@ -11620,17 +12866,17 @@ async function loadKBTable(page = 1) {
 
     const tbody = document.getElementById('kbTableBody');
     if (!tbody) return;
-    
+
     // 尝试从缓存获取数据
     const cacheKey = getCacheKey(page, params);
     const cachedData = getFromCache(cacheKey);
-    
+
     if (cachedData) {
         console.log(`✓ 使用缓存数据（第 ${page} 页）`);
         // 使用缓存数据，跳过网络请求
         let data = [];
         let debugSimilar = null;
-        
+
         if (cachedData.success && cachedData.data) {
             data = cachedData.data;
             kbTotal = cachedData.total || 0;
@@ -11639,36 +12885,36 @@ async function loadKBTable(page = 1) {
             data = cachedData;
             kbTotal = cachedData.length;
         }
-        
+
         // Local-only filter
         if (localDraftFilter) {
             data = data.filter(item => __kbEditMatchLocalDraftFilter(item, localDraftFilter));
             kbTotal = data.length;
         }
-        
+
         currentKBData = data;
         kbCurrentPage = page;
-        
+
         renderKBTable();
         updateKBPagination();
         updateKBPreviewSelectedButton();
-        
+
         // 预加载下一页
         prefetchKBNextPage(page, params);
-        
+
         return;
     }
-    
+
     tbody.innerHTML = '<tr><td colspan="100" class="empty-message">加载中...</td></tr>';
 
     try {
         const res = await api(`/kb/data?${params.toString()}`);
-        
+
         if (res.error) {
              tbody.innerHTML = `<tr><td colspan="100" class="error-message">加载失败: ${res.error}</td></tr>`;
              return;
         }
-        
+
         let data = [];
         let debugSimilar = null;
         if (res.success && res.data) {
@@ -11690,7 +12936,7 @@ async function loadKBTable(page = 1) {
         }
 
         // If similar-question search returns empty, do not show debug alerts in production
-        /* 
+        /*
         try {
             if (similarQuestion && (!data || data.length === 0)) {
                 const dbg = debugSimilar;
@@ -11724,20 +12970,20 @@ async function loadKBTable(page = 1) {
             // ignore UI debug failures
         }
         */
-        
+
         currentKBData = data;
         kbCurrentPage = page;
-        
+
         renderKBTable();
         updateKBPagination();
         updateKBPreviewSelectedButton();
-        
+
         // 保存到缓存
         saveToCache(cacheKey, res);
-        
+
         // 预加载下一页
         prefetchKBNextPage(page, params);
-        
+
     } catch (e) {
         console.error("Load KB failed", e);
         tbody.innerHTML = `<tr><td colspan="100" class="error-message">请求失败: ${e.message}</td></tr>`;
@@ -11763,13 +13009,13 @@ function renderKBTableHeader(force = false) {
     kbHeaderSignature = signature;
     kbResizersBound = false;
     thead.innerHTML = '';
-    
+
     kbColumns.forEach((col, index) => {
         if (col.visible === false) return;
         const th = document.createElement('th');
         th.innerText = col.title;
         if (col.width) th.style.width = col.width;
-        
+
         // Sticky Columns Logic (Removed)
         // if (col.fixed === 'left') { ... }
 
@@ -11811,7 +13057,7 @@ function renderKBTable() {
     const tbody = document.getElementById('kbTableBody');
     if (!tbody) return;
     tbody.innerHTML = '';
-    
+
     if (!currentKBData || currentKBData.length === 0) {
         tbody.innerHTML = '<tr><td colspan="100" class="empty-message">暂无数据</td></tr>';
         return;
@@ -11819,17 +13065,17 @@ function renderKBTable() {
 
     const visibleColumns = kbColumns.filter(col => col.visible !== false);
     const fragment = document.createDocumentFragment();
-    
+
     currentKBData.forEach((item, rowIndex) => {
         const tr = document.createElement('tr');
         const id = item.question_wiki_id || item.id;
-        
+
         visibleColumns.forEach((col, index) => {
             const td = document.createElement('td');
-            
+
             // Sticky Columns Logic (Removed)
             // if (col.fixed === 'left') { ... }
-            
+
             if (col.key === 'checkbox') {
                 const isSelected = selectedKBRows.has(id);
                 td.style.textAlign = "center";
@@ -11853,7 +13099,7 @@ function renderKBTable() {
                  wrap.className = 'kb-id-cell-wrap';
                  const idList = document.createElement('div');
                  idList.className = 'kb-id-cell-list';
-                 appendSearchableKbIds(idList, rawId);
+                 appendSearchableKbIds(idList, rawId, 'copy-id');
                  const actions = document.createElement('div');
                  actions.className = 'kb-cell-actions-inline';
                  const copyButton = document.createElement('button');
@@ -11947,17 +13193,24 @@ function renderKBTable() {
                     .map(t => String(t ?? '').trim())
                     .filter(Boolean);
 
-                if (!tags.length) {
+                const mappingTags = kbMappingTagsConfig
+                    ? getKBMappingTags(item.product_name)
+                    : (Array.isArray(item.kb_mapping_tags) ? item.kb_mapping_tags : []);
+                if (!tags.length && !mappingTags.length) {
                     td.innerHTML = '<span class="cell-empty">-</span>';
                     kbPrepareCompactCell(td, col, '-');
                 } else {
                     const maxShow = 4;
-                    const shown = tags.slice(0, maxShow);
-                    const rest = tags.length - shown.length;
-                    const shownHtml = shown.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
+                    const entries = [
+                        ...mappingTags.map(t => ({ html: kbMappingTagHtml(t), text: `映射 · ${t}` })),
+                        ...tags.map(t => ({ html: `<span class="tag">${escapeHtml(t)}</span>`, text: t }))
+                    ];
+                    const shown = entries.slice(0, maxShow);
+                    const rest = entries.length - shown.length;
+                    const shownHtml = shown.map(entry => entry.html).join('');
                     const restHtml = rest > 0 ? `<span class="tag" title="更多标签">+${rest}</span>` : '';
                     td.innerHTML = `<div class="tags-cell">${shownHtml}${restHtml}</div>`;
-                    kbPrepareCompactCell(td, col, tags.join('\n'));
+                    kbPrepareCompactCell(td, col, entries.map(entry => entry.text).join('\n'));
                 }
             } else {
                 let val = item[col.field];
@@ -11985,10 +13238,10 @@ function renderKBTable() {
             }
             tr.appendChild(td);
         });
-        
+
         fragment.appendChild(tr);
     });
-    
+
     tbody.appendChild(fragment);
     kbApplyStableTableWidth();
     kbBindCompactTableInteractions();
@@ -12004,7 +13257,7 @@ function updateKBPagination() {
     const info = document.getElementById('kbPageInfo');
     const prev = document.getElementById('prevKBPageBtn');
     const next = document.getElementById('nextKBPageBtn');
-    
+
     if (info) info.innerText = `共 ${kbTotal} 条`;
     if (prev) prev.disabled = kbCurrentPage <= 1;
     if (next) next.disabled = kbCurrentPage * kbPageSize >= kbTotal;
@@ -12050,7 +13303,7 @@ function toggleKBSelectAll() {
     const selectAll = document.getElementById('kbSelectAll');
     const checked = selectAll.checked;
     const checkboxes = document.querySelectorAll('.kb-row-check');
-    
+
     checkboxes.forEach(cb => {
         cb.checked = checked;
         if (checked) selectedKBRows.add(cb.value);
@@ -13062,6 +14315,31 @@ function getKBCompareFieldDisplay(row, field) {
     return String(value);
 }
 
+// Keep sentence/line fragments intact so the comparison colors describe
+// reusable content instead of character-level additions and deletions.
+function _tokenizeForSharedText(text) {
+    return String(text ?? '').match(/(\s+|[，。！？；：、,.!?;:()[\]{}"“”‘’]+|[^\s，。！？；：、,.!?;:()[\]{}"“”‘’]+)/gu) || [];
+}
+
+function _normalizeKBCompareTextToken(token) {
+    return String(token || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function getKBCompareSharedTextMap(field) {
+    const rows = kbCompareState.rows || [];
+    const counts = new Map();
+    rows.forEach(row => {
+        const seen = new Set();
+        _tokenizeForSharedText(getKBCompareFieldDisplay(row, field)).forEach(token => {
+            const key = _normalizeKBCompareTextToken(token);
+            if (!key || /^[，。！？；：、,.!?;:()[\]{}"“”‘’]+$/.test(key) || seen.has(key)) return;
+            seen.add(key);
+            counts.set(key, (counts.get(key) || 0) + 1);
+        });
+    });
+    return { counts, rowCount: rows.length };
+}
+
 function getKBCompareFieldNorm(row, field) {
     if (field.type === 'list' || field.type === 'urlList') {
         return getKBCompareFieldItems(row, field)
@@ -13529,16 +14807,14 @@ function renderKBCompareListValue(row, field) {
             let cls = 'is-partial';
             if (count >= shared.rowCount) cls = 'is-shared';
             else if (count === 1) cls = 'is-unique';
-            const isProductModel = field.key === 'product_name';
-            const modelClass = isProductModel ? (count > 1 ? ' is-model-overlap' : ' is-model-different') : '';
-            const title = isProductModel
-                ? (count > 1 ? `${label}，重复出现于 ${count}/${shared.rowCount} 条 KB` : `${label}，仅当前 KB 有`)
-                : label;
+            const title = count >= shared.rowCount
+                ? `${label}，共有 ${count}/${shared.rowCount} 条 KB`
+                : (count === 1 ? `${label}，单条独有` : `${label}，部分共有 ${count}/${shared.rowCount} 条 KB`);
             if (field.type === 'urlList') {
                 const href = /^https?:\/\//i.test(label) ? label : `http://${label}`;
                 return `<a class="kb-compare-value-chip ${cls}" href="${_escapeAttr(href)}" target="_blank" title="${_escapeAttr(label)}">${escapeHtml(label)}</a>`;
             }
-            return `<span class="kb-compare-value-chip ${cls}${modelClass}" title="${_escapeAttr(title)}">${escapeHtml(label)}</span>`;
+            return `<span class="kb-compare-value-chip ${cls}" title="${_escapeAttr(title)}">${escapeHtml(label)}</span>`;
         }).join('')
     }</div>`;
 }
@@ -13546,14 +14822,20 @@ function renderKBCompareListValue(row, field) {
 function renderKBCompareTextValue(row, field, baseText) {
     const text = getKBCompareFieldDisplay(row, field);
     if (!text) return '<span class="kb-compare-muted">-</span>';
-    if (String(text) === String(baseText || '')) {
-        return `<div class="kb-compare-text-value">${escapeHtml(text)}</div>`;
-    }
-    if (String(text).length > 4000 || String(baseText || '').length > 4000) {
-        return `<div class="kb-compare-text-value">${escapeHtml(text)}</div>`;
-    }
-    const diff = _renderDiff(baseText || '', text);
-    return `<div class="kb-compare-text-value">${diff.afterHtml || escapeHtml(text)}</div>`;
+    const shared = getKBCompareSharedTextMap(field);
+    const html = _tokenizeForSharedText(text).map(token => {
+        const key = _normalizeKBCompareTextToken(token);
+        if (!key || /^\s+$/.test(token) || /^[，。！？；：、,.!?;:()[\]{}"“”‘’]+$/.test(key)) {
+            return escapeHtml(token);
+        }
+        const count = shared.counts.get(key) || 0;
+        const cls = count >= shared.rowCount ? 'is-shared' : (count === 1 ? 'is-unique' : 'is-partial');
+        const title = count >= shared.rowCount
+            ? `共有，${count}/${shared.rowCount} 条记录出现`
+            : (count === 1 ? '单条独有' : `部分共有，${count}/${shared.rowCount} 条记录出现`);
+        return `<span class="kb-compare-text-token ${cls}" title="${_escapeAttr(title)}">${escapeHtml(token)}</span>`;
+    }).join('');
+    return `<div class="kb-compare-text-value">${html || escapeHtml(text)}</div>`;
 }
 
 function renderKBCompareDraftActionButton() {
@@ -13633,14 +14915,7 @@ function renderKBCompareDetail() {
             ? `已手动采用 ${chosenId}`
             : (KB_COMPARE_DEFAULT_MERGE_FIELDS.has(field.key) ? '默认合并取并集' : '默认沿用主记录'))
         : '仅用于校验';
-    const legendHtml = field.key === 'product_name'
-        ? `
-                <div class="kb-compare-legend">
-                    <span><i class="legend-dot is-model-overlap"></i>重复出现</span>
-                    <span><i class="legend-dot is-model-different"></i>单条独有</span>
-                </div>
-        `
-        : `
+    const legendHtml = `
                 <div class="kb-compare-legend">
                     <span><i class="legend-dot is-shared"></i>共有</span>
                     <span><i class="legend-dot is-partial"></i>部分共有</span>
@@ -14619,6 +15894,8 @@ function syncKBProductCategoryChipActive() {
 }
 
 function resetKBSearch() {
+    const mappingFilter = document.getElementById('kbMappingTagFilter');
+    if (mappingFilter) mappingFilter.value = '';
     document.getElementById('idSearch').value = '';
     document.getElementById('productNameSearch').value = '';
     document.getElementById('questionSearch').value = '';
@@ -14629,10 +15906,13 @@ function resetKBSearch() {
     syncKBDraftStatusChips();
     kbSelectedTags.clear();
     updateKbTagFilterButton();
-    // Default tag filter mode OR
-    const orCb = document.querySelector('input[name="kbTagFilterMode"][value="OR"]');
-    if (orCb) orCb.checked = true;
-    document.querySelectorAll('#reviewStatusChips .tag-chip').forEach(c => c.classList.remove('active'));
+    closeKbTagFilterDropdown();
+    const tagMode = document.querySelector('input[name="kbTagFilterMode"]');
+    if (tagMode) tagMode.value = 'OR';
+    document.querySelectorAll('#reviewStatusChips .tag-chip').forEach(c => {
+        c.classList.remove('active');
+        c.setAttribute('aria-pressed', 'false');
+    });
     kbShowSelectedOnly = false;
     selectedKBRows.clear();
     const selectAll = document.getElementById('kbSelectAll');
@@ -14649,7 +15929,8 @@ function resetKBSearch() {
 }
 
 function toggleStatusFilter(chip) {
-    chip.classList.toggle('active');
+    const isActive = chip.classList.toggle('active');
+    chip.setAttribute('aria-pressed', String(isActive));
     clearKBCache(); // 状态筛选改变时清除缓存
     loadKBTable(1);
 }
@@ -14834,7 +16115,7 @@ async function importKB() {
   const status = document.getElementById('importStatus');
   const mode = document.querySelector('input[name="importMode"]:checked')?.value || 'upsert';
   const deleteMissing = mode !== 'overwrite' && Boolean(document.getElementById('deleteMissingIds')?.checked);
-  
+
   if (!fileInput.files[0]) {
     alert('请选择文件');
     return;
@@ -14922,10 +16203,10 @@ async function importKB() {
       if (!ok) return;
     }
   }
-  
+
   btn.disabled = true;
   status.textContent = '正在上传并导入...';
-  
+
   const formData = new FormData();
   formData.append('file', fileInput.files[0]);
   formData.append('mode', mode);
@@ -14942,18 +16223,18 @@ async function importKB() {
       formData.append('expected_incoming_count', String(overwritePreview.incoming_count));
     }
   }
-  
+
   try {
     const res = await fetch(API_BASE + '/kb/import', {
       method: 'POST',
       body: formData
     });
-    
+
     if (res.status === 401) {
        showLogin(true);
        throw new Error('Unauthorized');
     }
-    
+
     const data = await res.json();
     if (data.success) {
       status.textContent = `✅ 成功导入 ${data.count} 条数据`;
@@ -15061,13 +16342,13 @@ async function previewCheckDuplicates() {
         alert('请先选择一个 Excel 文件');
         return;
     }
-    
+
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
     const mode = document.querySelector('input[name="importMode"]:checked')?.value || 'upsert';
     const deleteMissing = mode !== 'overwrite' && Boolean(document.getElementById('deleteMissingIds')?.checked);
     if (deleteMissing) formData.append('delete_missing', 'true');
-    
+
     // Add button loading state
     const btn = document.querySelector('button[onclick="previewCheckDuplicates()"]');
     const originalText = btn ? btn.innerText : '🔍 查重预览';
@@ -15075,21 +16356,21 @@ async function previewCheckDuplicates() {
         btn.disabled = true;
         btn.innerText = '正在查重...';
     }
-    
+
     try {
         const res = await fetch(API_BASE + '/kb/check_duplicates', {
              method: 'POST',
              body: formData
         });
         const data = await res.json();
-        
+
         if (data.success) {
             const errorCount = data.error_count || 0;
             const errorMsg = errorCount > 0 ? `\n异常记录: ${errorCount} (包含未知型号)` : '';
             const deleteMissingCount = data.delete_missing_count || 0;
             const deleteMissingMsg = deleteMissing ? `\n将物理删除: ${deleteMissingCount}` : '';
             alert(`查重完成。\n重复记录: ${data.duplicates_count || 0}\n新增记录: ${data.new_count || 0}${errorMsg}${deleteMissingMsg}`);
-            
+
             const checkResultDiv = document.getElementById('checkResult');
             if (checkResultDiv && data.report) {
                 const errors = data.report.filter(item => item.status === '异常');
@@ -15165,11 +16446,16 @@ function closeRevisionModal() {
 
 async function executeRevisionCompletion() {
     closeRevisionModal();
-    
+
     try {
         const res = await api('/kb/complete_revision', 'POST');
         if (res.success) {
-            alert('修订已完成！状态已重置。');
+            const deletedCount = Number(res.deleted_count || 0);
+            alert(deletedCount > 0
+                ? `修订已完成！已删除 ${deletedCount} 条“删除中”记录，其余修改已提交。`
+                : '修订已完成！其余修改已提交。');
+            // 状态批量变更后不能复用旧分页结果。
+            clearKBCache();
             loadKBTable(1);
         } else {
             alert('操作失败: ' + res.message);
@@ -15202,7 +16488,7 @@ async function deleteSelectedKBItems() {
         `将把选中的 ${selectedKBRows.size} 条记录标记为“删除中”。确认继续？`,
         '确认删除'
     )) return;
-    
+
     try {
         const ids = Array.from(selectedKBRows);
         const res = await api('/kb/delete', 'POST', {
@@ -15805,9 +17091,203 @@ let __kbEditReferenceTimer = null;
 let __kbEditReferenceRequestSeq = 0;
 const KB_EDIT_DRAFT_KEY_PREFIX = 'kb_edit_draft_v1:';
 const KB_EDIT_PENDING_SYNC_KEY = 'kb_edit_pending_sync_v1';
+const KB_EDIT_LINK_TYPE_OPTIONS = ['APP内页面', 'url'];
+let __kbProductPickerDraft = null;
+let __kbProductPickerEntries = [];
+let __kbSimilarPickerItems = null;
+let __kbEditLegacyLinkType = '';
+let __kbEditLinkTypeTouched = false;
 
 function __kbEditNormalizeText(v) {
     return String(v ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+}
+
+function __kbEditParseLinkTypes(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return [];
+    const selected = [];
+    raw.split(/[,，\n/]+/).forEach((part) => {
+        const token = String(part || '').trim().toLowerCase().replace(/\s+/g, '');
+        if ((token.includes('app') || token.includes('应用')) && !selected.includes('APP内页面')) selected.push('APP内页面');
+        if (token === 'url' || token.includes('url')) {
+            if (!selected.includes('url')) selected.push('url');
+        }
+    });
+    if (!selected.length && raw.includes('APP内页面')) selected.push('APP内页面');
+    return selected;
+}
+
+function __kbEditSyncLinkTypeValue() {
+    const hidden = document.getElementById('kbEditLinkTypeValue');
+    if (!hidden) return '';
+    const selected = Array.from(document.querySelectorAll('#kbEditModal [data-link-type]:checked'))
+        .map((el) => String(el.dataset.linkType || '').trim())
+        .filter((value) => KB_EDIT_LINK_TYPE_OPTIONS.includes(value));
+    hidden.value = selected.length ? Array.from(new Set(selected)).join(',') : (__kbEditLinkTypeTouched ? '' : __kbEditLegacyLinkType);
+    return hidden.value;
+}
+
+function __kbEditMarkLinkTypeTouched() {
+    __kbEditLinkTypeTouched = true;
+    __kbEditSyncLinkTypeValue();
+}
+
+function __kbEditSetLinkTypeValue(value) {
+    const selected = new Set(__kbEditParseLinkTypes(value));
+    const raw = String(value ?? '').trim();
+    const known = Array.from(selected).join(',');
+    __kbEditLegacyLinkType = raw && raw !== known ? (selected.size ? '' : raw) : '';
+    __kbEditLinkTypeTouched = false;
+    document.querySelectorAll('#kbEditModal [data-link-type]').forEach((el) => {
+        el.checked = selected.has(String(el.dataset.linkType || '').trim());
+    });
+    const hidden = document.getElementById('kbEditLinkTypeValue');
+    if (hidden) hidden.value = known || __kbEditLegacyLinkType;
+}
+
+function __kbEditNormalizeProductLookup(value) {
+    return String(value ?? '').replace(/\s+/g, '').toLowerCase();
+}
+
+function __kbEditParseProductNames(value, allowLegacySeparators = false) {
+    const splitter = allowLegacySeparators ? /[,，\n]+/ : /,+/;
+    const seen = new Set();
+    return String(value ?? '').split(splitter).map(item => item.trim()).filter((item) => {
+        const key = __kbEditNormalizeProductLookup(item);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function __kbEditResolveProductNames(value) {
+    const catalogByKey = new Map();
+    document.querySelectorAll('#productCheckboxes input.product-item-check:not([data-category="extra_legacy"])').forEach((cb) => {
+        const model = String(cb.value || '').trim();
+        const key = __kbEditNormalizeProductLookup(model);
+        if (!key) return;
+        const matches = catalogByKey.get(key) || [];
+        if (!matches.includes(model)) matches.push(model);
+        catalogByKey.set(key, matches);
+    });
+
+    const recognized = [];
+    const unrecognized = [];
+    const values = [];
+    const seen = new Set();
+    __kbEditParseProductNames(value).forEach((inputValue) => {
+        const key = __kbEditNormalizeProductLookup(inputValue);
+        const matches = catalogByKey.get(key) || [];
+        const resolvedValue = matches.length === 1 ? matches[0] : inputValue;
+        const resolvedKey = __kbEditNormalizeProductLookup(resolvedValue);
+        if (seen.has(resolvedKey)) return;
+        seen.add(resolvedKey);
+        values.push(resolvedValue);
+        if (matches.length === 1) recognized.push(resolvedValue);
+        else unrecognized.push(inputValue);
+    });
+    return {
+        values,
+        recognized,
+        unrecognized,
+        hasChineseComma: String(value ?? '').includes('，')
+    };
+}
+
+function __kbEditRenderProductRecognition(result = null) {
+    const input = document.getElementById('kbEditProductName');
+    const status = document.getElementById('kbEditProductRecognition');
+    const selectionSummary = document.getElementById('kbEditProductSelectionSummary');
+    const count = document.getElementById('kbEditSelectedProductsCount');
+    const resolved = result || __kbEditResolveProductNames(input?.value || '');
+    if (count) count.textContent = String(resolved.values.length);
+    if (input) input.classList.toggle('has-unrecognized-products', resolved.unrecognized.length > 0 || resolved.hasChineseComma);
+    if (selectionSummary) {
+        selectionSummary.replaceChildren();
+        if (!resolved.values.length) {
+            selectionSummary.textContent = '未选择型号';
+        } else {
+            resolved.values.forEach((model) => {
+                const chip = document.createElement('span');
+                chip.className = 'kb-product-selection-chip';
+                chip.textContent = model;
+                chip.title = model;
+                selectionSummary.appendChild(chip);
+            });
+        }
+    }
+    if (!status) return;
+
+    status.classList.toggle('is-warning', resolved.unrecognized.length > 0 || resolved.hasChineseComma);
+    status.replaceChildren();
+    if (!resolved.values.length && !resolved.hasChineseComma) return;
+
+    const summary = document.createElement('span');
+    summary.className = 'kb-product-recognition-summary';
+    if (resolved.unrecognized.length) {
+        summary.textContent = `已识别 ${resolved.recognized.length} 个，未识别 ${resolved.unrecognized.length} 个：`;
+    } else if (resolved.hasChineseComma) {
+        summary.textContent = '请使用英文逗号 , 分隔型号';
+    } else {
+        summary.textContent = `已识别 ${resolved.recognized.length} 个型号`;
+    }
+    status.appendChild(summary);
+
+    if (resolved.unrecognized.length) {
+        const clearButton = document.createElement('button');
+        clearButton.type = 'button';
+        clearButton.className = 'kb-product-clear-unrecognized';
+        clearButton.textContent = '一键清空未识别';
+        clearButton.title = '从输入框移除全部未识别型号';
+        clearButton.setAttribute('aria-label', '一键清空未识别型号');
+        clearButton.addEventListener('click', __kbEditClearUnrecognizedProducts);
+        status.appendChild(clearButton);
+    }
+
+    resolved.unrecognized.forEach((model) => {
+        const chip = document.createElement('span');
+        chip.className = 'kb-product-unrecognized-chip';
+        chip.textContent = model;
+        chip.title = '型号目录中未找到匹配项';
+        status.appendChild(chip);
+    });
+    if (resolved.hasChineseComma) {
+        const separatorHint = document.createElement('span');
+        separatorHint.className = 'kb-product-separator-hint';
+        separatorHint.textContent = '检测到中文逗号，请改为英文逗号 ,';
+        status.appendChild(separatorHint);
+    }
+}
+
+function __kbEditSyncProductCheckboxesFromInput({ canonicalize = false } = {}) {
+    const input = document.getElementById('kbEditProductName');
+    if (!input) return { values: [], recognized: [], unrecognized: [], hasChineseComma: false };
+    const resolved = __kbEditResolveProductNames(input.value);
+    const recognizedKeys = new Set(resolved.recognized.map(__kbEditNormalizeProductLookup));
+    const unrecognizedKeys = new Set(resolved.unrecognized.map(__kbEditNormalizeProductLookup));
+    document.querySelectorAll('#productCheckboxes input.product-item-check').forEach((cb) => {
+        const key = __kbEditNormalizeProductLookup(cb.value);
+        cb.checked = cb.dataset.category === 'extra_legacy'
+            ? unrecognizedKeys.has(key)
+            : recognizedKeys.has(key);
+    });
+    if (canonicalize) input.value = resolved.values.join(',');
+    if (window.updateSelectAllStates) window.updateSelectAllStates(false);
+    __kbEditRenderProductRecognition(resolved);
+    return resolved;
+}
+
+function __kbEditClearUnrecognizedProducts() {
+    const input = document.getElementById('kbEditProductName');
+    if (!input) return;
+    const resolved = __kbEditResolveProductNames(input.value);
+    if (!resolved.unrecognized.length) return;
+    input.value = resolved.recognized.join(',');
+    __kbEditSyncProductCheckboxesFromInput({ canonicalize: true });
+    try {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch {}
 }
 
 function __kbEditCollectDigest() {
@@ -15816,11 +17296,8 @@ function __kbEditCollectDigest() {
     const get = (k) => __kbEditNormalizeText(form.elements?.[k]?.value);
     const opts = { splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true, isUrlList: true };
 
-    const checkedProducts = Array.from(document.querySelectorAll('#productCheckboxes input.product-item-check:checked'))
-        .map(cb => __kbEditNormalizeText(cb.value))
-        .filter(Boolean)
-        .sort();
-    const productName = checkedProducts.length ? checkedProducts.join(',') : get('product_name');
+    const productNameValue = document.getElementById('kbEditProductName')?.value || '';
+    const productName = __kbEditResolveProductNames(productNameValue).values.join(',');
     const productCategory = __kbEditNormalizeText(document.getElementById('productCategorySelectInput')?.getAttribute('data-value') || get('product_category_name'));
 
     return {
@@ -15840,7 +17317,7 @@ function __kbEditCollectDigest() {
         link_type: get('link_type'),
         link_url: parseSmartListValue(get('link_url'), opts).join('\n'),
         // Include tags into dirty check so the save button enables when only tags change.
-        kb_tags_input: get('kb_tags_input'),
+        kb_tags_input: __kbEditGetTagNames(true).join(', '),
         // Template source is a draft/preview hint only; it is never submitted to backend.
         template_ref_id: __kbEditNormalizeText(__kbEditTemplateRefId),
         // Confirmed references are internal metadata; they do not alter the answer body.
@@ -16220,6 +17697,7 @@ function __kbEditSyncPreviewChangedState() {
 }
 
 function __kbEditRenderPreview() {
+    __kbEditRenderTagChips();
     const modal = document.getElementById('kbEditModal');
     if (!modal || modal.style.display === 'none') return;
     const digest = __kbEditCollectDigest();
@@ -16245,6 +17723,7 @@ function __kbEditRenderPreview() {
     __kbEditRenderPreviewChipsDiff('kbEditPreviewCategory', 'product_category_name', __kbEditSplitPreviewList(digest.product_category_name), '未选择分类');
     __kbEditRenderPreviewChipsDiff('kbEditPreviewProducts', 'product_name', __kbEditSplitPreviewList(digest.product_name), '未选择型号');
     __kbEditRenderPreviewChipsDiff('kbEditPreviewTags', 'kb_tags_input', __kbEditSplitPreviewList(digest.kb_tags_input), '未设置标签');
+    renderKBEditMappingTags(digest.product_name);
     __kbEditRenderPreviewAttrs(digest);
 
     __kbEditRenderPreviewTextDiff('kbEditPreviewQuestion', 'question', digest.question, '暂无问题内容');
@@ -16363,9 +17842,13 @@ function __kbEditRestoreDraftDigest(digest) {
         'question_wiki_id', 'question_type', 'if_bm25', 'question', 'answer', 'answer_type',
         'similar_questions', 'keyword_list', 'image_urls', 'video_urls', 'file_urls', 'link_type', 'link_url'
     ].forEach(k => setVal(k, digest[k]));
+    __kbEditSetLinkTypeValue(digest.link_type || '');
     try { __kbAnswerSetMarkdown(String(digest.answer ?? ''), { from: 'restoreDraft' }); } catch {}
     const tagsEl = document.getElementById('kbEditTagsInput');
     if (tagsEl) tagsEl.value = String(digest.kb_tags_input || '');
+    const tagSearch = document.getElementById('kbEditTagsSearch');
+    if (tagSearch) tagSearch.value = '';
+    __kbEditSyncTagCheckboxes();
     __kbEditTemplateRefId = String(digest.template_ref_id || '').trim();
     __kbEditSyncTemplateReferenceUi();
     try {
@@ -16381,11 +17864,7 @@ function __kbEditRestoreDraftDigest(digest) {
         pcInput.setAttribute('data-value', raw);
         pcInput.value = raw.split(/[,\n，]+/).map(s => s.trim()).filter(Boolean).join('，');
     }
-    const productSet = new Set(String(digest.product_name || '').split(/[,\n，]+/).map(s => s.trim()).filter(Boolean));
-    document.querySelectorAll('#productCheckboxes input.product-item-check').forEach(cb => {
-        cb.checked = productSet.has(String(cb.value || '').trim());
-    });
-    if (window.updateSelectAllStates) window.updateSelectAllStates();
+    __kbEditApplyProductsToForm(digest.product_name || '');
     __kbEditRenderPreview();
 }
 
@@ -16398,8 +17877,10 @@ function __kbEditHasUnsavedChanges() {
 }
 
 function __kbEditBuildSubmitPayload() {
+    __kbEditCommitTagQuery();
     const form = document.getElementById('kbEditForm');
     try { __kbAnswerSyncToTextarea({ emit: false }); } catch {}
+    __kbEditSyncLinkTypeValue();
     const formData = new FormData(form);
     const data = Object.fromEntries(formData.entries());
     if (!__kbEditIsCreateMode) {
@@ -16424,8 +17905,8 @@ function __kbEditBuildSubmitPayload() {
         }
     } catch {}
     if (data.if_bm25 === '' || data.if_bm25 === null || data.if_bm25 === undefined) data.if_bm25 = 'false';
-    const checkedProducts = Array.from(document.querySelectorAll('#productCheckboxes input.product-item-check:checked')).map(cb => cb.value);
-    if (checkedProducts.length > 0) data.product_name = checkedProducts.join(',');
+    const productNameValue = document.getElementById('kbEditProductName')?.value || data.product_name || '';
+    data.product_name = __kbEditResolveProductNames(productNameValue).values.join(',');
     if (data.similar_questions) {
         try { data.similar_questions = JSON.parse(data.similar_questions); }
         catch { data.similar_questions = parseSmartListValue(data.similar_questions, { splitOnAsciiComma: true }); }
@@ -16501,6 +17982,27 @@ function __kbEditHandleConflict(conflict, data) {
     return { action: 'cancel' };
 }
 
+async function __kbEditCanReachServer() {
+    if (navigator.onLine) return true;
+    // The browser's network flag does not tell us whether localhost is reachable.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    try {
+        await fetch(new URL('/', window.location.href).href, {
+            method: 'HEAD',
+            credentials: 'same-origin',
+            cache: 'no-store',
+            signal: controller.signal,
+        });
+        // An HTTP error still proves connectivity; let the API report it normally.
+        return true;
+    } catch {
+        return false;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 function __kbEditLoadPendingSyncQueue() {
     try {
         const raw = localStorage.getItem(KB_EDIT_PENDING_SYNC_KEY);
@@ -16522,11 +18024,12 @@ function __kbEditQueuePendingSync(payload) {
 }
 
 async function __kbEditSyncPendingQueue() {
-    if (__kbEditSyncingPending || !navigator.onLine) return;
+    if (__kbEditSyncingPending) return;
     const queue = __kbEditLoadPendingSyncQueue();
     if (!queue.length) return;
     __kbEditSyncingPending = true;
     try {
+        if (!await __kbEditCanReachServer()) return;
         const remained = [];
         for (const item of queue) {
             try {
@@ -16623,27 +18126,22 @@ function __kbEditSetProductCategoryInput(value) {
 }
 
 function __kbEditApplyProductsToForm(productValue) {
-    const prods = String(productValue || '').split(/[,\n，]+/).map(s => s.trim()).filter(Boolean);
+    const prods = __kbEditParseProductNames(productValue, true);
     const productInput = document.getElementById('kbEditProductName');
     if (productInput) productInput.value = prods.join(',');
 
-    let checkboxes = Array.from(document.querySelectorAll('#productCheckboxes input.product-item-check'));
+    const checkboxes = Array.from(document.querySelectorAll('#productCheckboxes input.product-item-check'));
     if (checkboxes.length) {
-        const availableModels = checkboxes.map(cb => cb.value);
-        const extraModels = prods.filter(p => !availableModels.includes(p));
+        const catalogKeys = new Set(checkboxes
+            .filter(cb => cb.dataset.category !== 'extra_legacy')
+            .map(cb => __kbEditNormalizeProductLookup(cb.value)));
+        const extraModels = prods.filter(p => !catalogKeys.has(__kbEditNormalizeProductLookup(p)));
         if (extraModels.length > 0 && window.renderExtraModels) {
             window.renderExtraModels(extraModels);
-            checkboxes = Array.from(document.querySelectorAll('#productCheckboxes input.product-item-check'));
         }
-        checkboxes.forEach(cb => {
-            cb.checked = prods.includes(cb.value);
-        });
-        if (window.updateSelectAllStates) window.updateSelectAllStates();
+        __kbEditSyncProductCheckboxesFromInput({ canonicalize: true });
     } else if (productInput) {
-        try {
-            productInput.dispatchEvent(new Event('input', { bubbles: true }));
-            productInput.dispatchEvent(new Event('change', { bubbles: true }));
-        } catch {}
+        __kbEditRenderProductRecognition();
     }
 }
 
@@ -16793,12 +18291,15 @@ function __kbEditApplyTemplateItem(item, templateId, tags = []) {
     setVal('image_urls', __kbEditFormatListTextarea(item.image_urls, { splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true, isUrlList: true }));
     setVal('video_urls', __kbEditFormatListTextarea(item.video_urls, { splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true, isUrlList: true }));
     setVal('file_urls', __kbEditFormatListTextarea(item.file_urls, { splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true, isUrlList: true }));
-    if (form.elements['link_type']) setVal('link_type', item.link_type || '');
+    __kbEditSetLinkTypeValue(item.link_type || '');
     if (form.elements['link_url']) setVal('link_url', item.link_url || '');
     __kbEditApplyProductsToForm(item.product_name || '');
 
     const tagsEl = document.getElementById('kbEditTagsInput');
     if (tagsEl) tagsEl.value = Array.isArray(tags) ? tags.join(', ') : '';
+    const tagSearch = document.getElementById('kbEditTagsSearch');
+    if (tagSearch) tagSearch.value = '';
+    __kbEditSyncTagCheckboxes();
 
     __kbEditTemplateRefId = String(templateId || item.question_wiki_id || item.id || '').trim();
     __kbEditTouched = true;
@@ -16960,8 +18461,8 @@ function __kbEditScheduleReferenceCandidates() {
 
 async function kbRefreshReferenceCandidates() {
     if (!__kbEditIsCreateMode) return;
-    if (!navigator.onLine) {
-        __kbEditSetReferenceStatus('当前离线，恢复联网后可刷新推荐。', 'error');
+    if (!await __kbEditCanReachServer()) {
+        __kbEditSetReferenceStatus('无法连接知识库服务，连接恢复后可刷新推荐。', 'error');
         return;
     }
     if (__kbEditReferenceTimer) {
@@ -17065,12 +18566,17 @@ async function openKBEditModal(id = null, options = {}) {
     kbLoadClipboardSession();
 
     form.reset();
+    document.getElementById('kbEditReleaseOptions')?.classList.add('d-none');
+    if (document.getElementById('kbEditEffectMode')) document.getElementById('kbEditEffectMode').value = 'immediate';
+    if (document.getElementById('kbEditPublicImpactConfirmed')) document.getElementById('kbEditPublicImpactConfirmed').checked = false;
+    __kbEditSetLinkTypeValue('');
     __kbEditCurrentPreviewItem = null;
     __kbEditResetTemplatePicker();
     __kbEditResetReferenceSuggestions();
     document.getElementById('kbEditTitle').innerText = __kbEditQualityContext ? '编辑管控任务内容' : (id ? '编辑数据' : '新增数据');
     const tagsEl = document.getElementById('kbEditTagsInput');
     if (tagsEl) tagsEl.value = '';
+    __kbEditBindTagsSelector();
     try { if (!id) __kbAnswerSetMarkdown('', { from: 'openKBEditModal-create' }); } catch {}
 
     // Show early to avoid perceived lag and to ensure form fields are present.
@@ -17090,7 +18596,7 @@ async function openKBEditModal(id = null, options = {}) {
                 const items = parseSmartListValue(value, opts);
                 return items.length ? items.join('\n') : '';
             };
-            
+
             const formatJsonTextarea = (value) => {
                 if (value === null || value === undefined) return '';
                 if (typeof value === 'string') {
@@ -17106,7 +18612,7 @@ async function openKBEditModal(id = null, options = {}) {
                     return String(value);
                 }
             };
-            
+
             // Populate fields
             form.elements['question_wiki_id'].value = item.question_wiki_id || '';
             // product_category_name is now a multi-select dropdown (rendered as readonly input)
@@ -17124,17 +18630,18 @@ async function openKBEditModal(id = null, options = {}) {
             form.elements['answer'].value = item.answer || '';
             try { __kbAnswerSetMarkdown(item.answer || '', { from: 'openKBEditModal' }); } catch {}
             form.elements['answer_type'].value = item.answer_type || '';
-            form.elements['product_name'].value = item.product_name || '';
-            
+            const productNameInput = document.getElementById('kbEditProductName');
+            if (productNameInput) productNameInput.value = item.product_name || '';
+
             // Populate JSON/Details fields
             form.elements['similar_questions'].value = formatListTextarea(item.similar_questions, { splitOnAsciiComma: true });
             form.elements['keyword_list'].value = formatListTextarea(item.keyword_list, { splitOnAsciiComma: true });
             form.elements['image_urls'].value = formatListTextarea(item.image_urls, { splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true, isUrlList: true });
             form.elements['video_urls'].value = formatListTextarea(item.video_urls, { splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true, isUrlList: true });
             form.elements['file_urls'].value = formatListTextarea(item.file_urls, { splitOnAsciiComma: true, splitOnChineseCommaWhenUrlList: true, isUrlList: true });
-            if (form.elements['link_type']) form.elements['link_type'].value = item.link_type || '';
+            __kbEditSetLinkTypeValue(item.link_type || '');
             if (form.elements['link_url']) form.elements['link_url'].value = item.link_url || '';
-            
+
             // Load KB tags for this item (方案A：在编辑弹窗维护标签)
             const tagsEl = document.getElementById('kbEditTagsInput');
             if (tagsEl) {
@@ -17142,6 +18649,7 @@ async function openKBEditModal(id = null, options = {}) {
                 if (wikiId) {
                     try {
                         const tr = await api(`/kb/item/tags?libraryType=current&question_wiki_id=${encodeURIComponent(wikiId)}`);
+                        if (seq !== __kbEditOpenSeq) return;
                         if (tr && tr.success && Array.isArray(tr.tags)) {
                             tagsEl.value = tr.tags.join(', ');
                         }
@@ -17150,24 +18658,7 @@ async function openKBEditModal(id = null, options = {}) {
                     }
                 }
             }
-            
-            // Check products
-            const prods = (item.product_name || '').split(/[,，]/).map(s => s.trim()).filter(s => s);
-            
-            // Identify non-catalog models
-            const availableModels = Array.from(document.querySelectorAll('#productCheckboxes input.product-item-check')).map(cb => cb.value);
-            const extraModels = prods.filter(p => !availableModels.includes(p));
-            
-            // Render extra models if any
-            if (extraModels.length > 0 && window.renderExtraModels) {
-                window.renderExtraModels(extraModels);
-            }
-            
-            // Now check all boxes
-            document.querySelectorAll('#productCheckboxes input.product-item-check').forEach(cb => {
-                cb.checked = prods.includes(cb.value);
-            });
-            if (window.updateSelectAllStates) window.updateSelectAllStates();
+
         }
         __kbEditLoadPendingActivity(String(id));
     }
@@ -17175,17 +18666,21 @@ async function openKBEditModal(id = null, options = {}) {
 
     // Load product catalog for checkboxes (async; guard against race when switching items quickly)
     await loadProductCatalogForModal();
+    try {
+        await refreshKBMappingTagsConfig();
+    } catch (error) {
+        kbMappingTagsConfig = null;
+        console.error('Failed to load editor mapping tags:', error);
+    }
     if (seq !== __kbEditOpenSeq) return;
     // After catalog is ready, re-apply product checks for edit mode (create mode stays empty)
     if (id) {
         const item = __kbEditCurrentPreviewItem || options.item || currentKBData.find(i => String(i.question_wiki_id) === String(id) || String(i.id) === String(id));
         if (item) {
-            const prods = (item.product_name || '').split(/[,，]/).map(s => s.trim()).filter(s => s);
-            document.querySelectorAll('#productCheckboxes input.product-item-check').forEach(cb => {
-                cb.checked = prods.includes(cb.value);
-            });
-            if (window.updateSelectAllStates) window.updateSelectAllStates();
+            __kbEditApplyProductsToForm(item.product_name || '');
         }
+    } else {
+        __kbEditSyncProductCheckboxesFromInput();
     }
 
     try {
@@ -17205,6 +18700,7 @@ async function openKBEditModal(id = null, options = {}) {
     try { __kbEditBindUiHelpers(); } catch {}
     try { __kbEditBindDirtyChecker(); } catch {}
     __kbEditCaptureInitialState(!id);
+    await __kbEditRefreshReleaseOptionsVisibility();
     const draft = __kbEditReadDraft(__kbEditDraftContextId);
     if (draft?.digest) {
         const savedText = __kbEditFormatTime(draft.savedAt);
@@ -17231,7 +18727,6 @@ function __kbEditBindUiHelpers() {
     const aEl = form.elements['answer'];
     const pNameEl = document.getElementById('kbEditProductName');
     const pBox = document.getElementById('productCheckboxes');
-    const countEl = document.getElementById('kbEditSelectedProductsCount');
     const productsDetailsEl = document.getElementById('kbEditProductsDetails');
     const productsToggleTextEl = document.getElementById('kbEditProductsToggleText');
     const statsEl = document.getElementById('answerStats');
@@ -17248,11 +18743,7 @@ function __kbEditBindUiHelpers() {
         statsEl.textContent = `${lines} 行 · ${chars} 字`;
     };
 
-    const updateSelectedProductsCount = () => {
-        if (!countEl) return;
-        const checked = document.querySelectorAll('#productCheckboxes input.product-item-check:checked');
-        countEl.textContent = String(checked ? checked.length : 0);
-    };
+    const updateSelectedProductsCount = () => __kbEditRenderProductRecognition();
 
     const updateProductsToggleText = () => {
         if (!productsDetailsEl || !productsToggleTextEl) return;
@@ -17320,8 +18811,14 @@ function __kbEditBindUiHelpers() {
     }
 
     if (pNameEl) {
-        pNameEl.addEventListener('input', updateSelectedProductsCount);
-        pNameEl.addEventListener('change', updateSelectedProductsCount);
+        pNameEl.addEventListener('input', () => {
+            __kbEditSyncProductCheckboxesFromInput();
+            void __kbEditRefreshReleaseOptionsVisibility();
+        });
+        pNameEl.addEventListener('change', () => {
+            __kbEditSyncProductCheckboxesFromInput({ canonicalize: true });
+            void __kbEditRefreshReleaseOptionsVisibility();
+        });
     }
 
     if (pBox) {
@@ -17395,6 +18892,7 @@ function closeKBEditModal(options = {}) {
         try { __aiCancelAllInFlight('kb-edit-modal-closed'); } catch {}
         __aiResetKbEditUiState();
         const modal = document.getElementById('kbEditModal');
+        __kbEditCloseTagsDropdown();
         if (modal) {
             modal.classList.remove('is-open');
             modal.style.display = 'none';
@@ -18351,13 +19849,13 @@ window.__aiDebouncedSimilarGenerate = __aiDebounce(aiSimilarGenerate, 900);
 async function loadProductCatalogForModal() {
     const container = document.getElementById('productCheckboxes');
     if (!container) return;
-    
+
     container.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">加载中...</div>';
 
     try {
         const res = await api('/kb/product_catalog');
         let catalog = res || {};
-        
+
         // Ensure catalog is an object { Category: [Models] }
         if (Array.isArray(catalog)) {
             // Fallback if data is flat array
@@ -18365,29 +19863,37 @@ async function loadProductCatalogForModal() {
         } else if (res.data) {
              catalog = res.data;
         }
-        
+
         container.innerHTML = '';
-        
+
         // 1. Global Select All
         const globalSelectDiv = document.createElement('div');
         globalSelectDiv.className = 'product-select-all-global';
-        
+
         const globalLabel = document.createElement('label');
         globalLabel.style.fontWeight = 'bold';
         globalLabel.style.display = 'flex';
         globalLabel.style.alignItems = 'center';
         globalLabel.style.gap = '8px';
-        
+
         const globalCb = document.createElement('input');
         globalCb.type = 'checkbox';
         globalCb.id = 'globalSelectAll';
         globalCb.addEventListener('change', () => {
             if (window.toggleAllProducts) window.toggleAllProducts(globalCb.checked);
         });
-        
+
         globalLabel.appendChild(globalCb);
         globalLabel.appendChild(document.createTextNode(' 全选'));
         globalSelectDiv.appendChild(globalLabel);
+        const expandButton = document.createElement('button');
+        expandButton.type = 'button';
+        expandButton.className = 'action-btn btn-sm kb-product-expand-trigger kb-expand-icon-btn';
+        expandButton.title = '放大查看并选择全部型号';
+        expandButton.setAttribute('aria-label', '放大查看并选择全部型号');
+        expandButton.innerHTML = '<i class="fas fa-magnifying-glass" aria-hidden="true"></i>';
+        expandButton.addEventListener('click', openKBProductModelPicker);
+        globalSelectDiv.appendChild(expandButton);
         container.appendChild(globalSelectDiv);
 
         // 2. Iterate Categories
@@ -18397,41 +19903,47 @@ async function loadProductCatalogForModal() {
 
             const section = document.createElement('div');
             section.className = 'product-category-section';
-            
+
             // Category Header
             const header = document.createElement('h4');
             header.className = 'product-category-header';
-            
+
             const headerLabel = document.createElement('label');
             headerLabel.style.display = 'flex';
             headerLabel.style.alignItems = 'center';
             headerLabel.style.gap = '8px';
             headerLabel.style.cursor = 'pointer';
-            
+
             const headerCb = document.createElement('input');
             headerCb.type = 'checkbox';
             headerCb.className = 'category-select-all';
             headerCb.dataset.category = category;
+            headerCb.title = `${category}全选/取消全选`;
+            headerCb.setAttribute('aria-label', `${category}全选/取消全选`);
             headerCb.addEventListener('change', () => {
                 if (window.toggleCategoryProducts) window.toggleCategoryProducts(category, headerCb.checked);
             });
-            
+
             headerLabel.appendChild(headerCb);
             headerLabel.appendChild(document.createTextNode(` ${category}`));
+            const categorySelectAllText = document.createElement('span');
+            categorySelectAllText.className = 'category-select-all-caption';
+            categorySelectAllText.textContent = '全选';
+            headerLabel.appendChild(categorySelectAllText);
             header.appendChild(headerLabel);
             section.appendChild(header);
 
             // Product Grid
             const grid = document.createElement('div');
             grid.className = 'product-grid';
-            
+
             models.forEach(model => {
                 const item = document.createElement('div');
                 item.className = 'product-checkbox-item';
-                
+
                 const label = document.createElement('label');
                 label.title = model;
-                
+
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
                 cb.className = 'product-item-check';
@@ -18441,11 +19953,11 @@ async function loadProductCatalogForModal() {
                 cb.addEventListener('change', () => {
                     if (window.updateSelectAllStates) window.updateSelectAllStates();
                 });
-                
+
                 const nameSpan = document.createElement('span');
                 nameSpan.className = 'product-name';
                 nameSpan.textContent = model;
-                
+
                 label.appendChild(cb);
                 label.appendChild(nameSpan);
                 item.appendChild(label);
@@ -18464,7 +19976,7 @@ async function loadProductCatalogForModal() {
 window.renderExtraModels = function(models) {
     const container = document.getElementById('productCheckboxes');
     if (!container || !models || models.length === 0) return;
-    
+
     // Check if extra section exists
     let extraSection = document.getElementById('extra-product-section');
     if (!extraSection) {
@@ -18474,39 +19986,39 @@ window.renderExtraModels = function(models) {
         extraSection.style.borderTop = '1px dashed #ccc';
         extraSection.style.marginTop = '15px';
         extraSection.style.paddingTop = '10px';
-        
+
         const header = document.createElement('h4');
         header.className = 'product-category-header';
         header.innerHTML = `
             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; color: #d9534f;">
-                <input type="checkbox" class="category-select-all" data-category="extra_legacy" onchange="toggleCategoryProducts('extra_legacy', this.checked)">
-                非库内机型 (历史数据)
+                <input type="checkbox" class="category-select-all" data-category="extra_legacy" title="非库内机型全选/取消全选" aria-label="非库内机型全选/取消全选" onchange="toggleCategoryProducts('extra_legacy', this.checked)">
+                非库内机型 (历史数据) <span class="category-select-all-caption">全选</span>
             </label>
         `;
         extraSection.appendChild(header);
-        
+
         const grid = document.createElement('div');
         grid.className = 'product-grid';
         grid.id = 'extra-product-grid';
         extraSection.appendChild(grid);
-        
+
         container.appendChild(extraSection);
     }
 
     const grid = document.getElementById('extra-product-grid');
-    
+
     models.forEach(model => {
         // Avoid duplicates
         const exists = Array.from(grid.querySelectorAll('input.product-item-check')).some(cb => cb.value === model);
         if (exists) return;
-        
+
         const item = document.createElement('div');
         item.className = 'product-checkbox-item';
-        
+
         const label = document.createElement('label');
         label.title = model;
         label.style.color = '#666';
-        
+
         const cb = document.createElement('input');
         cb.type = 'checkbox';
         cb.className = 'product-item-check';
@@ -18516,11 +20028,11 @@ window.renderExtraModels = function(models) {
         cb.addEventListener('change', () => {
             if (window.updateSelectAllStates) window.updateSelectAllStates();
         });
-        
+
         const nameSpan = document.createElement('span');
         nameSpan.className = 'product-name';
         nameSpan.textContent = model;
-        
+
         label.appendChild(cb);
         label.appendChild(nameSpan);
         item.appendChild(label);
@@ -18533,10 +20045,18 @@ window.updateProductNameInput = function() {
     const checkedProducts = Array.from(document.querySelectorAll('#productCheckboxes input.product-item-check:checked'))
         .map(cb => cb.value)
         .filter(v => v); // Filter out empty strings if any
-        
+
     const input = document.getElementById('kbEditProductName');
     if (input) {
-        input.value = checkedProducts.join(',');
+        const selectedKeys = new Set(checkedProducts.map(__kbEditNormalizeProductLookup));
+        const legacyKeys = new Set(Array.from(document.querySelectorAll('#productCheckboxes input.product-item-check[data-category="extra_legacy"]'))
+            .map(cb => __kbEditNormalizeProductLookup(cb.value)));
+        const unresolved = __kbEditResolveProductNames(input.value).unrecognized
+            .filter((model) => {
+                const key = __kbEditNormalizeProductLookup(model);
+                return !selectedKeys.has(key) && !legacyKeys.has(key);
+            });
+        input.value = [...checkedProducts, ...unresolved].join(',');
         // Keep dependent UI in sync (e.g. "已选 X 个", dirty state).
         try {
             input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -18560,7 +20080,7 @@ window.toggleCategoryProducts = function(category, checked) {
     document.querySelectorAll(`#productCheckboxes input.product-item-check[data-category="${category}"]`).forEach(cb => {
         cb.checked = checked;
     });
-    
+
     // Update global select all state
     const globalCheckbox = document.getElementById('globalSelectAll');
     if (globalCheckbox) {
@@ -18573,23 +20093,23 @@ window.toggleCategoryProducts = function(category, checked) {
     window.updateProductNameInput();
 };
 
-window.updateSelectAllStates = function() {
+window.updateSelectAllStates = function(syncInput = true) {
     // 1. Update Category Select Alls
     document.querySelectorAll('.product-category-section').forEach(section => {
         const catCheckbox = section.querySelector('.category-select-all');
         if (!catCheckbox) return;
-        
+
         const category = catCheckbox.dataset.category;
         const products = section.querySelectorAll('.product-item-check');
         if (products.length === 0) return;
-        
+
         const allChecked = Array.from(products).every(p => p.checked);
         const someChecked = Array.from(products).some(p => p.checked);
-        
+
         catCheckbox.checked = allChecked;
         catCheckbox.indeterminate = someChecked && !allChecked;
     });
-    
+
     // 2. Update Global Select All
     const globalCheckbox = document.getElementById('globalSelectAll');
     if (globalCheckbox) {
@@ -18601,8 +20121,550 @@ window.updateSelectAllStates = function() {
             globalCheckbox.indeterminate = someChecked && !allChecked;
         }
     }
-    window.updateProductNameInput();
+    if (syncInput) window.updateProductNameInput();
 };
+
+function __kbProductPickerSetModalState(open) {
+    const modal = document.getElementById('kbProductModelPickerModal');
+    if (!modal) return;
+    modal.classList.toggle('is-open', !!open);
+    modal.style.display = open ? 'flex' : 'none';
+    modal.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+
+function __kbProductPickerUpdateCount() {
+    const countEl = document.getElementById('kbProductPickerCount');
+    if (countEl) countEl.textContent = `已选 ${__kbProductPickerDraft?.size || 0} 个`;
+    const selectAll = document.getElementById('kbProductPickerSelectAll');
+    if (!selectAll) return;
+    const total = __kbProductPickerEntries.length;
+    const selected = __kbProductPickerEntries.filter(item => __kbProductPickerDraft?.has(item.key)).length;
+    selectAll.checked = total > 0 && selected === total;
+    selectAll.indeterminate = selected > 0 && selected < total;
+    document.querySelectorAll('#kbProductPickerList .kb-product-picker-category-select').forEach((categoryCheckbox) => {
+        const category = String(categoryCheckbox.dataset.category || '');
+        const items = __kbProductPickerEntries.filter(item => item.category === category);
+        const selectedItems = items.filter(item => __kbProductPickerDraft?.has(item.key));
+        categoryCheckbox.checked = items.length > 0 && selectedItems.length === items.length;
+        categoryCheckbox.indeterminate = selectedItems.length > 0 && selectedItems.length < items.length;
+    });
+}
+
+function toggleKBProductPickerCategory(category, checked) {
+    if (!__kbProductPickerDraft) __kbProductPickerDraft = new Set();
+    __kbProductPickerEntries.forEach((item) => {
+        if (item.category !== category) return;
+        if (checked) __kbProductPickerDraft.add(item.key);
+        else __kbProductPickerDraft.delete(item.key);
+    });
+    __kbProductPickerRender();
+}
+
+function __kbProductPickerRender() {
+    const list = document.getElementById('kbProductPickerList');
+    if (!list) return;
+    const query = String(document.getElementById('kbProductPickerSearch')?.value || '').trim().toLowerCase();
+    list.replaceChildren();
+    const grouped = new Map();
+    __kbProductPickerEntries.forEach((item) => {
+        if (query && !item.value.toLowerCase().includes(query) && !item.category.toLowerCase().includes(query)) return;
+        if (!grouped.has(item.category)) grouped.set(item.category, []);
+        grouped.get(item.category).push(item);
+    });
+    if (!grouped.size) {
+        const empty = document.createElement('div');
+        empty.className = 'kb-editor-picker-empty';
+        empty.textContent = query ? '没有匹配的型号' : '暂无可选择的型号';
+        list.appendChild(empty);
+        __kbProductPickerUpdateCount();
+        return;
+    }
+    grouped.forEach((items, category) => {
+        const section = document.createElement('section');
+        section.className = 'kb-product-picker-section';
+        const heading = document.createElement('h4');
+        const headingLabel = document.createElement('label');
+        headingLabel.className = 'kb-product-picker-category-label';
+        const headingCheckbox = document.createElement('input');
+        headingCheckbox.type = 'checkbox';
+        headingCheckbox.className = 'kb-product-picker-category-select';
+        headingCheckbox.dataset.category = category;
+        headingCheckbox.title = `${category || '未分类'}全选/取消全选`;
+        headingCheckbox.setAttribute('aria-label', `${category || '未分类'}全选/取消全选`);
+        headingCheckbox.addEventListener('change', () => toggleKBProductPickerCategory(category, headingCheckbox.checked));
+        const headingText = document.createElement('span');
+        headingText.textContent = category || '未分类';
+        const headingAction = document.createElement('span');
+        headingAction.className = 'kb-product-picker-category-action';
+        headingAction.textContent = '全选';
+        headingLabel.append(headingCheckbox, headingText, headingAction);
+        heading.appendChild(headingLabel);
+        section.appendChild(heading);
+        const grid = document.createElement('div');
+        grid.className = 'kb-product-picker-grid';
+        items.forEach((item) => {
+            const label = document.createElement('label');
+            label.className = 'kb-product-picker-option';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = __kbProductPickerDraft.has(item.key);
+            checkbox.addEventListener('change', () => {
+                if (checkbox.checked) __kbProductPickerDraft.add(item.key);
+                else __kbProductPickerDraft.delete(item.key);
+                __kbProductPickerUpdateCount();
+            });
+            const text = document.createElement('span');
+            text.textContent = item.value;
+            text.title = item.value;
+            label.append(checkbox, text);
+            grid.appendChild(label);
+        });
+        section.appendChild(grid);
+        list.appendChild(section);
+    });
+    __kbProductPickerUpdateCount();
+}
+
+function openKBProductModelPicker() {
+    const entries = [];
+    const seen = new Set();
+    document.querySelectorAll('#productCheckboxes input.product-item-check').forEach((checkbox) => {
+        const value = String(checkbox.value || '').trim();
+        const key = __kbEditNormalizeProductLookup(value);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        entries.push({ value, key, category: String(checkbox.dataset.category || '未分类') });
+    });
+    __kbProductPickerEntries = entries;
+    __kbProductPickerDraft = new Set(
+        Array.from(document.querySelectorAll('#productCheckboxes input.product-item-check:checked'))
+            .map(checkbox => __kbEditNormalizeProductLookup(checkbox.value))
+            .filter(Boolean)
+    );
+    const search = document.getElementById('kbProductPickerSearch');
+    if (search) search.value = '';
+    __kbProductPickerRender();
+    __kbProductPickerSetModalState(true);
+}
+
+function closeKBProductModelPicker() {
+    __kbProductPickerDraft = null;
+    __kbProductPickerEntries = [];
+    __kbProductPickerSetModalState(false);
+}
+
+function filterKBProductModelPicker(value) {
+    const search = document.getElementById('kbProductPickerSearch');
+    if (search && search.value !== String(value ?? '')) search.value = String(value ?? '');
+    __kbProductPickerRender();
+}
+
+function toggleKBProductPickerSelectAll(checked) {
+    if (!__kbProductPickerDraft) __kbProductPickerDraft = new Set();
+    __kbProductPickerEntries.forEach((item) => {
+        if (checked) __kbProductPickerDraft.add(item.key);
+        else __kbProductPickerDraft.delete(item.key);
+    });
+    __kbProductPickerRender();
+}
+
+function confirmKBProductModelPicker() {
+    const selected = __kbProductPickerDraft || new Set();
+    document.querySelectorAll('#productCheckboxes input.product-item-check').forEach((checkbox) => {
+        checkbox.checked = selected.has(__kbEditNormalizeProductLookup(checkbox.value));
+    });
+    if (window.updateSelectAllStates) window.updateSelectAllStates();
+    closeKBProductModelPicker();
+}
+
+function openKBSimilarQuestionPicker() {
+    const textarea = document.querySelector('#kbEditForm textarea[name="similar_questions"]');
+    __kbSimilarPickerItems = parseSmartListValue(textarea?.value || '', { splitOnAsciiComma: true })
+        .map(value => String(value || '').trim()).filter(Boolean);
+    renderKBSimilarQuestionPicker();
+    const modal = document.getElementById('kbSimilarQuestionPickerModal');
+    if (modal) {
+        modal.classList.add('is-open');
+        modal.style.display = 'flex';
+        modal.setAttribute('aria-hidden', 'false');
+    }
+}
+
+function renderKBSimilarQuestionPicker() {
+    const list = document.getElementById('kbSimilarQuestionPickerList');
+    const count = document.getElementById('kbSimilarPickerCount');
+    if (!list) return;
+    const items = Array.isArray(__kbSimilarPickerItems) ? __kbSimilarPickerItems : [];
+    if (count) count.textContent = `${items.length} 条相似问`;
+    list.replaceChildren();
+    if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'kb-editor-picker-empty';
+        empty.textContent = '暂无相似问，点击“新增相似问”开始添加';
+        list.appendChild(empty);
+        return;
+    }
+    items.forEach((value, index) => {
+        const row = document.createElement('div');
+        row.className = 'kb-similar-picker-row';
+        const number = document.createElement('span');
+        number.className = 'kb-similar-picker-index';
+        number.textContent = String(index + 1).padStart(2, '0');
+        const input = document.createElement('textarea');
+        input.rows = 2;
+        input.value = value;
+        input.placeholder = '输入相似问题';
+        input.addEventListener('input', () => { __kbSimilarPickerItems[index] = input.value; });
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'action-btn btn-sm kb-similar-picker-remove';
+        remove.title = '删除这条相似问';
+        remove.setAttribute('aria-label', `删除第 ${index + 1} 条相似问`);
+        remove.innerHTML = '<i class="fas fa-trash-alt" aria-hidden="true"></i>';
+        remove.addEventListener('click', () => {
+            __kbSimilarPickerItems.splice(index, 1);
+            renderKBSimilarQuestionPicker();
+        });
+        row.append(number, input, remove);
+        list.appendChild(row);
+    });
+}
+
+function addKBSimilarQuestionRow() {
+    if (!Array.isArray(__kbSimilarPickerItems)) __kbSimilarPickerItems = [];
+    __kbSimilarPickerItems.push('');
+    renderKBSimilarQuestionPicker();
+    const list = document.getElementById('kbSimilarQuestionPickerList');
+    const inputs = list?.querySelectorAll('textarea');
+    inputs?.[inputs.length - 1]?.focus();
+}
+
+function closeKBSimilarQuestionPicker() {
+    __kbSimilarPickerItems = null;
+    const modal = document.getElementById('kbSimilarQuestionPickerModal');
+    if (modal) {
+        modal.classList.remove('is-open');
+        modal.style.display = 'none';
+        modal.setAttribute('aria-hidden', 'true');
+    }
+}
+
+function confirmKBSimilarQuestionPicker() {
+    const textarea = document.querySelector('#kbEditForm textarea[name="similar_questions"]');
+    if (textarea) {
+        textarea.value = (Array.isArray(__kbSimilarPickerItems) ? __kbSimilarPickerItems : [])
+            .map(value => String(value || '').trim()).filter(Boolean).join('\n');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        textarea.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    closeKBSimilarQuestionPicker();
+}
+
+let __kbEditTagsLoadState = 'idle';
+let __kbEditTagsLoadSeq = 0;
+
+function __kbEditGetTagNames(includeQuery = false) {
+    const value = document.getElementById('kbEditTagsInput')?.value || '';
+    const query = includeQuery ? document.getElementById('kbEditTagsSearch')?.value || '' : '';
+    const seen = new Set();
+    return __kbParseTagNames(`${value},${query}`).filter(tag => {
+        const key = tag.toLocaleLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function __kbEditColorTag(element, tag) {
+    const palette = {
+        '充电': ['#2563eb', '#eff6ff'],
+        '导购': ['#7c3aed', '#f5f3ff'],
+        '服务': ['#d97706', '#fffbeb'],
+        '会员中心': ['#059669', '#ecfdf5'],
+    };
+    const [color, background] = palette[tag.split('-')[0]] || ['#4b5563', '#f3f4f6'];
+    element.style.setProperty('--tag-color', color);
+    element.style.setProperty('--tag-background', background);
+}
+
+function __kbEditRenderTagChips() {
+    const container = document.getElementById('kbEditTagsChips');
+    if (!container) return;
+    const tags = __kbEditGetTagNames();
+    const existing = new Map(Array.from(container.children).map(chip => [chip.dataset.tag, chip]));
+    existing.forEach((chip, tag) => { if (!tags.includes(tag)) chip.remove(); });
+    tags.forEach(tag => {
+        let chip = existing.get(tag);
+        if (!chip) {
+            chip = document.createElement('span');
+            chip.className = 'kb-edit-tag-chip';
+            chip.dataset.tag = tag;
+            __kbEditColorTag(chip, tag);
+            const dot = document.createElement('span');
+            dot.className = 'kb-edit-tag-dot';
+            dot.setAttribute('aria-hidden', 'true');
+            const text = document.createElement('span');
+            text.className = 'kb-edit-tag-text';
+            text.textContent = tag;
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'kb-edit-tag-remove';
+            remove.title = `删除标签 ${tag}`;
+            remove.setAttribute('aria-label', `删除标签 ${tag}`);
+            remove.innerHTML = '<i class="fas fa-times" aria-hidden="true"></i>';
+            remove.addEventListener('click', event => {
+                event.stopPropagation();
+                __kbEditSetTagNames(__kbEditGetTagNames().filter(value => value !== tag));
+                document.getElementById('kbEditTagsSearch')?.focus();
+            });
+            chip.append(dot, text, remove);
+        }
+        container.appendChild(chip);
+    });
+    const count = document.getElementById('kbEditTagsCount');
+    if (count) count.textContent = `已选 ${tags.length}`;
+    const clear = document.getElementById('kbEditTagsClear');
+    if (clear) clear.hidden = !tags.length;
+}
+
+function __kbEditSyncTagCheckboxes() {
+    const selected = new Set(__kbEditGetTagNames().map(tag => tag.toLocaleLowerCase()));
+    document.querySelectorAll('#kbEditTagsOptions .kb-edit-tag-option input').forEach(checkbox => {
+        checkbox.checked = selected.has(checkbox.value.toLocaleLowerCase());
+    });
+}
+
+function __kbEditSetTagNames(tags) {
+    const input = document.getElementById('kbEditTagsInput');
+    if (!input) return;
+    const previous = input.value;
+    input.value = tags.join(', ');
+    __kbEditRenderTagChips();
+    __kbEditSyncTagCheckboxes();
+    if (input.value !== previous) {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+}
+
+function __kbEditCommitTagQuery() {
+    const search = document.getElementById('kbEditTagsSearch');
+    const query = String(search?.value || '').trim();
+    if (!query) return;
+    const tags = __kbEditGetTagNames();
+    const names = new Map(kbAllTags.map(tag => [tag.toLocaleLowerCase(), tag]));
+    const selected = new Set(tags.map(tag => tag.toLocaleLowerCase()));
+    const duplicates = new Set();
+    __kbParseTagNames(query).forEach(tag => {
+        const key = tag.toLocaleLowerCase();
+        if (selected.has(key)) duplicates.add(key);
+        else { tags.push(names.get(key) || tag); selected.add(key); }
+    });
+    search.value = '';
+    __kbEditSetTagNames(tags);
+    // A duplicate still clears a pending query, which can change the draft digest.
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelectorAll('#kbEditTagsChips .kb-edit-tag-chip').forEach(chip => {
+        if (!duplicates.has(chip.dataset.tag.toLocaleLowerCase())) return;
+        chip.classList.remove('is-duplicate');
+        void chip.offsetWidth;
+        chip.classList.add('is-duplicate');
+    });
+}
+
+function __kbEditCloseTagsDropdown() {
+    const dropdown = document.getElementById('kbEditTagsDropdown');
+    if (dropdown) dropdown.hidden = true;
+    document.getElementById('kbEditTagsDropdownBtn')?.setAttribute('aria-expanded', 'false');
+    document.getElementById('kbEditTagsSearch')?.setAttribute('aria-expanded', 'false');
+}
+
+function __kbEditOpenTagsDropdown() {
+    const dropdown = document.getElementById('kbEditTagsDropdown');
+    if (!dropdown) return;
+    const wasClosed = dropdown.hidden;
+    dropdown.hidden = false;
+    document.getElementById('kbEditTagsDropdownBtn')?.setAttribute('aria-expanded', 'true');
+    document.getElementById('kbEditTagsSearch')?.setAttribute('aria-expanded', 'true');
+    if (wasClosed) void __kbEditLoadTagOptions();
+}
+
+function __kbEditRenderTagOptions() {
+    const options = document.getElementById('kbEditTagsOptions');
+    if (!options) return;
+    const focusedTag = options.contains(document.activeElement) ? document.activeElement.value : null;
+    const previousOptions = new Map(Array.from(options.querySelectorAll('.kb-edit-tag-option')).map(label => [label.querySelector('input').value, label]));
+    options.replaceChildren();
+    const rawQuery = String(document.getElementById('kbEditTagsSearch')?.value || '').trim();
+    const query = rawQuery.toLocaleLowerCase();
+    const selected = new Set(__kbEditGetTagNames().map(tag => tag.toLocaleLowerCase()));
+    const canCreate = query && !selected.has(query) && !kbAllTags.some(tag => tag.toLocaleLowerCase() === query);
+    if (canCreate) {
+        const create = document.createElement('button');
+        create.type = 'button';
+        create.className = 'kb-edit-tags-create';
+        const icon = document.createElement('i');
+        icon.className = 'fas fa-plus';
+        icon.setAttribute('aria-hidden', 'true');
+        const text = document.createElement('span');
+        text.textContent = `创建新标签“${rawQuery}”`;
+        create.append(icon, text);
+        create.addEventListener('click', () => {
+            __kbEditCommitTagQuery();
+            document.getElementById('kbEditTagsSearch')?.focus();
+        });
+        options.appendChild(create);
+    }
+    if (__kbEditTagsLoadState !== 'loaded') {
+        const status = document.createElement('div');
+        status.className = 'kb-edit-tags-status';
+        status.textContent = __kbEditTagsLoadState === 'error' ? '标签加载失败' : '正在加载标签…';
+        options.appendChild(status);
+        if (__kbEditTagsLoadState === 'error') {
+            const retry = document.createElement('button');
+            retry.type = 'button';
+            retry.className = 'tag-load-retry';
+            retry.textContent = '重新加载';
+            retry.addEventListener('click', () => {
+                document.getElementById('kbEditTagsSearch')?.focus();
+                void __kbEditLoadTagOptions();
+            });
+            status.appendChild(retry);
+        }
+        return;
+    }
+    const visible = kbAllTags.filter(tag => tag.toLocaleLowerCase().includes(query));
+    if (!visible.length && !canCreate) {
+        const empty = document.createElement('div');
+        empty.className = 'kb-edit-tags-status';
+        empty.textContent = query ? '没有匹配的标签' : '暂无已有标签';
+        options.appendChild(empty);
+    }
+    visible.forEach(tag => {
+        const existing = previousOptions.get(tag);
+        if (existing) {
+            const checkbox = existing.querySelector('input');
+            checkbox.checked = selected.has(tag.toLocaleLowerCase());
+            options.appendChild(existing);
+            if (focusedTag === tag) checkbox.focus();
+            return;
+        }
+        const label = document.createElement('label');
+        label.className = 'kb-edit-tag-option';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = tag;
+        checkbox.checked = selected.has(tag.toLocaleLowerCase());
+        checkbox.addEventListener('change', () => {
+            const tags = __kbEditGetTagNames().filter(value => value.toLocaleLowerCase() !== tag.toLocaleLowerCase());
+            if (checkbox.checked) tags.push(tag);
+            document.getElementById('kbEditTagsSearch').value = '';
+            __kbEditSetTagNames(tags);
+            __kbEditRenderTagOptions();
+        });
+        const dot = document.createElement('span');
+        dot.className = 'kb-edit-tag-dot';
+        dot.setAttribute('aria-hidden', 'true');
+        __kbEditColorTag(label, tag);
+        const text = document.createElement('span');
+        text.textContent = tag;
+        text.className = 'kb-edit-tag-text';
+        label.append(checkbox, dot, text);
+        options.appendChild(label);
+        if (focusedTag === tag) checkbox.focus();
+    });
+}
+
+async function __kbEditLoadTagOptions() {
+    const seq = ++__kbEditTagsLoadSeq;
+    __kbEditTagsLoadState = 'loading';
+    __kbEditRenderTagOptions();
+    try {
+        await loadKnowledgeBaseTags(true);
+        if (seq !== __kbEditTagsLoadSeq) return;
+        __kbEditTagsLoadState = 'loaded';
+    } catch (error) {
+        if (seq !== __kbEditTagsLoadSeq) return;
+        __kbEditTagsLoadState = 'error';
+        console.error('Failed to load editor tag options:', error);
+    }
+    __kbEditRenderTagOptions();
+}
+
+function __kbEditBindTagsSelector() {
+    __kbEditCloseTagsDropdown();
+    ++__kbEditTagsLoadSeq;
+    __kbEditTagsLoadState = 'idle';
+    const search = document.getElementById('kbEditTagsSearch');
+    if (search) search.value = '';
+    __kbEditRenderTagChips();
+    const selector = document.getElementById('kbEditTagsSelector');
+    if (!selector || selector.dataset.bound === '1') return;
+    selector.dataset.bound = '1';
+    document.getElementById('kbEditTagsDropdownBtn')?.addEventListener('click', () => {
+        const dropdown = document.getElementById('kbEditTagsDropdown');
+        if (!dropdown) return;
+        if (!dropdown.hidden) {
+            __kbEditCloseTagsDropdown();
+            return;
+        }
+        __kbEditOpenTagsDropdown();
+        search?.focus();
+    });
+    search?.addEventListener('focus', __kbEditOpenTagsDropdown);
+    const updateQuery = event => {
+        if (event.isComposing) return;
+        if (/[,，\n]/.test(search.value)) __kbEditCommitTagQuery();
+        __kbEditRenderTagOptions();
+    };
+    search?.addEventListener('input', updateQuery);
+    search?.addEventListener('compositionend', updateQuery);
+    selector.querySelector('.kb-edit-tags-input-row')?.addEventListener('click', event => {
+        if (event.target.closest('button')) return;
+        __kbEditOpenTagsDropdown();
+        search?.focus();
+    });
+    document.getElementById('kbEditTagsClear')?.addEventListener('click', () => {
+        if (search) search.value = '';
+        __kbEditSetTagNames([]);
+        __kbEditRenderTagOptions();
+        search?.focus();
+    });
+    document.getElementById('kbEditTagsInput')?.addEventListener('input', __kbEditRenderTagChips);
+    document.getElementById('kbEditTagsInput')?.addEventListener('change', __kbEditRenderTagChips);
+    selector.addEventListener('focusout', event => {
+        if (selector.contains(event.relatedTarget)) return;
+        queueMicrotask(() => {
+            if (selector.contains(document.activeElement)) return;
+            __kbEditCommitTagQuery();
+            __kbEditCloseTagsDropdown();
+        });
+    });
+    selector.addEventListener('keydown', event => {
+        if (event.isComposing || event.keyCode === 229) return;
+        if (event.key === 'Escape' && !document.getElementById('kbEditTagsDropdown')?.hidden) {
+            event.preventDefault();
+            event.stopPropagation();
+            __kbEditCloseTagsDropdown();
+            search?.blur();
+        }
+        if (event.target !== search) return;
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            __kbEditCommitTagQuery();
+        }
+        if (event.key === 'Backspace' && !search.value) {
+            event.preventDefault();
+            __kbEditSetTagNames(__kbEditGetTagNames().slice(0, -1));
+        }
+    });
+    document.addEventListener('pointerdown', event => {
+        if (!selector.contains(event.target)) {
+            __kbEditCommitTagQuery();
+            __kbEditCloseTagsDropdown();
+        }
+    });
+}
 
 function __kbParseTagNames(input) {
     const s = String(input ?? '').trim();
@@ -18619,24 +20681,173 @@ function __kbParseTagNames(input) {
     return out;
 }
 
+async function __kbEditRefreshReleaseOptionsVisibility() {
+    const options = document.getElementById('kbEditReleaseOptions');
+    if (!options) return;
+    try {
+        const statusResult = await api('/kb/product_catalog/release_intents');
+        const statuses = new Map(((statusResult && statusResult.models) || []).map(item => [
+            String(item.model_id || item.model || '').trim(), String(item.release_status || 'released')
+        ]));
+        const currentModels = __kbEditParseProductNames(document.getElementById('kbEditProductName')?.value || '', true);
+        const initialModels = __kbEditParseProductNames((__kbEditInitialDigest || {}).product_name || '', true);
+        const pendingModels = currentModels.filter(model => statuses.get(model) === 'pending_release');
+        const removedPendingModels = initialModels.filter(model => !currentModels.includes(model) && statuses.get(model) === 'pending_release');
+        options.classList.toggle('d-none', !(pendingModels.length || removedPendingModels.length));
+        const trigger = document.getElementById('kbEditTriggerModels');
+        if (trigger) trigger.value = pendingModels.join(', ');
+        const impact = document.getElementById('kbEditPublicImpactModels');
+        const splitHint = document.getElementById('kbEditSharedKbSplitHint');
+        const onlineImpactModels = initialModels.filter(model => statuses.get(model) === 'released');
+        if (impact) impact.textContent = onlineImpactModels.length
+            ? `当前在线影响型号：${onlineImpactModels.join('、')}`
+            : '当前没有已上线关联型号';
+        if (splitHint) {
+            const sharedWithOnline = onlineImpactModels.length > 1;
+            const targetsSubset = pendingModels.length > 0 && pendingModels.length < onlineImpactModels.length;
+            splitHint.classList.toggle('d-none', !(sharedWithOnline && targetsSubset));
+        }
+    } catch (_) {
+        // 保存时仍会重新执行完整门禁；读取失败不改变编辑流程。
+    }
+}
+
+const KB_RELEASE_FORMAL_FIELDS = new Set([
+    'question', 'answer', 'question_type', 'answer_type', 'if_bm25',
+    'similar_questions', 'error_list', 'keyword_list', 'image_urls',
+    'video_urls', 'file_urls', 'link_type', 'link_url', 'product_category_name'
+]);
+
+async function __kbEditBuildReleaseSubmission(data) {
+    const options = document.getElementById('kbEditReleaseOptions');
+    const statusResult = await api('/kb/product_catalog/release_intents');
+    const statuses = new Map(((statusResult && statusResult.models) || []).map(item => [
+        String(item.model_id || item.model || '').trim(), String(item.release_status || 'released')
+    ]));
+    const modelIds = __kbEditParseProductNames(data.product_name || '', true);
+    const pendingModels = modelIds.filter(model => statuses.get(model) === 'pending_release');
+    const baseModels = __kbEditParseProductNames((__kbEditInitialDigest || {}).product_name || '', true);
+    const removedModels = baseModels.filter(model => !modelIds.includes(model));
+    const expectedModelStates = {};
+    [...new Set([...modelIds, ...removedModels])].forEach(model => {
+        if (statuses.has(model)) expectedModelStates[model] = statuses.get(model);
+    });
+    const onlineImpactModels = baseModels.filter(model => statuses.get(model) === 'released');
+    const impactLabel = document.getElementById('kbEditPublicImpactModels');
+    const splitHint = document.getElementById('kbEditSharedKbSplitHint');
+    if (impactLabel) {
+        impactLabel.textContent = onlineImpactModels.length
+            ? `当前在线影响型号：${onlineImpactModels.join('、')}`
+            : '当前没有已上线关联型号';
+    }
+    if (splitHint) {
+        const sharedWithOnline = onlineImpactModels.length > 1;
+        const targetsSubset = pendingModels.length > 0 && pendingModels.length < onlineImpactModels.length;
+        splitHint.classList.toggle('d-none', !(sharedWithOnline && targetsSubset));
+    }
+    const changedFields = Array.isArray(data.changed_fields) ? data.changed_fields : [];
+    const formalChanged = __kbEditIsCreateMode
+        ? KB_RELEASE_FORMAL_FIELDS.size > 0
+        : changedFields.some(field => KB_RELEASE_FORMAL_FIELDS.has(field));
+
+    if (!pendingModels.length && !removedModels.some(model => statuses.get(model) === 'pending_release')) {
+        if (options) options.classList.add('d-none');
+        return null;
+    }
+
+    let effectMode = formalChanged ? String(document.getElementById('kbEditEffectMode')?.value || 'immediate') : 'association_only';
+    if (formalChanged && options && options.classList.contains('d-none')) {
+        options.classList.remove('d-none');
+        const trigger = document.getElementById('kbEditTriggerModels');
+        if (trigger) trigger.value = pendingModels.join(', ');
+        showToast('请选择内容生效方式并确认影响范围后再次保存', 'warning');
+        return { needsConfirmation: true };
+    }
+    if (options) options.classList.toggle('d-none', !formalChanged);
+    const trigger = document.getElementById('kbEditTriggerModels');
+    if (trigger) trigger.value = pendingModels.join(', ');
+    const publicConfirmed = Boolean(document.getElementById('kbEditPublicImpactConfirmed')?.checked);
+    if (formalChanged && !__kbEditIsCreateMode && !publicConfirmed) {
+        showToast('请先确认公共 KB 对全部在线型号的影响', 'warning');
+        return { needsConfirmation: true };
+    }
+
+    const wikiId = String(data.question_wiki_id || '').trim()
+        || `DRAFT-${window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+    data.question_wiki_id = wikiId;
+    let parentPendingId = '';
+    let cancelPendingIds = [];
+    if (effectMode === 'with_model_release' || effectMode === 'immediate') {
+        const chainResult = await api(`/kb/${encodeURIComponent(wikiId)}/pending-chain`);
+        const active = ((chainResult && chainResult.pending_chain) || [])
+            .filter(item => item.status === 'pending_release' || item.status === 'blocked');
+        if (effectMode === 'with_model_release') {
+            parentPendingId = active.length ? String(active[active.length - 1].pending_id || '') : '';
+        } else if (active.length) {
+            const choices = active.map(item => `${item.pending_id}（版本 ${item.sequence_no}，${item.status}）`).join('\n');
+            const selected = String(window.prompt(
+                `立即生效会使所选 pending 失效。请输入要取消的 pending ID，多个用逗号分隔：\n${choices}`,
+                ''
+            ) || '').trim();
+            cancelPendingIds = __kbEditParseProductNames(selected, true);
+            if (!cancelPendingIds.length) {
+                showToast('未选择要取消的 pending，已保留当前编辑内容', 'warning');
+                return { needsConfirmation: true };
+            }
+        }
+    }
+    const snapshot = { ...data };
+    ['base_version', 'base_values', 'changed_fields', 'operation_id', 'source_code',
+        'change_source', 'quality_task_id', 'base_update_time', 'confirmed_references'].forEach(key => delete snapshot[key]);
+    return {
+        wikiId,
+        effectMode,
+        payload: {
+            is_create: __kbEditIsCreateMode,
+            effect_mode: effectMode,
+            model_ids: modelIds,
+            removed_model_ids: removedModels,
+            trigger_model_ids: pendingModels,
+            parent_pending_id: parentPendingId,
+            cancel_pending_ids: cancelPendingIds,
+            snapshot,
+            baseline_snapshot: __kbEditIsCreateMode ? null : (__kbEditInitialDigest || null),
+            baseline_content_version: __kbEditIsCreateMode ? 0 : (Number.isInteger(Number(__kbEditBaseVersion)) ? Number(__kbEditBaseVersion) : 1),
+            changed_fields: formalChanged ? (changedFields.length ? changedFields : Array.from(KB_RELEASE_FORMAL_FIELDS)) : ['product_name'],
+            public_kb_confirmed: publicConfirmed,
+            expected_model_states: expectedModelStates,
+            operation_id: data.operation_id || (window.crypto?.randomUUID ? window.crypto.randomUUID() : `kb-${Date.now()}`),
+        }
+    };
+}
+
 async function saveKBItem() {
     let { data, tagNames } = __kbEditBuildSubmitPayload();
     const savedDiffs = __kbEditBuildSavedDiffs();
-    
+
     const btn = document.getElementById('saveKBItemBtn');
     __kbEditSaving = true;
     btn.disabled = true;
     btn.innerText = '保存中...';
-    
+
     try {
-        if (!navigator.onLine) {
+        if (!await __kbEditCanReachServer()) {
             __kbEditQueuePendingSync({ data, tagNames });
             __kbEditSaveDraftNow();
             __kbEditSetDraftStatus('pending_sync');
-            showToast('当前离线，已保存到本地并将在联网后自动同步');
+            showToast('无法连接知识库服务，已暂存到当前浏览器；连接恢复后重新打开编辑器可重试同步');
             return;
         }
-        let res = await api('/kb/update', 'POST', data);
+        const releaseSubmission = await __kbEditBuildReleaseSubmission(data);
+        if (releaseSubmission?.needsConfirmation) return;
+        let res;
+        if (releaseSubmission) {
+            res = await api(`/kb/${encodeURIComponent(releaseSubmission.wikiId)}/changes`, 'POST', releaseSubmission.payload);
+            res = { ...res, success: Boolean(res && res.ok), question_wiki_id: releaseSubmission.wikiId,
+                pending_saved: releaseSubmission.effectMode === 'with_model_release' || releaseSubmission.effectMode === 'association_only' };
+        } else {
+            res = await api('/kb/update', 'POST', data);
+        }
         if (res?.conflict) {
             const decision = __kbEditHandleConflict(res, data);
             if (decision.action === 'rebase') return;
@@ -18647,13 +20858,13 @@ async function saveKBItem() {
                 return;
             }
         }
-        
+
         // 调试日志：输出完整响应
         console.log('[DEBUG] KB Update Response:', res);
         console.log('[DEBUG] Response Keys:', Object.keys(res || {}));
         console.log('[DEBUG] res.success:', res.success);
         console.log('[DEBUG] typeof res.success:', typeof res.success);
-        
+
         if (!res.success) {
             const errorMsg = res.message || res.error || '未知错误';
             console.error('[DEBUG] Save Failed:', errorMsg);
@@ -18666,11 +20877,13 @@ async function saveKBItem() {
             });
             return;
         }
-        
+
         console.log('[DEBUG] Save Success!');
 
         // Sync KB tags after saving row content (even when no_change=true)
         const savedWikiId = String(res.question_wiki_id || data.question_wiki_id || '').trim();
+        const originalTagNames = __kbParseTagNames(__kbEditInitialDigest?.kb_tags_input || '');
+        const tagsChanged = JSON.stringify([...tagNames].sort()) !== JSON.stringify([...originalTagNames].sort());
         // Do not delay the host's recheck eligibility on best-effort tag synchronization.
         kbEditEmbedSaved = true;
         postKbEditEmbedMessage('saved', {
@@ -18682,7 +20895,7 @@ async function saveKBItem() {
             modLogOk: typeof res.mod_log_ok === 'boolean' ? res.mod_log_ok : undefined,
             warning: String(res.warning || '').trim(),
         });
-        if (savedWikiId) {
+        if (savedWikiId && !res.pending_saved && tagsChanged) {
             try {
                 const tr = await api('/kb/item/tags', 'PUT', {
                     libraryType: 'current',
@@ -18691,9 +20904,9 @@ async function saveKBItem() {
                 });
                 if (!tr || !tr.success) {
                     showToast('保存标签失败: ' + (tr?.message || '未知错误'), 'error');
-                } else {
+                } else if (tr.changed) {
                     // Refresh tag dictionary so the filter dropdown can show newly created tags immediately.
-                    try { await fetchKBAllTags(); } catch {}
+                    try { await loadKnowledgeBaseTags(true); } catch {}
                 }
             } catch (e) {
                 showToast('保存标签异常: ' + e.message, 'error');
@@ -18766,17 +20979,17 @@ async function saveKBItem() {
 function openExportModal() {
     const modal = document.getElementById('exportModal');
     if (!modal) return;
-    
+
     // Update selected count
     const countSpan = document.getElementById('exportSelectedCount');
     if (countSpan) {
         countSpan.innerText = `(${selectedKBRows.size} 条)`;
     }
-    
+
     // Check/Uncheck "Selected" radio based on selection
     const selectedRadio = document.getElementById('exportSelectedRadio');
     const allRadio = document.querySelector('input[name="exportScope"][value="all"]');
-    
+
     if (selectedKBRows.size > 0) {
         if (selectedRadio) {
             selectedRadio.disabled = false;
@@ -18789,34 +21002,34 @@ function openExportModal() {
         }
         if (allRadio) allRadio.checked = true;
     }
-    
+
     // Generate Column Checkboxes
     const colContainer = document.getElementById('columnSelector');
     if (colContainer) {
         colContainer.innerHTML = '';
         kbColumns.forEach(col => {
             if (col.key === 'checkbox') return; // Skip checkbox column
-            
+
             const label = document.createElement('label');
             label.className = 'checkbox-label';
             label.style.display = 'block';
             label.style.marginBottom = '5px';
-            
+
             const cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.value = col.field || col.key; // Use field name for backend
             cb.checked = col.visible !== false; // Default to visible columns
             cb.dataset.title = col.title;
-            
+
             label.appendChild(cb);
             label.appendChild(document.createTextNode(' ' + col.title));
             colContainer.appendChild(label);
         });
     }
-    
+
     // Initialize column selector visibility
     toggleExportCols();
-    
+
     modal.style.display = 'block';
 }
 
@@ -18828,7 +21041,7 @@ function closeExportModal() {
 function toggleExportCols() {
     const selectedColsRadio = document.querySelector('input[name="exportCols"][value="selected"]');
     const colSelector = document.getElementById('columnSelector');
-    
+
     if (selectedColsRadio && selectedColsRadio.checked) {
         if (colSelector) colSelector.style.display = 'block';
     } else {
@@ -18839,34 +21052,34 @@ function toggleExportCols() {
 function confirmExport() {
     // 1. Get Scope
     const scope = document.querySelector('input[name="exportScope"]:checked')?.value || 'all';
-    
+
     // 2. Get Columns
     const colScope = document.querySelector('input[name="exportCols"]:checked')?.value || 'all';
     let columns = '*';
-    
+
     if (colScope === 'selected') {
         const checkedCols = Array.from(document.querySelectorAll('#columnSelector input:checked'))
             .map(cb => cb.value);
-        
+
         if (checkedCols.length === 0) {
             alert('请至少选择一列导出');
             return;
         }
         columns = checkedCols.join(',');
     }
-    
+
     // 3. Build Query Params
     const params = new URLSearchParams();
-    
+
     // Common Filters (same as loadKBTable)
     const tableInputs = document.querySelectorAll('input[name="kbTable"]');
     let table = 'knowledge_base_v1';
     tableInputs.forEach(input => { if (input.checked) table = input.value; });
     params.append('table', table);
-    
+
     // Only apply filters if exporting ALL (filtered results)
     // If exporting SELECTED, we just use IDs
-    
+
     if (scope === 'selected') {
         if (selectedKBRows.size === 0) {
             alert('未选择任何数据');
@@ -18883,10 +21096,10 @@ function confirmExport() {
         const question = document.getElementById('questionSearch').value.trim();
         const similarQuestion = document.getElementById('similarQuestionSearch') ? document.getElementById('similarQuestionSearch').value.trim() : '';
         const answer = document.getElementById('answerSearch').value.trim();
-        
+
         const statusChips = document.querySelectorAll('#reviewStatusChips .tag-chip.active');
         const statuses = Array.from(statusChips).map(chip => chip.dataset.value);
-        
+
         if (id) params.append('id', id);
         if (product) params.append('product', product);
         if (question) params.append('question', question);
@@ -18894,16 +21107,16 @@ function confirmExport() {
         if (answer) params.append('answer', answer);
         if (statuses.length > 0) params.append('review_status', statuses.join(','));
     }
-    
+
     // Columns
     if (columns !== '*') {
         params.append('columns', columns);
     }
-    
+
     // Trigger Download
     const url = `/api/kb/export?${params.toString()}`;
     window.open(url, '_blank');
-    
+
     closeExportModal();
 }
 
@@ -18939,7 +21152,7 @@ function recordMatrixPendingChange(change) {
     const productName = String(change.product_name || '').trim();
     const key = matrixChangeKey(wikiId, productName);
     if (!wikiId || !productName) return;
-    
+
     const prev = matrixPendingChanges.get(key);
     if (!prev) {
         matrixPendingChanges.set(key, {
@@ -18952,14 +21165,14 @@ function recordMatrixPendingChange(change) {
         });
         return;
     }
-    
+
     prev.new_is_configured = !!change.new_is_configured;
     if (change && Object.prototype.hasOwnProperty.call(change, 'override_old') && change.override_old === true) {
         prev.old_is_configured = !!change.old_is_configured;
     }
     if (change.edit_source) prev.edit_source = change.edit_source;
     prev.updated_at = Date.now();
-    
+
     if (prev.old_is_configured === prev.new_is_configured) {
         matrixPendingChanges.delete(key);
     }
@@ -19025,7 +21238,7 @@ function validateMatrixPendingChanges(changes) {
         errors.push('没有可提交的修改。');
         return { ok: false, errors };
     }
-    
+
     changes.forEach((c, idx) => {
         const prefix = `第 ${idx + 1} 条`;
         if (!c || typeof c !== 'object') {
@@ -19038,10 +21251,10 @@ function validateMatrixPendingChanges(changes) {
         if (typeof c.new_is_configured !== 'boolean') errors.push(`${prefix}: new_is_configured 必须是布尔值`);
         if (c.old_is_configured === c.new_is_configured) errors.push(`${prefix}: 修改前后无差异`);
     });
-    
+
     const uniqKeys = new Set(changes.map(c => matrixChangeKey(c.question_wiki_id, c.product_name)));
     if (uniqKeys.size !== changes.length) errors.push('存在重复的 (question_wiki_id, product_name) 组合，请刷新后重试。');
-    
+
     return { ok: errors.length === 0, errors };
 }
 
@@ -19087,10 +21300,10 @@ async function submitMatrixChanges() {
         alert('请先勾选要提交的行（行内出现🟢/🔴的机型才会被提交）');
         return;
     }
-    
+
     matrixSubmitInFlight = true;
     setMatrixSubmitButtonLoading(true);
-    
+
     try {
         const preview = await api('/matrix/mismatch_changes', 'POST', {
             wiki_ids: Array.from(selectedMatrixRows)
@@ -19107,18 +21320,18 @@ async function submitMatrixChanges() {
         const affectedCount = Number.isFinite(preview.affected_wiki_ids_count)
             ? preview.affected_wiki_ids_count
             : new Set(changes.map(c => String(c?.question_wiki_id || '').trim()).filter(Boolean)).size;
-        
+
         if (!confirm(`将提交选中行中的 🟢/🔴 修改：${changes.length} 格（涉及 ${affectedCount} 条知识条目）。\n确认继续？`)) {
             return;
         }
-        
+
         const submitRes = await submitMatrixChangesInBatches(changes, {
             onProgress: (doneBatches, totalBatches) => {
                 const btn = document.getElementById('matrixSubmitChangesBtn');
                 if (btn) btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> 提交中 (${doneBatches}/${totalBatches})...`;
             }
         });
-        
+
         showToast(`提交完成：${changes.length} 格（涉及 ${affectedCount} 条知识条目）`, 'success');
         if (submitRes && Array.isArray(submitRes.warnings) && submitRes.warnings.length > 0) {
             showToast(`提交完成，但修改记录写入有告警：${submitRes.warnings[0]}`, 'warning');
@@ -19136,7 +21349,7 @@ async function submitMatrixAllChanges() {
     if (matrixSubmitInFlight) return;
     matrixSubmitInFlight = true;
     setMatrixSubmitButtonLoading(true);
-    
+
     try {
         const preview = await api('/matrix/mismatch_changes', 'POST', {});
         if (!preview || !preview.success) {
@@ -19151,18 +21364,18 @@ async function submitMatrixAllChanges() {
         const affectedCount = Number.isFinite(preview.affected_wiki_ids_count)
             ? preview.affected_wiki_ids_count
             : new Set(changes.map(c => String(c?.question_wiki_id || '').trim()).filter(Boolean)).size;
-        
+
         if (!confirm(`将提交全量 🟢/🔴 修改：${changes.length} 格（涉及 ${affectedCount} 条知识条目）。\n确认继续？`)) {
             return;
         }
-        
+
         const submitRes = await submitMatrixChangesInBatches(changes, {
             onProgress: (doneBatches, totalBatches) => {
                 const btn = document.getElementById('matrixSubmitAllChangesBtn');
                 if (btn) btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> 提交中 (${doneBatches}/${totalBatches})...`;
             }
         });
-        
+
         showToast(`全量提交完成：${changes.length} 格（涉及 ${affectedCount} 条知识条目）`, 'success');
         if (submitRes && Array.isArray(submitRes.warnings) && submitRes.warnings.length > 0) {
             showToast(`全量提交完成，但修改记录写入有告警：${submitRes.warnings[0]}`, 'warning');
@@ -19227,7 +21440,7 @@ async function submitMatrixChangesInBatches(changes, opts = {}) {
             source_code: opts.sourceCode || 'product_matrix',
             changes: batch
         });
-        
+
         if (!res || !res.success) {
             if (res && Array.isArray(res.errors) && res.errors.length > 0) {
                 throw new Error(res.errors.join('\n'));
@@ -19277,7 +21490,7 @@ async function loadMatrixSubmitLogs() {
     const tbody = document.getElementById('matrixSubmitLogsTbody');
     if (statusEl) statusEl.innerText = '加载中...';
     if (tbody) tbody.innerHTML = '';
-    
+
     try {
         const res = await api('/matrix/submit_logs?limit=50');
         if (!res || !res.success) {
@@ -19290,7 +21503,7 @@ async function loadMatrixSubmitLogs() {
             return;
         }
         if (statusEl) statusEl.innerText = `共 ${rows.length} 条`;
-        
+
         if (!tbody) return;
         rows.forEach(r => {
             const tr = document.createElement('tr');
@@ -19486,17 +21699,17 @@ async function refreshMatrixFilteredTotal() {
 function getMatrixRowMarkerFlags(row) {
     let hasGreen = false;
     let hasRed = false;
-    
+
     const cols = Array.isArray(matrixColumns) ? matrixColumns : [];
     const sourceAvailable = Array.isArray(row?.source_products);
-    
+
     const sourceSet = sourceAvailable ? toMatrixNormalizedStringSet(row.source_products) : new Set();
-    
+
     for (const prod of cols) {
         const prodKey = (prod ?? '').toString().trim();
         if (!prodKey) continue;
         const prodNorm = normalizeMatrixProductName(prodKey);
-        
+
         if (sourceAvailable) {
             const cellData = row?.products?.[prodKey];
             const currentConfigured = !!(cellData && cellData.is_configured);
@@ -19507,10 +21720,10 @@ function getMatrixRowMarkerFlags(row) {
                 else if (src === 'bulk') hasGreen = true;
             }
         }
-        
+
         if (hasGreen && hasRed) break;
     }
-    
+
     return { hasGreen, hasRed };
 }
 
@@ -19552,7 +21765,7 @@ function setMatrixChipActive(container, value) {
 function renderMatrixChips(containerId, values, activeValue, onSelect) {
     const container = document.getElementById(containerId);
     if (!container) return;
-    
+
     let normalizedValues = [];
     if (Array.isArray(values)) {
         normalizedValues = values;
@@ -19561,7 +21774,7 @@ function renderMatrixChips(containerId, values, activeValue, onSelect) {
     }
     const uniq = Array.from(new Set((normalizedValues || []).filter(v => v && String(v).trim()))).map(v => String(v).trim());
     const allValue = '';
-    
+
     container.innerHTML = '';
 
     if (uniq.length === 0) {
@@ -19571,7 +21784,7 @@ function renderMatrixChips(containerId, values, activeValue, onSelect) {
         container.appendChild(empty);
         return;
     }
-    
+
     const makeChip = (label, value) => {
         const chip = document.createElement('div');
         chip.className = 'tag-chip' + (value === activeValue ? ' active' : '');
@@ -19583,7 +21796,7 @@ function renderMatrixChips(containerId, values, activeValue, onSelect) {
         };
         return chip;
     };
-    
+
     container.appendChild(makeChip('全部', allValue));
     uniq.forEach(v => container.appendChild(makeChip(v, v)));
 }
@@ -19905,7 +22118,7 @@ async function loadMatrixData(page = 1, options = {}) {
     const q = document.getElementById('matrixSearchQuestion').value.trim();
     const a = document.getElementById('matrixSearchAnswer')?.value.trim() || '';
     const pModels = Array.from(matrixSearchProductSelected);
-    
+
     const params = new URLSearchParams({
         page: page,
         per_page: matrixPageSize,
@@ -19918,12 +22131,12 @@ async function loadMatrixData(page = 1, options = {}) {
     const wantUnmodified = !!matrixMarkFilter.unmodified;
     params.append('mark_modified', wantModified ? '1' : '0');
     params.append('mark_unmodified', wantUnmodified ? '1' : '0');
-    
+
     if (pModels.length > 0) {
         params.append('p_models', pModels.join(','));
         params.append('p_mode', matrixProductMatchMode || 'any');
     }
-    
+
     if (matrixProductCategoryFilter) params.append('pc', matrixProductCategoryFilter);
     if (matrixMappingCategoryFilter) params.append('mc', matrixMappingCategoryFilter);
     if (matrixColumnModelSelected.size > 0) {
@@ -19946,7 +22159,7 @@ async function loadMatrixData(page = 1, options = {}) {
         await ensureMatrixAllModelsLoaded();
         setupMatrixColumnModelFilterUI();
         setupMatrixSearchProductFilterUI();
-        
+
         const res = await api(`/matrix/data?${params.toString()}`);
         if (res.error) {
             tbody.innerHTML = `<tr><td colspan="100" class="error-message">加载失败: ${res.error}</td></tr>`;
@@ -19959,7 +22172,7 @@ async function loadMatrixData(page = 1, options = {}) {
         matrixCurrentPage = res.page;
         matrixLoaded = true;
         matrixLastRequestKey = requestKey;
-        
+
         if (Array.isArray(res.product_categories)) {
             renderMatrixChips(
                 'matrixProductCategoryChips',
@@ -19971,15 +22184,15 @@ async function loadMatrixData(page = 1, options = {}) {
                 }
             );
         }
-        
+
         if (Array.isArray(res.mapping_categories)) {
             renderMatrixMappingCategorySelect(res.mapping_categories, matrixMappingCategoryFilter);
         }
-        
+
         renderMatrixTable();
         updateMatrixPagination();
         refreshMatrixFilteredTotal();
-        
+
     } catch (e) {
         console.error("Load matrix failed", e);
         tbody.innerHTML = '<tr><td colspan="100" class="error-message">系统错误: ' + e.message + '</td></tr>';
@@ -19989,14 +22202,14 @@ async function loadMatrixData(page = 1, options = {}) {
 function renderMatrixTable() {
     const thead = document.getElementById('matrixTableHead');
     const tbody = document.getElementById('matrixTableBody');
-    
+
     if (!currentMatrixData || currentMatrixData.length === 0) {
         thead.innerHTML = '';
         updateMatrixDiffCompareNotice(false);
         tbody.innerHTML = '<tr><td colspan="100" class="empty-message">暂无数据</td></tr>';
         return;
     }
-    
+
     const diffCompareModels = getMatrixDiffCompareModels();
     const diffCompareActive = isMatrixDiffCompareActive();
     const rowsToRender = Array.isArray(currentMatrixData) ? currentMatrixData : [];
@@ -20011,7 +22224,7 @@ function renderMatrixTable() {
         <th class="matrix-fixed-header" style="min-width: 250px; width: 280px; max-width: 300px;">问题</th>
         <th class="matrix-fixed-header" style="min-width: 400px; width: 460px; max-width: 500px;">答案</th>
     `;
-    
+
     const columnsToRender = diffCompareActive ? diffCompareModels : matrixColumns;
     matrixBindConfigInteractions();
     columnsToRender.forEach(prod => {
@@ -20031,7 +22244,7 @@ function renderMatrixTable() {
             else if (src === 'bulk') hasBulkEdit = true;
             if (hasCellEdit && hasBulkEdit) break;
         }
-        
+
         let iconsHtml = '';
         if (hasCellEdit || hasBulkEdit) {
             const parts = [];
@@ -20039,33 +22252,33 @@ function renderMatrixTable() {
             if (hasBulkEdit) parts.push('<span class="matrix-origin-header-icon" title="本页包含按钮批量修改">🟢</span>');
             iconsHtml = `<span class="matrix-origin-header-icons">${parts.join('')}</span>`;
         }
-        
+
         headHtml += `<th class="matrix-fixed-header matrix-prod-header" style="min-width: 60px; width: 70px; max-width: 80px; text-align: center;">${escapeHtml(prod)}${iconsHtml}</th>`;
     });
-    
+
     thead.innerHTML = headHtml;
     tbody.innerHTML = '';
-    
+
     if (!rowsToRender || rowsToRender.length === 0) {
         tbody.innerHTML = `<tr><td colspan="100" class="empty-message">${diffCompareActive ? '当前选中机型无差异行' : '无符合筛选的行'}</td></tr>`;
         makeTableResizable('matrixTable');
         tdRefreshCellOverflow(document.getElementById('matrixTable') || document);
         return;
     }
-    
+
     rowsToRender.forEach(row => {
         const tr = document.createElement('tr');
         const minorityModels = diffCompareActive && diffCompareModels.length >= 3
             ? getMatrixDiffMinorityModels(row, diffCompareModels)
             : new Set();
-        
+
         const isSelected = selectedMatrixRows.has(row.question_wiki_id);
         const checkTd = document.createElement('td');
         checkTd.className = "matrix-body-fixed-left";
         checkTd.style.textAlign = "center";
         checkTd.innerHTML = `<input type="checkbox" class="matrix-row-check" value="${row.question_wiki_id}" ${isSelected ? 'checked' : ''} onchange="toggleMatrixRow('${row.question_wiki_id}')">`;
         tr.appendChild(checkTd);
-        
+
         const idTd = document.createElement('td');
         idTd.className = "matrix-body-fixed-left-2";
         const wid = row.question_wiki_id || '';
@@ -20076,7 +22289,7 @@ function renderMatrixTable() {
         idTd.dataset.modalAllowed = '1';
         idTd.onclick = () => copyToClipboard(wid);
         tr.appendChild(idTd);
-        
+
         const catTd = document.createElement('td');
         const catText = row.product_category || row.product_category_name || '-';
         catTd.innerText = catText;
@@ -20085,7 +22298,7 @@ function renderMatrixTable() {
         catTd.dataset.fullText = catText;
         catTd.dataset.modalAllowed = '1';
         tr.appendChild(catTd);
-        
+
         const qTd = document.createElement('td');
         const qText = row.question_content || row.question || '';
         qTd.classList.add('matrix-detail-cell');
@@ -20094,7 +22307,7 @@ function renderMatrixTable() {
         qTd.dataset.modalAllowed = '1';
         qTd.innerHTML = tdRenderExpandableText(`matrix:${wid}:question`, qText, { placeholder: '-' });
         tr.appendChild(qTd);
-        
+
         const aTd = document.createElement('td');
         const aText = row.answer_content || row.answer || '';
         aTd.classList.add('matrix-detail-cell');
@@ -20103,7 +22316,7 @@ function renderMatrixTable() {
         aTd.dataset.modalAllowed = '1';
         aTd.innerHTML = tdRenderExpandableText(`matrix:${wid}:answer`, aText, { placeholder: '-' });
         tr.appendChild(aTd);
-        
+
         columnsToRender.forEach(prod => {
             const td = document.createElement('td');
             td.className = 'matrix-config-cell';
@@ -20120,12 +22333,12 @@ function renderMatrixTable() {
             const mismatch = sourceAvailable ? (!!isConfigured !== sourceConfigured) : false;
             const editSource = mismatch ? normalizeMatrixEditSource(cellData) : '';
             if (minorityModels.has(prodKey)) td.classList.add('matrix-diff-minority-cell');
-            
+
             td.innerHTML = renderMatrixCellHtml(!!isConfigured, editSource);
             td.title = isConfigured ? "已配置 (点击取消)" : "未配置 (点击启用)";
             tr.appendChild(td);
         });
-        
+
         tbody.appendChild(tr);
     });
 
@@ -20142,7 +22355,7 @@ function updateMatrixPagination() {
     const next = document.getElementById('nextMatrixPageBtn');
     const totalPages = Math.max(1, Math.ceil((matrixTotal || 0) / (matrixPageSize || 1)));
     const currentPage = Math.min(Math.max(1, matrixCurrentPage || 1), totalPages);
-    
+
     if (info) {
         info.innerText = `第 ${currentPage}/${totalPages} 页 ｜ 共 ${matrixTotal} 条`;
     }
@@ -20194,7 +22407,7 @@ function renderMatrixColumnModelSelectedChips() {
     const container = document.getElementById('matrixColumnModelSelectedChips');
     if (!container) return;
     container.innerHTML = '';
-    
+
     const selected = Array.from(matrixColumnModelSelected);
     selected.forEach(model => {
         const chip = document.createElement('div');
@@ -20202,11 +22415,11 @@ function renderMatrixColumnModelSelectedChips() {
         chip.style.display = 'inline-flex';
         chip.style.alignItems = 'center';
         chip.style.gap = '8px';
-        
+
         const text = document.createElement('span');
         text.innerText = model;
         chip.appendChild(text);
-        
+
         const close = document.createElement('span');
         close.innerText = '×';
         close.style.cursor = 'pointer';
@@ -20219,7 +22432,7 @@ function renderMatrixColumnModelSelectedChips() {
             loadMatrixData(1);
         };
         chip.appendChild(close);
-        
+
         container.appendChild(chip);
     });
 }
@@ -20237,14 +22450,14 @@ function clearMatrixColumnModelFilter() {
 
 function setupMatrixColumnModelFilterUI() {
     if (matrixColumnModelUIBound) return;
-    
+
     const input = document.getElementById('matrixColumnModelInput');
     const btn = document.getElementById('matrixColumnModelDropdownBtn');
     const dropdown = document.getElementById('matrixColumnModelDropdown');
     const container = input?.closest('.input-with-dropdown') || input?.parentElement;
-    
+
     if (!input || !btn || !dropdown || !container) return;
-    
+
     function renderDropdown() {
         dropdown.innerHTML = '';
         const q = input.value.trim().toLowerCase();
@@ -20253,7 +22466,7 @@ function setupMatrixColumnModelFilterUI() {
             .filter(m => m && !selected.has(m))
             .filter(m => !q || String(m).toLowerCase().includes(q))
             .slice(0, 80);
-        
+
         if (filtered.length === 0) {
             const empty = document.createElement('div');
             empty.className = 'dropdown-item';
@@ -20263,7 +22476,7 @@ function setupMatrixColumnModelFilterUI() {
             dropdown.appendChild(empty);
             return;
         }
-        
+
         filtered.forEach(model => {
             const item = document.createElement('div');
             item.className = 'dropdown-item';
@@ -20285,7 +22498,7 @@ function setupMatrixColumnModelFilterUI() {
             dropdown.appendChild(item);
         });
     }
-    
+
     btn.onclick = (e) => {
         e.stopPropagation();
         e.preventDefault();
@@ -20300,19 +22513,19 @@ function setupMatrixColumnModelFilterUI() {
         container.classList.add('is-open');
         input.focus();
     };
-    
+
     input.addEventListener('focus', () => {
         renderDropdown();
         dropdown.classList.add('show');
         container.classList.add('is-open');
     });
-    
+
     input.addEventListener('input', () => {
         if (dropdown.classList.contains('show')) {
             renderDropdown();
         }
     });
-    
+
     container.addEventListener('click', (e) => {
         if (e.target === input) return;
         input.focus();
@@ -20321,14 +22534,14 @@ function setupMatrixColumnModelFilterUI() {
             dropdown.classList.add('show');
         }
     });
-    
+
     document.addEventListener('click', (e) => {
         if (!container.contains(e.target) && !dropdown.contains(e.target) && e.target !== btn) {
             dropdown.classList.remove('show');
             container.classList.remove('is-open');
         }
     });
-    
+
     matrixColumnModelUIBound = true;
     renderMatrixColumnModelSelectedChips();
 }
@@ -20393,7 +22606,7 @@ function toggleSelectAllMatrix() {
 function toggleMatrixRow(id) {
     if (selectedMatrixRows.has(id)) selectedMatrixRows.delete(id);
     else selectedMatrixRows.add(id);
-    
+
     const allChecked = Array.from(document.querySelectorAll('.matrix-row-check')).every(cb => cb.checked);
     const selectAll = document.getElementById('matrixSelectAll');
     if (selectAll) {
@@ -20431,7 +22644,7 @@ function openMatrixBulkConfigModal(isConfigured) {
     const countEl = document.getElementById('matrixBulkSelectedCount');
     const statusEl = document.getElementById('matrixBulkTargetStatus');
     const select = document.getElementById('matrixBulkProductSelect');
-    
+
     if (countEl) countEl.innerText = String(selectedMatrixRows.size);
     if (statusEl) statusEl.innerText = isConfigured ? '已配置' : '未配置';
     if (select) {
@@ -20440,7 +22653,7 @@ function openMatrixBulkConfigModal(isConfigured) {
         placeholder.value = '';
         placeholder.textContent = '请选择机型';
         select.appendChild(placeholder);
-        
+
         (matrixColumns || []).forEach(p => {
             const opt = document.createElement('option');
             opt.value = p;
@@ -20448,7 +22661,7 @@ function openMatrixBulkConfigModal(isConfigured) {
             select.appendChild(opt);
         });
     }
-    
+
     if (modal) modal.style.display = 'block';
 }
 
@@ -20473,7 +22686,7 @@ async function confirmMatrixBulkConfigModal() {
         closeMatrixBulkConfigModal();
         return;
     }
-    
+
     const isConfigured = !!matrixBulkPendingIsConfigured;
     const select = document.getElementById('matrixBulkProductSelect');
     const product = (select && select.value ? String(select.value).trim() : '');
@@ -20485,7 +22698,7 @@ async function confirmMatrixBulkConfigModal() {
         showToast('机型不存在，请刷新后重试', 'error');
         return;
     }
-    
+
     const changesToRecord = Array.from(selectedMatrixRows).map(wikiId => {
         const row = currentMatrixData.find(r => r.question_wiki_id === wikiId);
         const oldStatus = !!(row && row.products && row.products[product] && row.products[product].is_configured);
@@ -20497,7 +22710,7 @@ async function confirmMatrixBulkConfigModal() {
             edit_source: 'bulk'
         };
     }).filter(c => c.old_is_configured !== c.new_is_configured);
-    
+
     try {
         const res = await api('/matrix/batch_update', 'POST', {
             question_wiki_ids: Array.from(selectedMatrixRows),
@@ -20521,12 +22734,12 @@ async function confirmMatrixBulkConfigModal() {
 function openSyncMatrixModal() {
     const modal = document.getElementById('matrixSyncModal');
     modal.style.display = 'block';
-    
+
     // Initialize Sync Option Cards Interaction
     const cards = modal.querySelectorAll('.sync-option-card');
     cards.forEach(card => {
         const radio = card.querySelector('input[type="radio"]');
-        
+
         // Click on card triggers radio
         card.onclick = (e) => {
             // Prevent double triggering if clicking directly on radio
@@ -20535,11 +22748,11 @@ function openSyncMatrixModal() {
                 updateSelectedCard();
             }
         };
-        
+
         // Listen for radio change
         radio.onchange = updateSelectedCard;
     });
-    
+
     function updateSelectedCard() {
         cards.forEach(c => {
             const r = c.querySelector('input[type="radio"]');
@@ -20550,7 +22763,7 @@ function openSyncMatrixModal() {
             }
         });
     }
-    
+
     // Initial update
     updateSelectedCard();
 }
@@ -20559,10 +22772,10 @@ async function confirmSyncMatrix() {
     const mode = document.querySelector('input[name="matrixSyncMode"]:checked').value;
     const btn = document.querySelector('#matrixSyncModal .primary-btn');
     const originalText = btn.innerText;
-    
+
     if (mode === 'reset' && !confirm('警告：重置模式将清空矩阵中所有手动配置的数据！确定要继续吗？')) return;
     if (mode === 'content_refresh' && !confirm('警告：此操作将强制更新所有内容（保留产品配置），确定要继续吗？')) return;
-    
+
     btn.disabled = true;
     btn.innerText = "同步中...";
     try {
@@ -20591,7 +22804,7 @@ function showToast(message, type = 'info', duration = 3000) {
 
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
-    
+
     let icon = 'info-circle';
     if (type === 'success') icon = 'check-circle';
     if (type === 'error') icon = 'times-circle';
@@ -20617,7 +22830,7 @@ function showToast(message, type = 'info', duration = 3000) {
 
     // Trigger reflow
     toast.offsetHeight;
-    
+
     // Show
     setTimeout(() => toast.classList.add('show'), 10);
 
@@ -20659,6 +22872,7 @@ let copyConfigState = {
     selectedExcludeTags: new Set(),
     excludeTagsLoaded: false,
     excludeTagsStatus: 'idle',
+    sourceLoadSeq: 0,
     scopePreviewSeq: 0,
     scopePreviewCounts: {
         all: null,
@@ -20680,6 +22894,15 @@ let copyConfigState = {
     reviewCandidateDetail: null,
     cloneStartedAt: 0,
     cloneFailed: false,
+};
+
+let cloneDifferenceRewriteState = {
+    batchId: '',
+    draftText: '',
+    unresolvedQuestions: [],
+    feedback: '',
+    busy: false,
+    message: '',
 };
 
 function setCopyConfigProgress(progress = {}) {
@@ -21206,7 +23429,7 @@ async function openCopyConfigModal() {
     const form = document.getElementById('copyConfigForm');
     if (!form) return;
     form.classList.remove('is-reviewing');
-    
+
     // Reset State
     copyConfigState.targets = [];
     copyConfigState.selectedTargetCandidate = '';
@@ -21224,14 +23447,14 @@ async function openCopyConfigModal() {
     renderCopyExcludeTags();
     loadCopyExcludeTags();
     renderCopyTargets();
-    
+
     // Clear Inputs
     const modelSelect = document.getElementById('copySourceModel');
     if (modelSelect) modelSelect.value = '';
-    
+
     const catSelect = document.getElementById('copySourceCategory');
     if (catSelect) catSelect.value = '';
-    
+
     const targetInput = document.getElementById('copyTargetInput');
     if (targetInput) targetInput.value = '';
 
@@ -21248,18 +23471,18 @@ async function openCopyConfigModal() {
 
     const scopeAll = document.querySelector('input[name="copyScope"][value="all"]');
     if (scopeAll) scopeAll.checked = true;
-    
+
     // Reset Stats
     const modelStats = document.getElementById('copyModelStats');
     if (modelStats) modelStats.innerText = '请选择源机型...';
-    
+
     const catStats = document.getElementById('copyCategoryStats');
     if (catStats) catStats.innerText = '请选择源分类...';
-    
+
     form.classList.add('is-active');
     document.getElementById('copyConfigFormTitle')?.scrollIntoView({behavior: 'smooth', block: 'start'});
     updateCopyScopeSummary();
-    
+
     // Switch to default mode (this loads sources)
     switchCopyMode('model');
 
@@ -21271,7 +23494,7 @@ async function openCopyConfigModal() {
         r.dataset.listenerAttached = 'true';
     });
     updateCopyReviewControls();
-    
+
     // Setup event listener for input (if not already attached)
     const input = document.getElementById('copyTargetInput');
     if (input && !input.dataset.listenerAttached) {
@@ -21316,23 +23539,23 @@ function switchCopyMode(mode) {
             showToast('按分类克隆暂不支持差异校验，已关闭差异校验。', 'info');
         }
     }
-    
+
     // Update Tabs UI
     const tabModel = document.getElementById('tab-copy-model');
     const tabCategory = document.getElementById('tab-copy-category');
-    
+
     if (mode === 'model') {
         if (!tabModel || !tabCategory) return;
         tabModel.classList.add('active');
         tabModel.style.borderBottom = '3px solid #9B59B6';
         tabModel.style.color = '#9B59B6';
         tabModel.style.fontWeight = 'bold';
-        
+
         tabCategory.classList.remove('active');
         tabCategory.style.borderBottom = '3px solid transparent';
         tabCategory.style.color = '#666';
         tabCategory.style.fontWeight = 'normal';
-        
+
         document.getElementById('copy-model-content').classList.remove('d-none');
         document.getElementById('copy-category-content').classList.add('d-none');
     } else {
@@ -21340,20 +23563,20 @@ function switchCopyMode(mode) {
         tabCategory.style.borderBottom = '3px solid #9B59B6';
         tabCategory.style.color = '#9B59B6';
         tabCategory.style.fontWeight = 'bold';
-        
+
         tabModel.classList.remove('active');
         tabModel.style.borderBottom = '3px solid transparent';
         tabModel.style.color = '#666';
         tabModel.style.fontWeight = 'normal';
-        
+
         document.getElementById('copy-model-content').classList.add('d-none');
         document.getElementById('copy-category-content').classList.remove('d-none');
     }
-    
+
     // Reset Stats
     document.getElementById('copyModelStats').innerText = '请选择源机型...';
     document.getElementById('copyCategoryStats').innerText = '请选择源分类...';
-    
+
     // Load sources for the selected mode
     loadCopySources();
     refreshCopyScopeCounts();
@@ -21361,36 +23584,41 @@ function switchCopyMode(mode) {
 }
 
 async function loadCopySources() {
+    const mode = copyConfigState.mode;
+    const seq = ++copyConfigState.sourceLoadSeq;
     try {
         // Always fetch products for datalist (Target Models)
         const productsRes = await api('/matrix/products');
+        if (seq !== copyConfigState.sourceLoadSeq || mode !== copyConfigState.mode) return;
         const catalogProducts = productsRes.catalog || productsRes.data || [];
-        
+
         // Store for autocomplete
         copyConfigState.availableTargets = catalogProducts;
-        
+
         // Removed datalist population code as we use custom autocomplete now
 
-        if (copyConfigState.mode === 'model') {
+        if (mode === 'model') {
             // Populate Source Model Select (Use Catalog Products ONLY as requested)
             const select = document.getElementById('copySourceModel');
             if (select) {
-                select.innerHTML = '<option value="">请选择...</option>' + 
+                select.innerHTML = '<option value="">请选择...</option>' +
                     catalogProducts.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
             }
         } else {
             // Fetch Categories for Source Category Select (Use Model Mappings as requested)
-            const mappingsRes = await api('/model_mappings');
-            const categories = Object.keys(mappingsRes || {}).sort();
-            
+            const mappingsRes = await fetchOrderedModelMappings();
+            if (seq !== copyConfigState.sourceLoadSeq || mode !== copyConfigState.mode) return;
+            const categories = mappingsRes.category_order;
+
             const select = document.getElementById('copySourceCategory');
             if (select) {
-                select.innerHTML = '<option value="">请选择...</option>' + 
+                select.innerHTML = '<option value="">请选择...</option>' +
                     categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
             }
         }
         refreshCopyScopeCounts();
     } catch (e) {
+        if (seq !== copyConfigState.sourceLoadSeq || mode !== copyConfigState.mode) return;
         console.error('Failed to load copy sources:', e);
         showToast('加载源数据失败: ' + e.message, 'error');
         refreshCopyScopeCounts();
@@ -21401,7 +23629,7 @@ async function fetchCopyStats() {
     const mode = copyConfigState.mode;
     let source = '';
     let statsElem = null;
-    
+
     if (mode === 'model') {
         source = document.getElementById('copySourceModel').value;
         statsElem = document.getElementById('copyModelStats');
@@ -21411,14 +23639,14 @@ async function fetchCopyStats() {
     }
 
     refreshCopyScopeCounts();
-        
+
     if (!source) {
         if (statsElem) statsElem.innerText = mode === 'model' ? '请选择源机型...' : '请选择源分类...';
         return;
     }
-    
+
     if (statsElem) statsElem.innerText = '正在计算...';
-    
+
     try {
         const res = await api(`/matrix/stats?mode=${mode}&source=${encodeURIComponent(source)}`, 'GET');
         if (res.success && statsElem) {
@@ -21449,7 +23677,7 @@ function addCopyTarget(targetCandidate = '') {
         showToast('目标型号必须从型号库候选中选择', 'warning');
         return;
     }
-    
+
     if (copyConfigState.targets.includes(val)) {
         showToast('该机型已添加', 'warning');
         return;
@@ -21458,7 +23686,7 @@ function addCopyTarget(targetCandidate = '') {
         showToast('第一期差异校验仅支持一个目标机型', 'warning');
         return;
     }
-    
+
     copyConfigState.targets.push(val);
     input.value = '';
     copyConfigState.selectedTargetCandidate = '';
@@ -21476,12 +23704,12 @@ function removeCopyTarget(target) {
 function renderCopyTargets() {
     const container = document.getElementById('copyTargetList');
     if (!container) return;
-    
+
     if (copyConfigState.targets.length === 0) {
         container.innerHTML = '<span style="color: #999; font-style: italic; padding: 5px;">暂无目标机型</span>';
         return;
     }
-    
+
     container.innerHTML = copyConfigState.targets.map(t => `
         <span class="tag" style="background: #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 16px; display: inline-flex; align-items: center; margin: 2px; font-size: 14px;">
             ${escapeHtml(t)}
@@ -21496,18 +23724,18 @@ function renderCopyTargets() {
 async function executeCopyConfig() {
     const mode = copyConfigState.mode;
     let source = '';
-    
+
     if (mode === 'model') {
         source = document.getElementById('copySourceModel').value;
     } else {
         source = document.getElementById('copySourceCategory').value;
     }
-    
+
     if (!source) {
         showToast('请选择源' + (mode === 'model' ? '机型' : '分类'), 'error');
         return;
     }
-    
+
     if (copyConfigState.targets.length === 0) {
         showToast('请至少添加一个目标机型', 'error');
         return;
@@ -21546,7 +23774,7 @@ async function executeCopyConfig() {
             if (!ok) return;
         }
     }
-    
+
     const strategyElem = document.querySelector('input[name="copyStrategy"]:checked');
     const strategy = strategyElem ? strategyElem.value : 'append';
 
@@ -21554,7 +23782,7 @@ async function executeCopyConfig() {
         const ok = confirm('你选择了【强制同步】策略。\n这会删除源机型在相关条目中的关联，并用目标机型替换。\n\n确认继续？');
         if (!ok) return;
     }
-    
+
     // UI Loading state
     const btn = document.getElementById('copyConfigSubmitButton');
     const operationId = copyConfigState.cloneOperationId || (copyConfigState.cloneOperationId = matrixRandomId());
@@ -21566,7 +23794,7 @@ async function executeCopyConfig() {
         btn.innerText = '处理中...';
         btn.disabled = true;
     }
-    
+
     try {
         const res = await api('/matrix/clone_config', 'POST', {
             operation_id: operationId,
@@ -21577,7 +23805,7 @@ async function executeCopyConfig() {
             scope,
             review
         });
-        
+
         if (res.success) {
             const isBackgroundReview = !!(
                 res.review_batch_id
@@ -21688,6 +23916,17 @@ function cloneReviewItemIsReady(item) {
 
 function cloneReviewItemIsSourceRemoved(item) {
     return String(item?.detection_status || '') === 'source_removed';
+}
+
+function cloneReviewItemHasUnresolvedDetectionError(item) {
+    const detectionStatus = String(item?.detection_status || '');
+    if (!['scan_failed', 'stale'].includes(detectionStatus)) return false;
+    return !(
+        detectionStatus === 'scan_failed'
+        && item?.manually_decided === true
+        && ['keep', 'link_existing', 'remove_target'].includes(String(item?.decision || ''))
+        && ['applied', 'not_required'].includes(String(item?.apply_status || ''))
+    );
 }
 
 function cloneReviewItemAiPending(item) {
@@ -22025,11 +24264,15 @@ window.closeCloneReviewWorkspace = closeCloneReviewWorkspace;
 
 function captureCloneReviewWorkspaceInteraction() {
     const detail = document.getElementById('cloneReviewDetail');
+    const rules = document.getElementById('cloneReviewRules');
     const tableWrap = document.querySelector('.clone-review-table-wrap');
-    const activeField = detail?.contains(document.activeElement) ? document.activeElement : null;
+    const activeField = detail?.contains(document.activeElement)
+        ? document.activeElement
+        : (rules?.contains(document.activeElement) ? document.activeElement : null);
     return {
         itemId: copyConfigState.selectedReviewItemId,
         reason: document.getElementById('cloneReviewDecisionReason')?.value,
+        manualDifferenceText: document.getElementById('cloneReviewManualDifferenceText')?.value,
         candidateId: document.querySelector('input[name="cloneReviewCandidate"]:checked')?.value || '',
         activeFieldId: activeField?.id || '',
         selectionStart: typeof activeField?.selectionStart === 'number' ? activeField.selectionStart : null,
@@ -22039,10 +24282,12 @@ function captureCloneReviewWorkspaceInteraction() {
     };
 }
 
-function restoreCloneReviewWorkspaceInteraction(snapshot) {
+function restoreCloneReviewWorkspaceInteraction(snapshot, options = {}) {
     if (!snapshot || snapshot.itemId !== copyConfigState.selectedReviewItemId) return;
     const reason = document.getElementById('cloneReviewDecisionReason');
     if (reason && snapshot.reason !== undefined) reason.value = snapshot.reason;
+    const manualDifferenceText = document.getElementById('cloneReviewManualDifferenceText');
+    if (manualDifferenceText && snapshot.manualDifferenceText !== undefined) manualDifferenceText.value = snapshot.manualDifferenceText;
     if (snapshot.candidateId) {
         const candidate = Array.from(document.querySelectorAll('input[name="cloneReviewCandidate"]'))
             .find(input => input.value === snapshot.candidateId);
@@ -22057,7 +24302,7 @@ function restoreCloneReviewWorkspaceInteraction(snapshot) {
     if (detail) detail.scrollTop = snapshot.detailScrollTop;
     if (tableWrap) tableWrap.scrollTop = snapshot.tableScrollTop;
     const activeField = snapshot.activeFieldId ? document.getElementById(snapshot.activeFieldId) : null;
-    if (activeField) {
+    if (activeField && options.restoreFocus !== false) {
         activeField.focus({ preventScroll: true });
         if (snapshot.selectionStart !== null && typeof activeField.setSelectionRange === 'function') {
             activeField.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
@@ -22082,7 +24327,7 @@ async function reloadCloneReviewWorkspace(options = {}) {
             copyConfigState.selectedReviewItemId = items[0]?.item_id || '';
         }
         renderCloneReviewWorkspace({ background: !!options.background });
-        if (!options.background) restoreCloneReviewWorkspaceInteraction(interaction);
+        restoreCloneReviewWorkspaceInteraction(interaction, { restoreFocus: !options.background });
         scheduleCloneReviewWorkspacePolling(batch);
     } catch (error) {
         if (runtime) runtime.textContent = `读取失败：${error.message}`;
@@ -22177,7 +24422,7 @@ function renderCloneReviewWorkspace(options = {}) {
     const totalCount = Number(batch.progress?.generation_total ?? batch.progress?.total ?? batch.source_count ?? batch.item_count ?? items.length) || 0;
     const waitingCount = items.filter(item => item.detection_status === 'pending_scan').length;
     const aiPendingCount = items.filter(cloneReviewItemAiPending).length;
-    const detectionErrorCount = items.filter(item => ['scan_failed', 'stale'].includes(item.detection_status)).length;
+    const detectionErrorCount = items.filter(cloneReviewItemHasUnresolvedDetectionError).length;
     const sourceRemovedCount = items.filter(cloneReviewItemIsSourceRemoved).length;
     const riskSummary = batch.risk_summary && typeof batch.risk_summary === 'object'
         ? batch.risk_summary
@@ -22228,12 +24473,22 @@ function renderCloneReviewWorkspace(options = {}) {
         const parameterUnavailableRules = parameterRules.filter(rule => rule.difference_type === 'comparison_unavailable');
         const catalogAudit = batch.parameter_catalog_audit || {};
         const auditItems = Array.isArray(catalogAudit.items) ? catalogAudit.items : [];
+        const parseWarnings = Array.isArray(batch.parse_warnings) ? batch.parse_warnings : [];
+        const parseWarningsHtml = parseWarnings.length
+            ? `<div class="clone-review-rule-warning"><strong>有 ${parseWarnings.length} 段差异未自动配对</strong><span>请补充字段标签后重新解析，系统未将这些数值当作冲突。</span>${parseWarnings.map(warning => `<small>${escapeHtml(warning.message || '')} ${escapeHtml(warning.evidence || '')}</small>`).join('')}</div>`
+            : '';
         const auditLabels = {
             consistent: '与 8511 一致',
             catalog_suspected: '8511 疑似不准确',
             missing_parameter: '8511 缺少参数',
-            comparison_unavailable: '8511 无法唯一比较'
+            comparison_unavailable: '8511 无法唯一比较',
+            field_unmatched: '未匹配到 8511 字段',
+            field_ambiguous: '8511 字段匹配有歧义'
         };
+        const catalogAuditValue = (item, value) => value || ({
+            field_unmatched: '字段未匹配',
+            field_ambiguous: '字段有歧义'
+        }[item.result] || '8511 无数据');
         const auditHtml = methods.includes('parameter_check') && methods.includes('manual_difference_ai')
             ? `<div class="clone-review-catalog-audit">
                 <div class="clone-review-rules-head"><strong>参数清单准确性校对</strong><span>${escapeHtml(catalogAudit.source || 'ParamAggregator 8511')}</span></div>
@@ -22241,9 +24496,9 @@ function renderCloneReviewWorkspace(options = {}) {
                     ? `<div class="clone-review-rule-empty">校对暂不可用：${escapeHtml(catalogAudit.error_message || '参数服务异常')}</div>`
                     : `<div class="clone-review-rule-list">${auditItems.map(item => `
                         <div class="clone-review-rule is-${escapeHtml(item.result || 'comparison_unavailable')}">
-                            <span>${escapeHtml(item.feature_name || item.feature_id)}</span>
-                            <b>${escapeHtml(item.target_manual_value || '-')} <i class="fas fa-arrows-left-right" aria-hidden="true"></i> ${escapeHtml(item.target_catalog_value || '8511 无数据')}</b>
-                            <small>${escapeHtml(auditLabels[item.result] || item.result)} · 源型号：${escapeHtml(item.source_manual_value || '-')} / ${escapeHtml(item.source_catalog_value || '8511 无数据')}</small>
+                            <span>${escapeHtml(item.feature_name || item.feature_id)}${item.catalog_feature_name && item.catalog_feature_name !== item.feature_name ? ` → ${escapeHtml(item.catalog_feature_name)}` : ''}</span>
+                            <b>${escapeHtml(item.target_manual_value || '-')} <i class="fas fa-arrows-left-right" aria-hidden="true"></i> ${escapeHtml(catalogAuditValue(item, item.target_catalog_value))}</b>
+                            <small>${escapeHtml(auditLabels[item.result] || item.result)} · 源型号：${escapeHtml(item.source_manual_value || '-')} / ${escapeHtml(catalogAuditValue(item, item.source_catalog_value))}</small>
                         </div>`).join('')}</div>`}
             </div>`
             : '';
@@ -22261,6 +24516,27 @@ function renderCloneReviewWorkspace(options = {}) {
                             </div>`).join('')}</div>`
                         : `<div class="clone-review-rule-empty">两型号已确认参数未发现值不一致${parameterUnavailableRules.length ? `，另有 ${parameterUnavailableRules.length} 条无法唯一比较` : ''}。</div>`)}
             </div>` : '';
+        const parsingPending = ['pending_parse', 'created', 'generating'].includes(batch.ai_parse_status)
+            || (methods.includes('manual_difference_ai') && ['created', 'generating'].includes(batch.status));
+        const manualDifferenceEditorAllowed = methods.includes('manual_difference_ai')
+            && !batch.scan_active
+            && ['reviewing', 'partial_failed'].includes(String(batch.status || ''));
+        const manualDifferenceEditorHtml = methods.includes('manual_difference_ai') ? `
+            <section class="clone-review-difference-editor" aria-labelledby="cloneReviewDifferenceEditorTitle">
+                <div class="clone-review-difference-editor-head">
+                    <div><strong id="cloneReviewDifferenceEditorTitle">输入差异说明</strong><span>可在复核中修正识别信息，保存后会重新生成规则并重新校验未执行条目。</span></div>
+                    <span class="clone-review-difference-editor-version">规则 v${escapeHtml(batch.difference_rule_version || 1)}</span>
+                </div>
+                <textarea id="cloneReviewManualDifferenceText" class="form-control" rows="4" maxlength="5000" ${manualDifferenceEditorAllowed ? '' : 'disabled'} aria-label="新旧型号差异说明">${escapeHtml(batch.manual_difference_text || '')}</textarea>
+                <div class="clone-review-difference-editor-footer">
+                    <span id="cloneReviewDifferenceEditorStatus">${manualDifferenceEditorAllowed ? '修改后将清空未执行的人工决定，请确认说明完整。' : '当前批次正在处理或已完成，暂不能修改差异说明。'}</span>
+                    <div class="clone-review-difference-actions">
+                        <button type="button" class="action-btn" onclick="openCloneDifferenceRewriteAssistant()" ${manualDifferenceEditorAllowed ? '' : 'disabled'}><i class="fas fa-wand-magic-sparkles" aria-hidden="true"></i><span>AI 整理差异说明</span></button>
+                        <button type="button" class="primary-btn" onclick="reparseCloneReviewRules()" ${manualDifferenceEditorAllowed ? '' : 'disabled'}><i class="fas fa-rotate" aria-hidden="true"></i><span>保存并重新校验</span></button>
+                    </div>
+                </div>
+                <div id="cloneReviewRewriteAssistant" class="clone-review-rewrite-assistant" aria-live="polite"></div>
+            </section>` : '';
         const manualRulesHtml = ruleList.length ? `
             <div class="clone-review-rules-head"><strong>差异规则</strong><span>版本 ${escapeHtml(batch.difference_rule_version)}</span></div>
             <div class="clone-review-rule-list">${ruleList.map(rule => `
@@ -22269,9 +24545,11 @@ function renderCloneReviewWorkspace(options = {}) {
                     <b>${escapeHtml(rule.source_value || '-')} <i class="fas fa-arrow-right" aria-hidden="true"></i> ${escapeHtml(rule.target_value || '-')}</b>
                     <small>${escapeHtml((rule.evidence_sources || []).join(' + '))} · ${escapeHtml(rule.status)}</small>
                 </div>`).join('')}</div>` : (methods.includes('manual_difference_ai')
-                    ? `<div class="clone-review-rule-empty">尚未形成可用的输入差异规则，条目必须逐项人工确认。</div>`
+                    ? (parsingPending
+                        ? `<div class="clone-review-rule-empty">正在解析输入差异规则，请稍候。</div>`
+                        : `<div class="clone-review-rule-empty">尚未形成可用的输入差异规则，条目必须逐项人工确认。</div>`)
                     : '');
-        rules.innerHTML = `${manualRulesHtml}${parameterRulesHtml}${auditHtml}`;
+        rules.innerHTML = `${parseWarningsHtml}${manualDifferenceEditorHtml}${manualRulesHtml}${parameterRulesHtml}${auditHtml}`;
     }
     const coverage = document.getElementById('cloneReviewManualCoverageWrap');
     const manualOnly = methods.length === 1 && methods[0] === 'manual_difference_ai';
@@ -22330,6 +24608,17 @@ function renderCloneReviewWorkspace(options = {}) {
         resumeButton.title = resumeAllowed
             ? (staleCount > 0 ? `读取最新源知识并更新 ${staleCount} 条过期校验` : `仅校验仍在等待的 ${pendingScanCount} 条知识`)
             : '当前没有可续跑的待校验条目';
+    }
+    const reparseButton = document.getElementById('cloneReviewReparseButton');
+    if (reparseButton) {
+        const reparseAllowed = methods.includes('manual_difference_ai')
+            && !batch.scan_active
+            && ['reviewing', 'partial_failed'].includes(String(batch.status || ''));
+        reparseButton.hidden = !reparseAllowed;
+        reparseButton.disabled = !reparseAllowed;
+        reparseButton.title = reparseAllowed
+            ? '保存当前差异说明，重新生成差异规则并重新校验未执行条目'
+            : '仅未提交且未运行中的批次可以重新解析规则';
     }
     const applyButton = document.getElementById('cloneReviewApplyButton');
     if (applyButton) {
@@ -22822,6 +25111,162 @@ async function resumeCloneReviewScan() {
 }
 window.resumeCloneReviewScan = resumeCloneReviewScan;
 
+async function reparseCloneReviewRules() {
+    const batchId = copyConfigState.activeReviewBatchId;
+    const batch = copyConfigState.reviewBatch;
+    if (!batchId || !batch || batch.scan_active) return;
+    const manualDifferenceText = document.getElementById('cloneReviewManualDifferenceText')?.value.trim() || '';
+    if (batch.detection_methods?.includes('manual_difference_ai') && !manualDifferenceText) {
+        showToast('请输入新旧型号差异', 'warning');
+        return;
+    }
+    if (!confirm('将保存当前差异说明，重建差异规则，并重置尚未执行的人工决定。是否继续？')) return;
+    const button = document.getElementById('cloneReviewReparseButton');
+    const inlineButton = document.querySelector('.clone-review-difference-editor-footer button');
+    if (button) {
+        button.disabled = true;
+        button.querySelector('span').textContent = '正在重新解析';
+    }
+    if (inlineButton) inlineButton.disabled = true;
+    try {
+        const result = await api(`/matrix/clone-review/${encodeURIComponent(batchId)}/reparse-rules`, 'POST', {
+            manual_difference_text: manualDifferenceText,
+        });
+        if (!result?.success) throw new Error(result?.message || '重新解析失败');
+        copyConfigState.reviewBatch = result;
+        renderCloneReviewWorkspace();
+        showToast(`已重新解析 ${result.reparsed_rule_count || 0} 条差异规则`, 'success', 5000);
+    } catch (error) {
+        showToast(`重新解析失败：${error.message || error}`, 'error', 6000);
+        await reloadCloneReviewWorkspace({ background: true });
+    } finally {
+        const currentButton = document.getElementById('cloneReviewReparseButton');
+        if (currentButton) currentButton.querySelector('span').textContent = copyConfigState.reviewBatch?.detection_methods?.includes('manual_difference_ai') ? '重新校验规则' : '重新解析规则';
+        const currentInlineButton = document.querySelector('.clone-review-difference-editor-footer button');
+        if (currentInlineButton) currentInlineButton.disabled = false;
+    }
+}
+window.reparseCloneReviewRules = reparseCloneReviewRules;
+
+function renderCloneDifferenceRewriteAssistant() {
+    const container = document.getElementById('cloneReviewRewriteAssistant');
+    const batch = copyConfigState.reviewBatch;
+    if (!container || !batch || cloneDifferenceRewriteState.batchId !== batch.batch_id) return;
+    const state = cloneDifferenceRewriteState;
+    if (!state.draftText && !state.busy && !state.message && !state.feedback) {
+        container.innerHTML = '';
+        return;
+    }
+    const questions = state.unresolvedQuestions.length
+        ? `<div class="clone-review-rewrite-questions"><strong>需要你确认</strong>${state.unresolvedQuestions.map((item, index) => `
+            <div class="clone-review-rewrite-question">
+                <div><b>${escapeHtml(item.question)}</b><small>原文：${escapeHtml(item.evidence)}</small></div>
+                <button type="button" class="action-btn" onclick="returnCloneDifferenceQuestion(${index})" ${state.busy ? 'disabled' : ''}>退回修改</button>
+            </div>`).join('')}</div>`
+        : '';
+    const messageClass = state.message.startsWith('整理失败：')
+        ? 'is-error'
+        : (state.message.includes('暂不可用') ? 'is-warning' : '');
+    container.innerHTML = `
+        <div class="clone-review-rewrite-head"><strong>AI 整理草稿</strong><span>仅供编辑确认，不会自动保存或重新校验。</span></div>
+        ${state.message ? `<div class="clone-review-rewrite-message ${messageClass}" role="status">${escapeHtml(state.message)}</div>` : ''}
+        ${state.busy && !state.draftText ? '<div class="clone-review-rewrite-loading"><span></span>正在整理说明</div>' : ''}
+        ${state.draftText ? `<textarea id="cloneReviewRewriteDraft" rows="4" maxlength="5000" aria-label="AI 整理草稿">${escapeHtml(state.draftText)}</textarea>` : ''}
+        ${questions}
+        ${state.feedback || state.draftText ? `<label class="clone-review-rewrite-feedback" for="cloneReviewRewriteFeedback">退回问题或补充依据<textarea id="cloneReviewRewriteFeedback" rows="2" maxlength="2000" placeholder="填写你确认后的型号、字段或参数口径">${escapeHtml(state.feedback)}</textarea></label>` : ''}
+        <div class="clone-review-rewrite-footer">
+            <span>请核对参数事实。应用建议后，仍需单独保存并重新校验。</span>
+            <div>
+                ${state.draftText ? '<button type="button" class="action-btn" onclick="regenerateCloneDifferenceRewrite()" ' + (state.busy ? 'disabled' : '') + '><i class="fas fa-rotate" aria-hidden="true"></i><span>按补充意见再生成</span></button>' : ''}
+                ${state.draftText ? '<button type="button" class="primary-btn" onclick="applyCloneDifferenceRewrite()" ' + (state.busy ? 'disabled' : '') + '><i class="fas fa-arrow-up" aria-hidden="true"></i><span>应用建议到说明</span></button>' : ''}
+            </div>
+        </div>`;
+}
+
+function openCloneDifferenceRewriteAssistant() {
+    const batch = copyConfigState.reviewBatch;
+    const sourceText = document.getElementById('cloneReviewManualDifferenceText')?.value.trim() || '';
+    if (!batch || !sourceText) {
+        showToast('请先输入差异说明', 'warning');
+        return;
+    }
+    cloneDifferenceRewriteState = {
+        batchId: batch.batch_id,
+        draftText: '',
+        unresolvedQuestions: [],
+        feedback: '',
+        busy: false,
+        message: '',
+    };
+    renderCloneDifferenceRewriteAssistant();
+    requestCloneDifferenceRewrite(sourceText, '');
+}
+window.openCloneDifferenceRewriteAssistant = openCloneDifferenceRewriteAssistant;
+
+async function requestCloneDifferenceRewrite(text, feedback) {
+    const batch = copyConfigState.reviewBatch;
+    if (!batch || cloneDifferenceRewriteState.batchId !== batch.batch_id) return;
+    cloneDifferenceRewriteState.busy = true;
+    cloneDifferenceRewriteState.feedback = feedback;
+    cloneDifferenceRewriteState.message = '正在整理，原说明不会被修改';
+    renderCloneDifferenceRewriteAssistant();
+    try {
+        const result = await api(`/matrix/clone-review/${encodeURIComponent(batch.batch_id)}/rewrite-difference`, 'POST', {
+            text,
+            feedback,
+        });
+        if (!result?.success) throw new Error(result?.message || 'AI 整理失败');
+        cloneDifferenceRewriteState.draftText = result.draft_text || '';
+        cloneDifferenceRewriteState.unresolvedQuestions = Array.isArray(result.unresolved_questions)
+            ? result.unresolved_questions : [];
+        cloneDifferenceRewriteState.message = result.catalog_available
+            ? '草稿已生成，可编辑、退回问题或应用到说明。'
+            : '参数目录暂不可用，草稿仅依据输入内容整理，请逐项核实。';
+    } catch (error) {
+        cloneDifferenceRewriteState.message = `整理失败：${error.message || error}`;
+    } finally {
+        cloneDifferenceRewriteState.busy = false;
+        renderCloneDifferenceRewriteAssistant();
+    }
+}
+
+function returnCloneDifferenceQuestion(index) {
+    const item = cloneDifferenceRewriteState.unresolvedQuestions[index];
+    if (!item) return;
+    const addition = `待确认：${item.question}\n原文依据：${item.evidence}`;
+    const existingFeedback = document.getElementById('cloneReviewRewriteFeedback')?.value
+        || cloneDifferenceRewriteState.feedback;
+    const feedback = [existingFeedback, addition].filter(Boolean).join('\n\n');
+    cloneDifferenceRewriteState.feedback = feedback;
+    renderCloneDifferenceRewriteAssistant();
+    const input = document.getElementById('cloneReviewRewriteFeedback');
+    input?.focus();
+    input?.setSelectionRange(input.value.length, input.value.length);
+}
+window.returnCloneDifferenceQuestion = returnCloneDifferenceQuestion;
+
+function regenerateCloneDifferenceRewrite() {
+    const draft = document.getElementById('cloneReviewRewriteDraft')?.value.trim() || '';
+    const feedback = document.getElementById('cloneReviewRewriteFeedback')?.value.trim() || '';
+    if (!draft) {
+        showToast('整理草稿为空，请先补充说明', 'warning');
+        return;
+    }
+    requestCloneDifferenceRewrite(draft, feedback);
+}
+window.regenerateCloneDifferenceRewrite = regenerateCloneDifferenceRewrite;
+
+function applyCloneDifferenceRewrite() {
+    const draft = document.getElementById('cloneReviewRewriteDraft')?.value.trim() || '';
+    const input = document.getElementById('cloneReviewManualDifferenceText');
+    if (!draft || !input) return;
+    input.value = draft;
+    input.focus();
+    cloneDifferenceRewriteState.message = '建议已放入说明框，尚未保存或重新校验。';
+    renderCloneDifferenceRewriteAssistant();
+}
+window.applyCloneDifferenceRewrite = applyCloneDifferenceRewrite;
+
 async function completeCloneReviewBatch() {
     const batchId = copyConfigState.activeReviewBatchId;
     if (!batchId) return;
@@ -22855,7 +25300,7 @@ function exportMatrix() {
     const q = document.getElementById('matrixSearchQuestion')?.value.trim() || '';
     const a = document.getElementById('matrixSearchAnswer')?.value.trim() || '';
     const pModels = Array.from(matrixSearchProductSelected);
-    
+
     const params = new URLSearchParams();
     if (id) params.append('id', id);
     if (q) params.append('q', q);
@@ -22872,7 +25317,7 @@ function exportMatrix() {
     params.append('mark_modified', matrixMarkFilter.modified ? '1' : '0');
     params.append('mark_unmodified', matrixMarkFilter.unmodified ? '1' : '0');
     if (isMatrixDiffCompareActive()) params.append('diff_compare', '1');
-    
+
     window.location.href = '/api/matrix/export?' + params.toString();
 }
 
@@ -22892,10 +25337,10 @@ async function loadScoringData(options = {}) {
         updateScoringProgressUI();
         return;
     }
-    
+
     const tbody = document.getElementById('scoringTableBody');
     if (tbody) tbody.innerHTML = '<tr><td colspan="10" class="empty-message">加载中...</td></tr>';
-    
+
     try {
         const res = await api('/scoring/data');
         if (res.success) {
@@ -22904,11 +25349,11 @@ async function loadScoringData(options = {}) {
                 if (item.score_data) {
                     try {
                         const parsed = typeof item.score_data === 'string' ? JSON.parse(item.score_data) : item.score_data;
-                        
+
                         // Map Chinese keys to English keys expected by renderScoringTable
                         // Structure might be nested under "维度得分" or flat
                         const scores = parsed['维度得分'] || parsed;
-                        
+
                         const mapped = {
                             quality: scores['问题质量'] || scores['质量得分'],
                             compliance: scores['答案合规与准确性'] || scores['合规得分'],
@@ -22916,10 +25361,10 @@ async function loadScoringData(options = {}) {
                             utility: scores['实际解决力'] || scores['实用得分'],
                             redundancy: scores['非冗余与相关性'] || scores['冗余扣分'],
                             multimedia: scores['多媒体加分'] || scores['多媒体得分'],
-                            
+
                             suggestion: parsed['处理建议'] || parsed['修改建议'],
                             analysis: parsed['分析过程'] || parsed['扣分分析'],
-                            
+
                             // total_score is usually at root level, but override if present in JSON
                             total_score: parsed['总分'] !== undefined ? parsed['总分'] : item.total_score
                         };
@@ -23034,22 +25479,22 @@ function renderScoringTable(filter = false) {
         const filters = getScoringFilterValues();
         data = data.filter(item => scoringItemMatchesFilters(item, filters));
     }
-    
+
     // Pagination
     const start = (scoringPage - 1) * scoringPageSize;
     const end = start + scoringPageSize;
     const pageData = data.slice(start, end);
-    
+
     if (pageData.length === 0) {
         tbody.innerHTML = '<tr><td colspan="10" class="empty-message">暂无评分数据，请点击“同步打分数据”</td></tr>';
         updateScoringPagination(data.length);
         return;
     }
-    
+
     pageData.forEach(item => {
         const tr = document.createElement('tr');
         const id = item.kb_id || item.id;
-        
+
         // Checkbox
         const tdCheck = document.createElement('td');
         const isChecked = selectedScoringRows.has(id);
@@ -23060,7 +25505,7 @@ function renderScoringTable(filter = false) {
         const tdId = document.createElement('td');
         tdId.className = 'scoring-id-cell';
         tdId.appendChild(document.createTextNode(id));
-        
+
         // Single score icon
         const scoreIcon = document.createElement('i');
         scoreIcon.className = 'fas fa-sync-alt';
@@ -23068,7 +25513,7 @@ function renderScoringTable(filter = false) {
         scoreIcon.style.cursor = 'pointer';
         scoreIcon.style.color = '#0d6efd';
         scoreIcon.title = '点击重新评分';
-        
+
         if (item.status === 'scoring') {
             scoreIcon.classList.add('fa-spin');
             scoreIcon.style.cursor = 'not-allowed';
@@ -23080,30 +25525,30 @@ function renderScoringTable(filter = false) {
                 streamEvaluate([id], null, '', { useCache: false });
             };
         }
-        
+
         tdId.appendChild(scoreIcon);
         tdId.title = id;
         tr.appendChild(tdId);
-        
+
         // Product (Not in kb_scores usually, placeholder)
         const tdProd = document.createElement('td');
         tdProd.className = 'scoring-product-cell';
         const productText = item.product_name || '-';
         tdProd.innerHTML = `<div class="scoring-product-preview" title="${_escapeAttr(productText)}">${_escapeHtml(productText)}</div>`;
         tr.appendChild(tdProd);
-        
+
         // Question
         const tdQ = document.createElement('td');
         tdQ.className = 'scoring-text-cell scoring-question-cell';
         tdQ.innerHTML = tdRenderExpandableText(`score:${id}:question`, item.question_content || '', { placeholder: '-' });
         tr.appendChild(tdQ);
-        
+
         // Answer
         const tdA = document.createElement('td');
         tdA.className = 'scoring-text-cell scoring-answer-cell';
         tdA.innerHTML = tdRenderExpandableText(`score:${id}:answer`, item.answer_content || '', { placeholder: '-' });
         tr.appendChild(tdA);
-        
+
         // Score dimensions
         const tdDimensions = document.createElement('td');
         tdDimensions.className = 'scoring-breakdown-cell';
@@ -23128,7 +25573,7 @@ function renderScoringTable(filter = false) {
             tdScore.style.fontWeight = 'bold';
         }
         tr.appendChild(tdScore);
-        
+
         // Suggestion and analysis preview
         const tdResult = document.createElement('td');
         tdResult.className = 'scoring-text-cell scoring-result-cell';
@@ -23141,11 +25586,11 @@ function renderScoringTable(filter = false) {
         const status = item.status || 'unscored';
         let badgeClass = 'badge-secondary';
         let statusText = '未评分';
-        
+
         if (status === 'scored') { badgeClass = 'badge-success'; statusText = '已评分'; }
         else if (status === 'scoring') { badgeClass = 'badge-info'; statusText = '评分中'; } // Changed to info/blue for active state
         else if (status === 'outdated') { badgeClass = 'badge-danger'; statusText = '已过期'; }
-        
+
         tdStatus.innerHTML = `<span class="badge ${badgeClass}">${statusText}</span>`;
         tr.appendChild(tdStatus);
 
@@ -23157,10 +25602,10 @@ function renderScoringTable(filter = false) {
 
         tbody.appendChild(tr);
     });
-    
+
     updateScoringPagination(data.length);
     updateScoringStats();
-    
+
     // 使评分表格支持调整列宽
     makeTableResizable('scoringTable');
     tdRefreshCellOverflow(document.getElementById('scoringTable') || document);
@@ -23169,10 +25614,10 @@ function renderScoringTable(filter = false) {
 function updateScoringPagination(total) {
     const info = document.getElementById('scoringPageInfo');
     if (info) info.textContent = `共 ${total} 条`;
-    
+
     const prevBtn = document.getElementById('prevScoringPageBtn');
     const nextBtn = document.getElementById('nextScoringPageBtn');
-    
+
     if (prevBtn) prevBtn.disabled = scoringPage <= 1;
     // Use the filtered total count, not the global total
     if (nextBtn) nextBtn.disabled = (scoringPage * scoringPageSize) >= total;
@@ -23204,7 +25649,7 @@ function toggleScoringRow(id) {
 function toggleSelectAllScoring() {
     const selectAll = document.getElementById('selectAllScoring');
     const checks = document.querySelectorAll('.scoring-row-check');
-    
+
     checks.forEach(cb => {
         cb.checked = selectAll.checked;
         if (selectAll.checked) {
@@ -23233,7 +25678,7 @@ function viewScoreDetail(id) {
         alert("未找到数据");
         return;
     }
-    
+
     // Helper for score color
     const getScoreColor = (s) => s >= 80 ? '#28a745' : (s < 60 ? '#dc3545' : '#ffc107');
     const totalScoreColor = getScoreColor(item.total_score || 0);
@@ -23244,8 +25689,8 @@ function viewScoreDetail(id) {
     let rawDataDisplay = '{}';
     try {
         if (item.score_data) {
-            rawDataDisplay = typeof item.score_data === 'object' 
-                ? JSON.stringify(item.score_data, null, 2) 
+            rawDataDisplay = typeof item.score_data === 'object'
+                ? JSON.stringify(item.score_data, null, 2)
                 : item.score_data;
             if (typeof rawDataDisplay === 'string' && rawDataDisplay.trim().startsWith('{')) {
                 try {
@@ -23263,7 +25708,7 @@ function viewScoreDetail(id) {
         const scoreVal = parseFloat(score);
         const hasScore = !isNaN(scoreVal);
         const displayScore = hasScore ? scoreVal : '-';
-        
+
         // Calculate percentage
         let pct = 0;
         if (hasScore) {
@@ -23273,9 +25718,9 @@ function viewScoreDetail(id) {
                  pct = Math.min(100, (scoreVal / (parseFloat(max) || 1)) * 100);
             }
         }
-        
+
         const barColor = isBonus ? '#28a745' : '#0d6efd';
-        
+
         return `
             <div style="background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; display: flex; flex-direction: column;">
                 <div style="display: flex; justify-content: space-between; font-size: 13px; color: #666; margin-bottom: 6px;">
@@ -23318,7 +25763,7 @@ function viewScoreDetail(id) {
                         ${safeHtml(item.question_content)}
                     </div>
                 </div>
-                
+
                 <div style="background: #f8f9fa; border-radius: 8px; padding: 16px; border-left: 4px solid #0d6efd;">
                     <h4 style="margin: 0 0 8px 0; color: #495057; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Answer</h4>
                     <div style="font-size: 15px; color: #333; line-height: 1.6; max-height: 300px; overflow-y: auto; white-space: pre-wrap; padding-right: 5px;" class="custom-scrollbar">
@@ -23359,7 +25804,7 @@ function viewScoreDetail(id) {
                     </h4>
                     <div style="color: #495057; font-size: 14px; line-height: 1.6;">${item.analysis || '暂无分析'}</div>
                 </div>
-                
+
                 <div style="background: #fff9db; border: 1px solid #ffec99; border-radius: 8px; padding: 16px;">
                     <h4 style="margin: 0 0 10px 0; color: #856404; font-size: 15px; display: flex; align-items: center;">
                         <span style="font-size: 18px; margin-right: 6px;">💡</span> 优化建议
@@ -23375,7 +25820,7 @@ function viewScoreDetail(id) {
             </details>
         </div>
     `;
-    
+
     const modal = document.getElementById('scoreDetailModal');
     const container = document.getElementById('scoreDetailContent');
     if (modal && container) {
@@ -23399,7 +25844,7 @@ async function clearScoringCache() {
         alert('当前有评分任务正在进行或已暂停，请结束后再清空缓存。');
         return;
     }
-    
+
     try {
         const summary = await api('/scoring/cache_summary');
         if (!summary || !summary.success) {
@@ -23571,9 +26016,9 @@ function updateScoringProgressUI() {
     const pauseBtn = document.getElementById('pauseScoringBtn');
     const resumeBtn = document.getElementById('resumeScoringBtn');
     const progressText = getScoringProgressText();
-    
+
     setScoringControlsDisabled(isScoringInProgress() || isScoringPaused());
-    
+
     if (isScoringInProgress()) {
         if (btn) setScoringButtonLabel(btn, progressText || '评分中...');
         if (batchBtn) setScoringButtonLabel(batchBtn, progressText || '评分中...');
@@ -23599,7 +26044,7 @@ function updateScoringProgressUI() {
         if (resumeBtn) resumeBtn.disabled = true;
         updateEvaluateAllButtonLabel();
     }
-    
+
     updateScoringStats();
 }
 
@@ -23712,7 +26157,7 @@ async function streamEvaluate(ids, btn, originalText, options = {}) {
     if (ownsRunState) {
         startScoringRun(options.runLabel || '评分中', ids);
     }
-    
+
     if (btn) {
         btn.disabled = true;
         setScoringButtonLabel(btn, '准备评分...');
@@ -23732,7 +26177,7 @@ async function streamEvaluate(ids, btn, originalText, options = {}) {
             options && options.useCache !== undefined
                 ? !!options.useCache
                 : (document.getElementById('useCacheCb') ? document.getElementById('useCacheCb').checked : true);
-        
+
         // Use fetch for streaming response
         const response = await fetch('/api/scoring/evaluate', {
             method: 'POST',
@@ -23756,7 +26201,7 @@ async function streamEvaluate(ids, btn, originalText, options = {}) {
         while (true) {
             const { value, done } = await reader.read();
             if (done) break;
-            
+
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split('\n');
             buffer = lines.pop(); // Keep incomplete line
@@ -23765,14 +26210,14 @@ async function streamEvaluate(ids, btn, originalText, options = {}) {
                 if (!line.trim()) continue;
                 try {
                     const msg = JSON.parse(line);
-                    
+
                     if (msg.type === 'result') {
                         successCount++;
                         // Update local data with result
                         const result = msg.data;
                         const itemIndex = currentScoringData.findIndex(i => (i.kb_id || i.id) === result.kb_id);
                         advanceScoringRun('success', result.kb_id);
-                        
+
                         if (itemIndex !== -1) {
                             // Update item fields
                             const item = currentScoringData[itemIndex];
@@ -23788,7 +26233,7 @@ async function streamEvaluate(ids, btn, originalText, options = {}) {
                             item.status = 'scored'; // Mark as scored
                         }
                         refreshScoringTableIfVisible();
-                        
+
                         if (btn && !isScoringInProgress()) setScoringButtonLabel(btn, `评分中 (${successCount}/${ids.length})`);
 
                     } else if (msg.type === 'error') {
@@ -23809,7 +26254,7 @@ async function streamEvaluate(ids, btn, originalText, options = {}) {
                 }
             }
         }
-        
+
         if (isScoringInProgress() && scoringRunState.activeIds && scoringRunState.activeIds.size > 0 && ownsRunState) {
             Array.from(scoringRunState.activeIds).forEach(id => {
                 addScoringRunError(id, '评分连接已结束但未收到结果');
@@ -23819,9 +26264,9 @@ async function streamEvaluate(ids, btn, originalText, options = {}) {
             });
             refreshScoringTableIfVisible();
         }
-        
+
         return { success: successCount, errors: errorCount };
-        
+
     } catch (e) {
         // Revert status of stuck items
         ids.forEach(id => {
@@ -23846,12 +26291,12 @@ async function batchEvaluateSelected() {
         alert('当前已有评分任务正在进行，请等待完成后再发起新的评分。');
         return;
     }
-    
+
     if (selectedScoringRows.size === 0) {
         alert("请先选择要评分的条目");
         return;
     }
-    
+
     // Convert Set to Array
     const ids = Array.from(selectedScoringRows);
 
@@ -23859,7 +26304,7 @@ async function batchEvaluateSelected() {
 
     const btn = document.getElementById('batchScoreBtn');
     const batchSize = 4;
-    
+
     try {
         startScoringRun('批量评分', ids, { useCache: false, batchSize, kind: 'batchSelected' });
         const result = await continueScoringRun();
@@ -23893,19 +26338,19 @@ async function evaluateAll() {
 	        alert('当前已有评分任务正在进行，请等待完成后再发起新的评分。');
 	        return;
 	    }
-	    
+
 	    // Get all filtered IDs from currentScoringData (which contains all loaded data)
 	    // Re-apply current filter
 	    const filters = getScoringFilterValues();
 	    const useCache = document.getElementById('useCacheCb') ? document.getElementById('useCacheCb').checked : true;
-	    
+
 	    const filteredData = currentScoringData.filter(item => {
 	        if (!scoringItemMatchesFilters(item, filters)) return false;
 	        if (useCache && item.status === 'scored') return false;
 	        return true;
 	    });
     const actionLabel = useCache ? '评分未缓存项' : '全量评分';
-    
+
     if (filteredData.length === 0) {
         alert(useCache ? "当前筛选条件下没有未缓存的可评分记录" : "当前筛选条件下没有可评分的记录");
         return;
@@ -23915,16 +26360,16 @@ async function evaluateAll() {
 
     const ids = filteredData.map(item => item.kb_id || item.id);
     const batchSize = 4; // Keep pause responsive; backend still uses configured concurrency.
-    
+
     // Find button - assumes onclick="evaluateAll()"
     const btn = document.getElementById('evaluateAllBtn') || document.querySelector('button[onclick="evaluateAll()"]');
     const originalText = btn ? btn.innerText : (useCache ? '评分未缓存项' : '🚀 全量评分');
-    
+
     // Override button text update in streamEvaluate to show batch progress
     // But streamEvaluate takes btn and updates it directly.
     // We can pass a proxy object or just let it update, then we overwrite?
     // Better: let streamEvaluate handle one batch, we update overall progress.
-    
+
     try {
         startScoringRun(actionLabel, ids, { useCache, batchSize, kind: 'evaluateAll' });
         const result = await continueScoringRun();
@@ -23934,7 +26379,7 @@ async function evaluateAll() {
         }
         alert(`${actionLabel}完成。\n成功: ${result?.success ?? 0}\n失败: ${result?.errors ?? 0}`);
         loadScoringData({ force: true });
-        
+
     } catch (e) {
         alert('系统错误: ' + e.message);
     } finally {
@@ -23946,12 +26391,12 @@ async function evaluateAll() {
         }
     }
 }
-        
+
 
 function updateScoringStats() {
     const statsEl = document.getElementById('scoringStats');
     if (!statsEl) return;
-    
+
     const total = currentScoringData.length;
     const scoredItems = currentScoringData.filter(i => i.status === 'scored');
     const scored = scoredItems.length;
@@ -23962,7 +26407,7 @@ function updateScoringStats() {
     const progressHtml = progressText ? `<span class="scoring-progress-inline">${escapeHtml(progressText)}</span>` : '';
     const errorText = getScoringErrorSummaryText();
     const errorHtml = errorText ? `<span class="scoring-error-inline" title="${escapeHtml(errorText)}">最近错误: ${escapeHtml(errorText)}</span>` : '';
-    
+
     statsEl.innerHTML = `
         <span class="scoring-stat-pill">总数 <b>${total}</b></span>
         <span class="scoring-stat-pill">已评 <b>${scored}</b></span>
@@ -23978,53 +26423,53 @@ function sampleScoring(n) {
     selectedScoringRows.clear();
     // Reset all checkboxes visually
     document.querySelectorAll('.scoring-row-check').forEach(cb => cb.checked = false);
-    
+
     // Filter out already scored items first, if none, use all
     const unscored = currentScoringData.filter(i => i.status !== 'scored');
     const pool = unscored.length > 0 ? unscored : currentScoringData;
-    
+
     if (pool.length === 0) {
         alert('没有可供抽样的数据');
         return;
     }
-    
+
     // Random sample
     const sample = [];
     const poolCopy = [...pool];
-    
+
     for (let i = 0; i < n && poolCopy.length > 0; i++) {
         const idx = Math.floor(Math.random() * poolCopy.length);
         sample.push(poolCopy[idx]);
         poolCopy.splice(idx, 1);
     }
-    
+
     // Add to selection
     sample.forEach(item => selectedScoringRows.add(item.kb_id || item.id));
-    
+
     // Temporarily replace currentScoringData with sample to show only sampled items
     // Store original data to restore later if needed (though a refresh restores it)
     // Actually, renderScoringTable uses currentScoringData.
     // To show ONLY sampled data, we can filter currentScoringData in place or modify renderScoringTable.
     // A simpler approach is to set a global filter flag or just overwrite currentScoringData temporarily?
-    // But overwriting loses the rest of the data. 
+    // But overwriting loses the rest of the data.
     // Better: let's modify renderScoringTable to support passing data directly OR
     // just filter currentScoringData to only include the sampled ones for display.
-    
+
     // Let's filter currentScoringData to only the sampled items for display purpose.
-    // But we need to keep the full dataset if user wants to cancel. 
+    // But we need to keep the full dataset if user wants to cancel.
     // Since this is a "sample view", maybe it's fine to just show these.
     // User can click "Sync" or refresh to get back all data.
-    
+
     // To be safe, let's just backup if not backed up? No, simpler is to just filter.
     currentScoringData = sample;
     scoringPage = 1;
-    
+
     // Re-render
     renderScoringTable(false); // No need to filter by inputs, just show the sample
-    
+
     // Ensure checkboxes are checked for the visible rows
     // (renderScoringTable already checks selectedScoringRows)
-    
+
     alert(`已随机抽取 ${sample.length} 条记录并展示。\n(如需查看全部数据，请刷新页面或重新同步)`);
 }
 
@@ -24039,15 +26484,15 @@ async function syncScoringData() {
         alert('当前有评分任务正在进行或已暂停，请结束后再同步此刻库。');
         return;
     }
-    
+
     const btn = document.getElementById('syncScoringBtn');
     const originalText = btn ? btn.innerHTML : '';
-    
+
     if (btn) {
         btn.disabled = true;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 同步中...';
     }
-    
+
     try {
         const res = await api('/scoring/sync', 'POST');
         if (res.success) {
@@ -24075,7 +26520,7 @@ async function openApiConfigModal() {
     const aiFields = document.getElementById('aiPromptFields');
     if (apiFields) apiFields.style.display = 'block';
     if (aiFields) aiFields.style.display = 'none';
-    
+
     try {
         const config = await api('/scoring/config');
         if (config) {
@@ -24350,7 +26795,7 @@ async function testApiConfig() {
 async function openScoringCriteriaModal() {
     const modal = document.getElementById('scoringCriteriaModal');
     if (!modal) return;
-    
+
     try {
         const res = await api('/scoring/prompt');
         if (res.prompt !== undefined) {
@@ -24364,7 +26809,7 @@ async function openScoringCriteriaModal() {
 
 async function saveScoringCriteria() {
     const prompt = document.getElementById('systemPromptInput').value;
-    
+
     try {
         const res = await api('/scoring/prompt', 'POST', { prompt: prompt });
         if (res.success) {
@@ -24383,51 +26828,92 @@ async function saveScoringCriteria() {
 // ==========================================
 let productCatalog = {};
 let productCatalogBaseline = {};
+let productReleaseStatuses = {};
 let currentCategory = null;
 
 async function openProductManager() {
-    const modal = document.getElementById('productManagerModal');
-    if (modal) {
-        modal.style.display = 'block';
-        await loadProductManagerData();
-    }
+    switchTab('productManagerView');
+    setProductManagerSubView('catalog');
 }
 
 function closeProductManager() {
-    const modal = document.getElementById('productManagerModal');
-    if (modal) {
-        modal.style.display = 'none';
-        // Refresh KB Edit Modal product list if open
-        const kbEditModal = document.getElementById('kbEditModal');
-        if (kbEditModal && kbEditModal.style.display !== 'none') {
-            loadProductCatalogForModal();
-        }
+    if (currentTab === 'productManagerView') {
+        switchTab('matrixView');
+    }
+    // Refresh KB Edit Modal product list if open.
+    const kbEditModal = document.getElementById('kbEditModal');
+    if (kbEditModal && kbEditModal.style.display !== 'none') {
+        loadProductCatalogForModal();
+    }
+}
+
+let productManagerSubView = 'catalog';
+
+function setProductManagerSubView(view) {
+    const nextView = ['catalog', 'mapping', 'release'].includes(view) ? view : 'catalog';
+    productManagerSubView = nextView;
+    const panels = {
+        catalog: document.getElementById('productCatalogPanel'),
+        mapping: document.getElementById('productMappingPanel'),
+        release: document.getElementById('productReleasePanel'),
+    };
+    const tabs = {
+        catalog: document.getElementById('productManagerCatalogTab'),
+        mapping: document.getElementById('productManagerMappingTab'),
+        release: document.getElementById('productManagerReleaseTab'),
+    };
+    Object.entries(panels).forEach(([key, panel]) => {
+        if (panel) panel.classList.toggle('d-none', key !== nextView);
+    });
+    Object.entries(tabs).forEach(([key, tab]) => {
+        if (!tab) return;
+        const isActive = key === nextView;
+        tab.classList.toggle('active', isActive);
+        tab.setAttribute('aria-selected', String(isActive));
+    });
+    if (nextView === 'mapping') {
+        loadModelMappingData();
+    } else if (nextView === 'release' && typeof refreshNewProductReleaseCapabilities === 'function') {
+        refreshNewProductReleaseCapabilities();
     }
 }
 
 async function loadProductManagerData() {
     try {
-        const res = await api('/kb/product_catalog');
+        const [res, releaseRes] = await Promise.all([
+            api('/kb/product_catalog'),
+            api('/kb/product_catalog/release_intents')
+        ]);
         productCatalog = res || {};
+        productReleaseStatuses = {};
+        ((releaseRes && releaseRes.models) || []).forEach(item => {
+            const model = String(item && (item.model_id || item.model) || '').trim();
+            if (model) productReleaseStatuses[model] = item.release_status || 'released';
+        });
         productCatalogBaseline = JSON.parse(JSON.stringify(productCatalog));
-        
+        updateProductManagerSummary();
+
         // Verify if currentCategory still exists in the new catalog
         if (currentCategory && !productCatalog.hasOwnProperty(currentCategory)) {
             currentCategory = null;
         }
-        
+
         renderProductCategories();
-        
-        if (currentCategory) {
+
+        if (currentCategory && productCatalog.hasOwnProperty(currentCategory)) {
             selectProductCategory(currentCategory);
+        } else if (Object.keys(productCatalog).length) {
+            selectProductCategory(Object.keys(productCatalog)[0]);
         } else {
             // Reset right side UI
             const title = document.getElementById('currentCategoryTitle');
+            const meta = document.getElementById('currentCategoryMeta');
             const deleteBtn = document.getElementById('deleteCategoryBtn');
             const addContainer = document.getElementById('addModelContainer');
             const list = document.getElementById('productModelList');
-            
+
             if (title) title.textContent = '请选择分类';
+            if (meta) meta.textContent = '从左侧选择分类后管理型号';
             if (deleteBtn) deleteBtn.classList.add('d-none');
             if (addContainer) addContainer.classList.add('d-none');
             if (list) {
@@ -24442,6 +26928,15 @@ async function loadProductManagerData() {
     } catch (e) {
         showToast('加载产品目录失败: ' + e.message, 'error');
     }
+}
+
+function updateProductManagerSummary() {
+    const categories = Object.keys(productCatalog || {});
+    const modelCount = categories.reduce((total, category) => total + ((productCatalog[category] || []).length), 0);
+    const summary = document.getElementById('productManagerSummary');
+    const categorySummary = document.getElementById('productManagerCategorySummary');
+    if (summary) summary.textContent = `${categories.length} 个分类 · ${modelCount} 个型号`;
+    if (categorySummary) categorySummary.textContent = `${categories.length} 个分类`;
 }
 
 function summarizeProductCatalogImpact(impact) {
@@ -24462,7 +26957,8 @@ function summarizeProductCatalogImpact(impact) {
 function renderProductCategories() {
     const list = document.getElementById('productCategoryList');
     if (!list) return;
-    
+    updateProductManagerSummary();
+
     list.innerHTML = '';
     Object.keys(productCatalog).forEach(cat => {
         const div = document.createElement('div');
@@ -24470,9 +26966,9 @@ function renderProductCategories() {
         if (cat === currentCategory) {
             div.classList.add('active');
         }
-        
+
         const count = (productCatalog[cat] || []).length;
-        
+
         div.innerHTML = `
             <span>${cat}</span>
             <span class="pm-category-count">${count}</span>
@@ -24485,37 +26981,59 @@ function renderProductCategories() {
 function selectProductCategory(category) {
     currentCategory = category;
     renderProductCategories(); // Update active state
-    
+
     const title = document.getElementById('currentCategoryTitle');
+    const meta = document.getElementById('currentCategoryMeta');
     const deleteBtn = document.getElementById('deleteCategoryBtn');
     const addContainer = document.getElementById('addModelContainer');
-    
+    const searchInput = document.getElementById('productModelSearch');
+
     if (title) title.textContent = category;
+    if (meta) meta.textContent = `${(productCatalog[category] || []).length} 个型号`;
     if (deleteBtn) deleteBtn.classList.remove('d-none');
     if (addContainer) addContainer.classList.remove('d-none');
-    
+    if (searchInput) searchInput.value = '';
+
     renderProductModels(category);
 }
 
 function renderProductModels(category) {
     const list = document.getElementById('productModelList');
     if (!list) return;
-    
+
     const models = productCatalog[category] || [];
+    const searchInput = document.getElementById('productModelSearch');
+    const keyword = String(searchInput?.value || '').trim().toLowerCase();
+    const visibleModels = keyword
+        ? models.filter(model => String(model).toLowerCase().includes(keyword))
+        : models;
     if (models.length === 0) {
         list.innerHTML = '<div class="pm-empty-state">暂无型号</div>';
         return;
     }
-    
+
+    if (visibleModels.length === 0) {
+        list.innerHTML = '<div class="pm-empty-state">没有匹配的型号</div>';
+        return;
+    }
+
     list.innerHTML = '';
-    models.forEach(model => {
+    visibleModels.forEach(model => {
         const div = document.createElement('div');
-        div.className = 'pm-model-chip';
-        
+        div.className = 'pm-model-chip pm-model-row';
+
         const name = document.createElement('span');
         name.textContent = model;
         name.title = model;
-        
+
+        const status = productReleaseStatuses[model] || 'released';
+        const statusBadge = document.createElement('span');
+        statusBadge.className = `pm-model-status is-${status}`;
+        statusBadge.title = '发布状态只能通过专用发布流程修改';
+        statusBadge.textContent = {
+            pending_release: '待上线', releasing: '上线中', released: '已上线', release_cancelled: '已取消'
+        }[status] || '已上线';
+
         const del = document.createElement('i');
         del.className = 'fas fa-times pm-model-delete';
         del.title = '删除型号';
@@ -24523,8 +27041,9 @@ function renderProductModels(category) {
             e.stopPropagation();
             deleteProductModel(model);
         });
-        
+
         div.appendChild(name);
+        div.appendChild(statusBadge);
         div.appendChild(del);
         list.appendChild(div);
     });
@@ -24551,12 +27070,12 @@ async function addProductCategory() {
     if (!input) return;
     const name = input.value.trim();
     if (!name) return;
-    
+
     if (productCatalog[name]) {
         showToast('分类已存在', 'warning');
         return;
     }
-    
+
     productCatalog[name] = [];
     try {
         await saveProductCatalog();
@@ -24573,22 +27092,32 @@ async function addProductCategory() {
 async function deleteCurrentCategory() {
     if (!currentCategory) return;
     if (!confirm(`确定要删除分类 "${currentCategory}" 及其所有型号吗？`)) return;
-    
+
     const oldCatalog = JSON.parse(JSON.stringify(productCatalog));
+    const oldStatuses = JSON.parse(JSON.stringify(productReleaseStatuses));
+    (productCatalog[currentCategory] || []).forEach(model => delete productReleaseStatuses[model]);
     delete productCatalog[currentCategory];
-    
+
     try {
         await saveProductCatalog();
-        currentCategory = null;
-        document.getElementById('currentCategoryTitle').textContent = '请选择分类';
-        document.getElementById('deleteCategoryBtn').classList.add('d-none');
-        document.getElementById('addModelContainer').classList.add('d-none');
-        document.getElementById('productModelList').innerHTML = '<div class="text-muted text-center mt-20">请先在左侧选择一个分类</div>';
-        renderProductCategories();
+        const remainingCategories = Object.keys(productCatalog);
+        if (remainingCategories.length) {
+            selectProductCategory(remainingCategories[0]);
+        } else {
+            currentCategory = null;
+            document.getElementById('currentCategoryTitle').textContent = '暂无分类';
+            const meta = document.getElementById('currentCategoryMeta');
+            if (meta) meta.textContent = '新增分类后即可添加型号';
+            document.getElementById('deleteCategoryBtn').classList.add('d-none');
+            document.getElementById('addModelContainer').classList.add('d-none');
+            document.getElementById('productModelList').innerHTML = '<div class="pm-empty-state">当前没有型号分类</div>';
+            renderProductCategories();
+        }
         showToast('分类删除成功', 'success');
     } catch (e) {
         showToast('删除失败: ' + e.message, 'error');
         productCatalog = oldCatalog; // Revert
+        productReleaseStatuses = oldStatuses;
     }
 }
 
@@ -24598,32 +27127,44 @@ async function addProductModel() {
     if (!input) return;
     const name = input.value.trim();
     if (!name) return;
-    
+
+    const statusSelect = document.getElementById('newModelReleaseStatus');
+    const releaseStatus = statusSelect?.value || 'pending_release';
+    if (!['pending_release', 'released'].includes(releaseStatus)) {
+        showToast('请选择有效的发布状态', 'warning');
+        return;
+    }
+
     if (productCatalog[currentCategory].includes(name)) {
         showToast('型号已存在', 'warning');
         return;
     }
-    
+
     productCatalog[currentCategory].push(name);
-    
+    productReleaseStatuses[name] = releaseStatus;
+
     try {
         await saveProductCatalog();
         input.value = '';
+        if (statusSelect) statusSelect.value = 'pending_release';
         renderProductModels(currentCategory);
         showToast('型号添加成功', 'success');
     } catch (e) {
         showToast('保存失败: ' + e.message, 'error');
         productCatalog[currentCategory].pop(); // Revert
+        delete productReleaseStatuses[name];
     }
 }
 
 async function deleteProductModel(model) {
     if (!currentCategory) return;
     if (!confirm(`确定要删除型号 "${model}" 吗？`)) return;
-    
+
     const idx = productCatalog[currentCategory].indexOf(model);
     if (idx > -1) {
+        const previousStatus = productReleaseStatuses[model];
         productCatalog[currentCategory].splice(idx, 1);
+        delete productReleaseStatuses[model];
         try {
             await saveProductCatalog();
             renderProductModels(currentCategory);
@@ -24631,6 +27172,7 @@ async function deleteProductModel(model) {
         } catch (e) {
             showToast('删除失败: ' + e.message, 'error');
             productCatalog[currentCategory].splice(idx, 0, model); // Revert
+            if (previousStatus) productReleaseStatuses[model] = previousStatus;
         }
     }
 }
@@ -24716,11 +27258,12 @@ async function saveProductCatalog() {
 
     const res = await api('/kb/product_catalog', 'POST', {
         catalog: productCatalog,
+        release_statuses: productReleaseStatuses,
         confirm_cleanup: !!impact.requires_confirmation
     });
     if (!res.success) throw new Error(res.message || 'Unknown error');
     productCatalogBaseline = JSON.parse(JSON.stringify(productCatalog));
-    
+
     matrixAllModels = [];
 
     // Refresh Matrix View if active
@@ -24755,17 +27298,17 @@ async function setupTagsDropdown() {
     const input = document.getElementById('tagsInput');
     const btn = document.getElementById('tagsDropdownBtn');
     const dropdown = document.getElementById('tagsDropdown');
-    
+
     if (!input || !btn || !dropdown) return;
 
     // Function to render dropdown
     function renderDropdown() {
         dropdown.innerHTML = '';
-        
+
         // Get current tags from input
         const currentVal = input.value;
         const currentTags = currentVal.split(/[,，]/).map(t => t.trim()).filter(Boolean);
-        
+
         // Filter out existing tags
         const availableTags = allTags.filter(tag => !currentTags.includes(tag));
 
@@ -24788,12 +27331,12 @@ async function setupTagsDropdown() {
                 const currentVal = input.value;
                 // Check if we need a comma separator
                 const sep = currentVal.trim().length > 0 && !currentVal.trim().endsWith(',') && !currentVal.trim().endsWith('，') ? ', ' : '';
-                
+
                 input.value = currentVal + sep + tag;
-                
+
                 // Trigger input event to update any listeners (optional)
                 input.dispatchEvent(new Event('input'));
-                
+
                 // Close dropdown after selection
                 dropdown.classList.remove('show');
                 input.focus();
@@ -24806,9 +27349,9 @@ async function setupTagsDropdown() {
     btn.onclick = async (e) => {
         e.stopPropagation();
         e.preventDefault();
-        
+
         const isVisible = dropdown.classList.contains('show');
-        
+
         if (isVisible) {
             dropdown.classList.remove('show');
         } else {
@@ -24817,7 +27360,7 @@ async function setupTagsDropdown() {
             dropdown.classList.add('show');
         }
     };
-    
+
     // Update dropdown when input changes (if open)
     input.addEventListener('input', () => {
         if (dropdown.classList.contains('show')) {
@@ -24837,26 +27380,26 @@ function setupRowTagInput(input, container, existingTags) {
     // Create dropdown container if not exists (though renderLinkRow creates input inside a div, we can append dropdown there)
     // The container passed here should be the 'add-tag-row' div which we will make relative
     container.style.position = 'relative';
-    
+
     const dropdown = document.createElement('div');
     dropdown.className = 'dropdown-menu';
     dropdown.style.minWidth = '150px';
     dropdown.style.maxHeight = '150px';
     container.appendChild(dropdown);
-    
+
     function render() {
         dropdown.innerHTML = '';
         const currentVal = input.value;
         const inputTags = currentVal.split(/[,，]/).map(t => t.trim()).filter(Boolean);
-        
+
         // Filter: not in existing tags AND not in current input
         const available = allTags.filter(t => !existingTags.includes(t) && !inputTags.includes(t));
-        
+
         if (available.length === 0) {
             dropdown.classList.remove('show');
             return;
         }
-        
+
         // Limit to 10 suggestions for inline input
         const suggestions = available.slice(0, 10);
 
@@ -24866,17 +27409,17 @@ function setupRowTagInput(input, container, existingTags) {
             item.textContent = tag;
             item.style.padding = '4px 8px';
             item.style.fontSize = '12px';
-            
+
             item.onclick = (e) => {
                 e.stopPropagation();
                 // For row input, we might just replace the current partial input or append
                 // Simple logic: append if comma exists, or replace if empty/partial
                 // But row input is usually for ONE tag or comma separated.
                 // Let's use same logic as main input: append
-                
+
                 const currentVal = input.value;
                 const sep = currentVal.trim().length > 0 && !currentVal.trim().endsWith(',') && !currentVal.trim().endsWith('，') ? ', ' : '';
-                
+
                 input.value = currentVal + sep + tag;
                 input.dispatchEvent(new Event('input'));
                 dropdown.classList.remove('show');
@@ -24886,12 +27429,12 @@ function setupRowTagInput(input, container, existingTags) {
         });
         dropdown.classList.add('show');
     }
-    
+
     input.addEventListener('focus', async () => {
          if (allTags.length === 0) await fetchGlobalTags();
          render();
      });
-     
+
      input.addEventListener('click', () => {
          if (document.activeElement === input) {
              render();
@@ -24901,7 +27444,7 @@ function setupRowTagInput(input, container, existingTags) {
      input.addEventListener('input', () => {
          render();
      });
-    
+
     // Close on click outside
     document.addEventListener('click', (e) => {
         if (!container.contains(e.target)) {
@@ -24915,23 +27458,25 @@ function setupRowTagInput(input, container, existingTags) {
 // ---------------------------------------------------------
 
 let modelMappings = {};
+let modelMappingCategoryOrder = [];
 let currentMappingCategory = null; // For Model Selector
 let allUniqueModels = [];
 let modelMappingView = 'audit';
 let modelMappingAuditFilter = 'all';
 
-async function openModelMappingModal() {
+async function loadModelMappingData() {
     try {
         // 1. Load Mappings
-        const res = await api('/model_mappings');
-        modelMappings = (res && typeof res === 'object' && !Array.isArray(res)) ? res : {};
-        
+        const res = await fetchOrderedModelMappings();
+        modelMappings = res.mappings;
+        modelMappingCategoryOrder = res.category_order;
+
         // 2. Load Product Catalog to get all available models
         if (Object.keys(productCatalog).length === 0) {
             const catalogRes = await api('/kb/product_catalog');
             if (catalogRes) productCatalog = catalogRes;
         }
-        
+
         // Flatten product catalog to get all unique models
         const modelSet = new Set();
         Object.values(productCatalog).forEach(models => {
@@ -24946,14 +27491,18 @@ async function openModelMappingModal() {
         modelMappingView = 'audit';
         modelMappingAuditFilter = 'all';
         renderModelMappingTable();
-        document.getElementById('modelMappingModal').style.display = 'block';
     } catch (e) {
         showToast('加载配置失败: ' + e.message, 'error');
     }
 }
 
+async function openModelMappingModal() {
+    switchTab('productManagerView');
+    setProductManagerSubView('mapping');
+}
+
 function closeModelMappingModal() {
-    document.getElementById('modelMappingModal').style.display = 'none';
+    setProductManagerSubView('catalog');
 }
 
 function setModelMappingView(view) {
@@ -25012,7 +27561,7 @@ function buildModelMappingAuditRows() {
 
     return Array.from(rowsByKey.values()).map(row => ({
         ...row,
-        categories: row.categories.sort((a, b) => String(a).localeCompare(String(b), 'zh')),
+        categories: orderedMappingCategories(modelMappings, modelMappingCategoryOrder).filter(category => row.categories.includes(category)),
     })).sort((a, b) => String(a.model).localeCompare(String(b.model), 'zh'));
 }
 
@@ -25039,7 +27588,7 @@ function renderModelMappingAudit() {
         <span><b>${total}</b> 全部型号</span>
         <span><b>${unmapped}</b> 未映射</span>
         <span><b>${multiMapped}</b> 多分类</span>
-        <span><b>${outsideCatalog}</b> 目录外型号</span>
+        <span title="口径：未出现在任何映射分类中的型号，需人工归入或确认弃用。"><b>${outsideCatalog}</b> 目录外型号</span>
     `;
 
     ['all', 'unmapped', 'multi'].forEach(filter => {
@@ -25128,23 +27677,65 @@ function renderModelMappingAudit() {
     });
 }
 
+function moveMappingCategory(category, direction) {
+    const order = orderedMappingCategories(modelMappings, modelMappingCategoryOrder);
+    const index = order.indexOf(category);
+    const target = index + direction;
+    if (index < 0 || ![-1, 1].includes(direction) || target < 0 || target >= order.length) return;
+    [order[index], order[target]] = [order[target], order[index]];
+    modelMappingCategoryOrder = order;
+    renderModelMappingTable();
+    const row = Array.from(document.querySelectorAll('[data-mapping-category]'))
+        .find(element => element.dataset.mappingCategory === category);
+    row?.scrollIntoView({ block: 'nearest' });
+    const button = row?.querySelector(`[data-move-direction="${direction}"]:not(:disabled)`)
+        || row?.querySelector('.mm-action-move:not(:disabled)');
+    button?.focus({ preventScroll: true });
+}
+
+function mappingActionIcon(action) {
+    const paths = {
+        up: '<path d="m6 10 6-6 6 6M12 4v16"/>',
+        down: '<path d="m6 14 6 6 6-6M12 4v16"/>',
+        copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+        delete: '<path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"/>',
+    };
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths[action] || ''}</svg>`;
+}
+
+function appendMappingOrderButtons(container, category, order) {
+    [-1, 1].forEach(direction => {
+        const button = document.createElement('button');
+        const label = direction < 0 ? '上移' : '下移';
+        button.type = 'button';
+        button.className = 'icon-btn mm-action-btn mm-action-move';
+        button.dataset.moveDirection = String(direction);
+        button.title = `${label}“${category}”`;
+        button.setAttribute('aria-label', button.title);
+        const index = order.indexOf(category);
+        button.disabled = direction < 0 ? index === 0 : index === order.length - 1;
+        button.innerHTML = mappingActionIcon(direction < 0 ? 'up' : 'down');
+        button.onclick = () => moveMappingCategory(category, direction);
+        container.appendChild(button);
+    });
+}
+
 function renderModelMappingTable() {
     const grid = document.getElementById('modelMappingGrid');
     const tbody = document.getElementById('modelMappingTableBody');
-    
+
     const query = (document.getElementById('modelMappingSearch')?.value || '').trim().toLowerCase();
-    
+
     if (grid) grid.innerHTML = '';
     if (tbody) tbody.innerHTML = '';
-    
-    // Sort categories alphabetically or keep order? 
-    // Objects are unordered, but we can sort keys.
+
     if (!modelMappings || typeof modelMappings !== 'object' || Array.isArray(modelMappings)) {
         modelMappings = {};
     }
     renderModelMappingViewState();
     renderModelMappingAudit();
-    const categories = Object.keys(modelMappings).sort();
+    const categories = orderedMappingCategories(modelMappings, modelMappingCategoryOrder);
+    modelMappingCategoryOrder = categories;
     if (categories.length === 0) {
         if (grid) {
             grid.innerHTML = `
@@ -25157,98 +27748,116 @@ function renderModelMappingTable() {
         }
         return;
     }
-    
+
     const matchesQuery = (category, models) => {
         if (!query) return true;
         if (String(category).toLowerCase().includes(query)) return true;
         const list = Array.isArray(models) ? models : [];
         return list.some(m => String(m).toLowerCase().includes(query));
     };
-    
+
     let renderedCategoryCount = 0;
     categories.forEach(category => {
         const models = Array.isArray(modelMappings[category]) ? modelMappings[category] : [];
         if (!matchesQuery(category, models)) return;
         renderedCategoryCount++;
-        
+
         if (grid) {
             const card = document.createElement('div');
             card.className = 'mm-card';
-            
+            card.dataset.mappingCategory = category;
+
             const header = document.createElement('div');
             header.className = 'mm-card-header';
-            
+
             const nameInput = document.createElement('input');
             nameInput.type = 'text';
             nameInput.className = 'mm-category-input';
             nameInput.value = category;
             nameInput.onchange = (e) => renameMappingCategory(category, e.target.value);
-            
+
             const count = document.createElement('span');
             count.className = 'mm-count-badge';
             count.innerText = String(models.length);
-            
+
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'mm-card-copy mm-action-btn';
+            copyBtn.innerHTML = mappingActionIcon('copy');
+            copyBtn.onclick = () => copyMappingModels(category);
+            copyBtn.title = '一键复制全部型号（逗号分隔）';
+            copyBtn.setAttribute('aria-label', copyBtn.title);
+
             const delBtn = document.createElement('button');
-            delBtn.className = 'mm-card-delete';
-            delBtn.innerHTML = '<i class="fas fa-trash-alt"></i>';
+            delBtn.type = 'button';
+            delBtn.className = 'mm-card-delete mm-action-btn mm-action-delete';
+            delBtn.innerHTML = mappingActionIcon('delete');
             delBtn.onclick = () => deleteMappingCategory(category);
             delBtn.title = '删除此分类映射';
-            
+            delBtn.setAttribute('aria-label', delBtn.title);
+
             header.appendChild(nameInput);
             header.appendChild(count);
+            appendMappingOrderButtons(header, category, categories);
+            header.appendChild(copyBtn);
             header.appendChild(delBtn);
-            
+
             const modelsDiv = document.createElement('div');
             modelsDiv.className = 'mm-models-container';
-            
+
             models.forEach(model => {
                 const chip = document.createElement('span');
                 chip.className = 'mm-model-chip';
                 chip.innerText = model;
-                
+
                 const x = document.createElement('i');
                 x.className = 'fas fa-times mm-model-delete';
                 x.title = '移除型号';
                 x.onclick = () => removeModelFromMapping(category, model);
-                
+
                 chip.appendChild(x);
                 modelsDiv.appendChild(chip);
             });
-            
+
             const footer = document.createElement('div');
             footer.className = 'mm-card-footer';
-            
+
             const addBtn = document.createElement('button');
             addBtn.className = 'mm-add-model-btn';
             addBtn.innerHTML = '<i class="fas fa-plus"></i> 添加机型';
             addBtn.onclick = () => openModelSelector(category);
             addBtn.title = '添加/管理机型';
-            
+
             footer.appendChild(addBtn);
-            
+
             card.appendChild(header);
             card.appendChild(modelsDiv);
             card.appendChild(footer);
             grid.appendChild(card);
             return;
         }
-        
+
         if (tbody) {
             const tr = document.createElement('tr');
-            
+            tr.dataset.mappingCategory = category;
+
             const tdName = document.createElement('td');
             const nameInput = document.createElement('input');
             nameInput.type = 'text';
-            nameInput.className = 'pm-input';
+            nameInput.className = 'mm-category-input';
             nameInput.value = category;
-            nameInput.style.width = '100%';
+            nameInput.setAttribute('aria-label', '分类名称，可直接编辑重命名');
             nameInput.onchange = (e) => renameMappingCategory(category, e.target.value);
             tdName.appendChild(nameInput);
-            
+            const cnt = document.createElement('span');
+            cnt.className = 'mm-category-count';
+            cnt.innerText = String(models.length);
+            tdName.appendChild(cnt);
+
             const tdModels = document.createElement('td');
             const modelsDiv = document.createElement('div');
             modelsDiv.className = 'mm-models-container';
-            
+
             models.forEach(model => {
                 const chip = document.createElement('span');
                 chip.className = 'mm-model-chip';
@@ -25260,24 +27869,36 @@ function renderModelMappingTable() {
                 chip.appendChild(remove);
                 modelsDiv.appendChild(chip);
             });
-            
+
             const addBtn = document.createElement('button');
             addBtn.className = 'mm-add-model-btn';
-            addBtn.innerHTML = '<i class="fas fa-plus"></i> 添加机型';
+            addBtn.innerHTML = '<i class="fas fa-plus"></i><span class="mm-add-model-label">添加机型</span>';
             addBtn.onclick = () => openModelSelector(category);
             addBtn.title = '添加/管理机型';
             modelsDiv.appendChild(addBtn);
-            
+
             tdModels.appendChild(modelsDiv);
-            
+
             const tdActions = document.createElement('td');
+            appendMappingOrderButtons(tdActions, category, categories);
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'icon-btn mm-action-btn mm-action-copy';
+            copyBtn.innerHTML = mappingActionIcon('copy');
+            copyBtn.onclick = () => copyMappingModels(category);
+            copyBtn.title = '一键复制全部型号（逗号分隔）';
+            copyBtn.setAttribute('aria-label', copyBtn.title);
+            tdActions.appendChild(copyBtn);
+
             const delBtn = document.createElement('button');
-            delBtn.className = 'icon-btn delete-btn';
-            delBtn.innerHTML = '<i class="fas fa-trash-alt"></i>';
+            delBtn.type = 'button';
+            delBtn.className = 'icon-btn delete-btn mm-action-btn mm-action-delete';
+            delBtn.innerHTML = mappingActionIcon('delete');
             delBtn.onclick = () => deleteMappingCategory(category);
             delBtn.title = '删除此分类映射';
+            delBtn.setAttribute('aria-label', delBtn.title);
             tdActions.appendChild(delBtn);
-            
+
             tr.appendChild(tdName);
             tr.appendChild(tdModels);
             tr.appendChild(tdActions);
@@ -25297,6 +27918,7 @@ function addMappingCategory() {
         newName = `新分类 ${counter++}`;
     }
     modelMappings[newName] = [];
+    modelMappingCategoryOrder.push(newName);
     const search = document.getElementById('modelMappingSearch');
     if (search) search.value = '';
     modelMappingView = 'categories';
@@ -25309,13 +27931,13 @@ function renameMappingCategory(oldName, newName) {
         renderModelMappingTable(); // Reset input if invalid
         return;
     }
-    
+
     if (modelMappings[newName]) {
         showToast('分类名称已存在', 'warning');
         renderModelMappingTable();
         return;
     }
-    
+
     // Create new object with new key
     const newMappings = {};
     Object.keys(modelMappings).forEach(key => {
@@ -25326,13 +27948,55 @@ function renameMappingCategory(oldName, newName) {
         }
     });
     modelMappings = newMappings;
+    modelMappingCategoryOrder = modelMappingCategoryOrder.map(category => category === oldName ? newName : category);
     renderModelMappingTable();
 }
 
 function deleteMappingCategory(category) {
     if (!confirm(`确定要删除分类映射 "${category}" 吗？`)) return;
     delete modelMappings[category];
+    modelMappingCategoryOrder = modelMappingCategoryOrder.filter(name => name !== category);
     renderModelMappingTable();
+}
+
+// 一键复制某分类下的全部型号（逗号分隔）
+function copyMappingModels(category) {
+    const models = Array.isArray(modelMappings[category]) ? modelMappings[category] : [];
+    if (models.length === 0) {
+        showToast('该分类暂无型号可复制', 'warning');
+        return;
+    }
+    const text = models.join(',');
+    const onSuccess = () => showToast(`已复制「${category}」的 ${models.length} 个型号`, 'success');
+    const onFail = () => showToast('复制失败，请手动复制', 'error');
+
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(onSuccess).catch(() => {
+            copyTextViaTextarea(text) ? onSuccess() : onFail();
+        });
+    } else {
+        copyTextViaTextarea(text) ? onSuccess() : onFail();
+    }
+}
+
+// 降级方案：通过隐藏 textarea + execCommand 复制（兼容 http 环境）
+function copyTextViaTextarea(text) {
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, text.length);
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+    } catch (e) {
+        return false;
+    }
 }
 
 function removeModelFromMapping(category, model) {
@@ -25347,6 +28011,8 @@ function removeModelFromMapping(category, model) {
 // ---------------------------------------------------------
 
 let modelSelectorTempSelected = new Set();
+let modelSelectorInputAdded = new Set();
+let modelSelectorInputResolved = { values: [], recognized: [], unrecognized: [], hasChineseComma: false };
 
 function compactModelKey(v) {
     return String(v || '').trim().replace(/\s+/g, '').toLowerCase();
@@ -25374,11 +28040,88 @@ function canonicalizeModelName(name, catalogIndex) {
     return (catalogIndex && catalogIndex.get(key)) || raw;
 }
 
+function resolveModelSelectorInput(value) {
+    const catalogIndex = buildCatalogModelIndex();
+    const recognized = [];
+    const unrecognized = [];
+    const values = [];
+    const seen = new Set();
+    const raw = String(value ?? '');
+    raw.split(/[,，\n]+/).map(item => item.trim()).filter(Boolean).forEach((item) => {
+        const canonical = canonicalizeModelName(item, catalogIndex);
+        const key = compactModelKey(canonical);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        if (catalogIndex.has(compactModelKey(item))) {
+            values.push(canonical);
+            recognized.push(canonical);
+        } else {
+            unrecognized.push(item);
+        }
+    });
+    return {
+        values,
+        recognized,
+        unrecognized,
+        hasChineseComma: raw.includes('，')
+    };
+}
+
+function renderModelSelectorRecognition(result = null) {
+    const input = document.getElementById('modelSelectorInput');
+    const status = document.getElementById('modelSelectorRecognition');
+    const resolved = result || resolveModelSelectorInput(input?.value || '');
+    modelSelectorInputResolved = resolved;
+    if (input) {
+        input.classList.toggle('has-unrecognized-products', resolved.unrecognized.length > 0 || resolved.hasChineseComma);
+    }
+    if (!status) return;
+    status.classList.toggle('is-warning', resolved.unrecognized.length > 0 || resolved.hasChineseComma);
+    status.replaceChildren();
+    if (!resolved.values.length && !resolved.unrecognized.length && !resolved.hasChineseComma) return;
+
+    const summary = document.createElement('span');
+    summary.className = 'mm-model-recognition-summary';
+    if (resolved.unrecognized.length) {
+        summary.textContent = `已识别 ${resolved.recognized.length} 个，未识别 ${resolved.unrecognized.length} 个`;
+    } else if (resolved.hasChineseComma) {
+        summary.textContent = '请使用英文逗号 , 分隔型号';
+    } else {
+        summary.textContent = `已识别 ${resolved.recognized.length} 个型号`;
+    }
+    status.appendChild(summary);
+
+    resolved.unrecognized.forEach((model) => {
+        const chip = document.createElement('span');
+        chip.className = 'mm-model-unrecognized-chip';
+        chip.textContent = model;
+        chip.title = '型号目录中未找到匹配项，确认时不会加入映射';
+        status.appendChild(chip);
+    });
+    if (resolved.hasChineseComma) {
+        const separatorHint = document.createElement('span');
+        separatorHint.className = 'mm-model-separator-hint';
+        separatorHint.textContent = '检测到中文逗号，请改为英文逗号 ,';
+        status.appendChild(separatorHint);
+    }
+}
+
+function syncModelSelectorInput() {
+    const input = document.getElementById('modelSelectorInput');
+    const resolved = resolveModelSelectorInput(input?.value || '');
+    modelSelectorInputAdded.forEach(model => modelSelectorTempSelected.delete(model));
+    modelSelectorInputAdded = new Set(resolved.recognized);
+    modelSelectorInputAdded.forEach(model => modelSelectorTempSelected.add(model));
+    renderModelSelectorRecognition(resolved);
+    renderModelSelectorSelected();
+    renderModelSelectorList(document.getElementById('modelSelectorSearch')?.value || '');
+}
+
 function enableWheelScrollInElement(el) {
     if (!el) return;
     if (el.dataset.wheelScrollEnabled === '1') return;
     el.dataset.wheelScrollEnabled = '1';
-    
+
     let pendingDelta = 0;
     let rafId = 0;
     const flush = () => {
@@ -25387,11 +28130,11 @@ function enableWheelScrollInElement(el) {
         el.scrollTop += pendingDelta;
         pendingDelta = 0;
     };
-    
+
     el.addEventListener('wheel', (e) => {
         const canScroll = el.scrollHeight > el.clientHeight;
         if (!canScroll) return;
-        
+
         let deltaY = e.deltaY || 0;
         let deltaX = e.deltaX || 0;
         let delta = Math.abs(deltaY) >= Math.abs(deltaX) ? deltaY : deltaX;
@@ -25401,11 +28144,11 @@ function enableWheelScrollInElement(el) {
 
         const atTop = el.scrollTop <= 0;
         const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
-        
+
         if ((delta < 0 && atTop) || (delta > 0 && atBottom)) {
             return;
         }
-        
+
         pendingDelta += delta;
         if (!rafId) rafId = requestAnimationFrame(flush);
         e.preventDefault();
@@ -25417,7 +28160,7 @@ function enableDragScrollInElement(el) {
     if (!el) return;
     if (el.dataset.dragScrollEnabled === '1') return;
     el.dataset.dragScrollEnabled = '1';
-    
+
     let isDown = false;
     let isDragging = false;
     let startY = 0;
@@ -25438,7 +28181,7 @@ function enableDragScrollInElement(el) {
         pendingScrollTop = scrollTop;
         if (!dragScrollRaf) dragScrollRaf = requestAnimationFrame(flushDragScroll);
     };
-    
+
     el.addEventListener('pointerdown', (e) => {
         if (e.target && e.target.closest && e.target.closest('input, label, button, a, textarea, select, option')) return;
         if (e.button !== 0) return;
@@ -25449,7 +28192,7 @@ function enableDragScrollInElement(el) {
         activePointerId = e.pointerId;
         el.setPointerCapture?.(e.pointerId);
     });
-    
+
     el.addEventListener('pointermove', (e) => {
         if (!isDown) return;
         if (activePointerId !== null && e.pointerId !== activePointerId) return;
@@ -25463,7 +28206,7 @@ function enableDragScrollInElement(el) {
         scheduleDragScroll(startScrollTop - dy);
         e.preventDefault();
     }, { passive: false });
-    
+
     const end = (e) => {
         if (e && activePointerId !== null && e.pointerId !== activePointerId) return;
         if (pendingScrollTop !== null) {
@@ -25480,7 +28223,7 @@ function enableDragScrollInElement(el) {
     };
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
-    
+
     el.addEventListener('click', (e) => {
         if (performance.now() >= suppressClickUntil) return;
         e.preventDefault();
@@ -25492,13 +28235,21 @@ function openModelSelector(category) {
     currentMappingCategory = category;
     const modal = document.getElementById('modelSelectorModal');
     if (modal) modal.style.display = 'block';
-    
+
     // Reset search
     const searchInput = document.getElementById('modelSelectorSearch');
     if (searchInput) {
         searchInput.value = '';
         searchInput.focus();
     }
+    const batchInput = document.getElementById('modelSelectorInput');
+    if (batchInput) {
+        batchInput.value = '';
+        batchInput.classList.remove('has-unrecognized-products');
+    }
+    modelSelectorInputResolved = { values: [], recognized: [], unrecognized: [], hasChineseComma: false };
+    modelSelectorInputAdded = new Set();
+    renderModelSelectorRecognition(modelSelectorInputResolved);
 
     const catalogIndex = buildCatalogModelIndex();
     const rawSelected = modelMappings[currentMappingCategory] || [];
@@ -25508,9 +28259,9 @@ function openModelSelector(category) {
             .filter(Boolean)
     );
     renderModelSelectorSelected();
-    
+
     renderModelSelectorList();
-    
+
     enableWheelScrollInElement(document.getElementById('modelSelectorSelected'));
     enableWheelScrollInElement(document.getElementById('modelSelectorList'));
     enableDragScrollInElement(document.getElementById('modelSelectorList'));
@@ -25520,44 +28271,50 @@ function closeModelSelector() {
     document.getElementById('modelSelectorModal').style.display = 'none';
     currentMappingCategory = null;
     modelSelectorTempSelected = new Set();
+    modelSelectorInputAdded = new Set();
+    modelSelectorInputResolved = { values: [], recognized: [], unrecognized: [], hasChineseComma: false };
 }
 
 function renderModelSelectorSelected() {
     const wrap = document.getElementById('modelSelectorSelected');
     if (!wrap) return;
     wrap.innerHTML = '';
-    
+
     const header = document.createElement('div');
     header.className = 'mm-selected-header';
-    
+
     const title = document.createElement('div');
     title.className = 'mm-selected-title';
     title.innerText = `已选 ${modelSelectorTempSelected.size}`;
-    
+
     const clearBtn = document.createElement('button');
     clearBtn.className = 'mm-selected-clear';
     clearBtn.type = 'button';
     clearBtn.innerText = '清空';
     clearBtn.onclick = () => {
         modelSelectorTempSelected = new Set();
+        modelSelectorInputAdded = new Set();
+        const batchInput = document.getElementById('modelSelectorInput');
+        if (batchInput) batchInput.value = '';
+        renderModelSelectorRecognition();
         renderModelSelectorSelected();
         const q = document.getElementById('modelSelectorSearch')?.value?.trim() || '';
         renderModelSelectorList(q);
     };
-    
+
     header.appendChild(title);
     header.appendChild(clearBtn);
     wrap.appendChild(header);
-    
+
     const list = document.createElement('div');
     list.className = 'mm-selected-chips';
-    
+
     const selected = Array.from(modelSelectorTempSelected).sort((a, b) => String(a).localeCompare(String(b), 'zh'));
     selected.forEach(model => {
         const chip = document.createElement('span');
         chip.className = 'mm-selected-chip';
         chip.innerText = model;
-        
+
         const x = document.createElement('i');
         x.className = 'fas fa-times mm-selected-remove';
         x.title = '移除';
@@ -25567,11 +28324,11 @@ function renderModelSelectorSelected() {
             const q = document.getElementById('modelSelectorSearch')?.value?.trim() || '';
             renderModelSelectorList(q);
         };
-        
+
         chip.appendChild(x);
         list.appendChild(chip);
     });
-    
+
     wrap.appendChild(list);
 }
 
@@ -25589,31 +28346,31 @@ function renderModelSelectorList(filter = '') {
             return String(m).toLowerCase().includes(q);
         });
         if (filtered.length === 0) return;
-        
+
         const section = document.createElement('div');
         section.className = 'mm-ms-section';
-        
+
         const header = document.createElement('div');
         header.className = 'mm-ms-header';
-        
+
         const hTitle = document.createElement('div');
         hTitle.className = 'mm-ms-title';
         hTitle.innerText = title;
-        
+
         const hCount = document.createElement('div');
         hCount.className = 'mm-ms-count';
         hCount.innerText = String(filtered.length);
-        
+
         header.appendChild(hTitle);
         header.appendChild(hCount);
-        
+
         const grid = document.createElement('div');
         grid.className = 'mm-ms-grid';
-        
+
         filtered.forEach(model => {
             const label = document.createElement('label');
             label.className = 'mm-ms-item';
-            
+
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
             checkbox.value = model;
@@ -25626,20 +28383,20 @@ function renderModelSelectorList(filter = '') {
                 }
                 renderModelSelectorSelected();
             };
-            
+
             const span = document.createElement('span');
             span.textContent = model;
-            
+
             label.appendChild(checkbox);
             label.appendChild(span);
             grid.appendChild(label);
         });
-        
+
         section.appendChild(header);
         section.appendChild(grid);
         list.appendChild(section);
     };
-    
+
     const modelToCategory = new Map();
     Object.keys(productCatalog || {}).forEach(cat => {
         const models = productCatalog[cat];
@@ -25651,7 +28408,7 @@ function renderModelSelectorList(filter = '') {
             if (!modelToCategory.has(canonical)) modelToCategory.set(canonical, cat);
         });
     });
-    
+
     const mappingModelSet = new Set();
     Object.keys(productCatalog || {}).forEach(cat => {
         const models = productCatalog[cat];
@@ -25665,7 +28422,7 @@ function renderModelSelectorList(filter = '') {
         const canonical = canonicalizeModelName(m, catalogIndex);
         if (canonical) mappingModelSet.add(canonical);
     });
-    
+
     const grouped = {};
     Array.from(mappingModelSet).forEach(model => {
         const canonical = canonicalizeModelName(model, catalogIndex);
@@ -25673,13 +28430,13 @@ function renderModelSelectorList(filter = '') {
         if (!grouped[cat]) grouped[cat] = [];
         grouped[cat].push(canonical);
     });
-    
+
     const cats = Object.keys(grouped).sort((a, b) => {
         if (a === '未归类') return 1;
         if (b === '未归类') return -1;
         return a.localeCompare(b, 'zh');
     });
-    
+
     cats.forEach(cat => {
         const models = Array.from(new Set(grouped[cat])).sort((a, b) => String(a).localeCompare(String(b), 'zh'));
         addSection(cat, models);
@@ -25696,10 +28453,17 @@ function confirmModelSelection() {
     if (!currentMappingCategory) return;
 
     const catalogIndex = buildCatalogModelIndex();
-    const normalized = Array.from(modelSelectorTempSelected)
+    const typed = resolveModelSelectorInput(document.getElementById('modelSelectorInput')?.value || '');
+    const normalized = Array.from(new Set([
+        ...Array.from(modelSelectorTempSelected),
+        ...typed.recognized
+    ]))
         .map(m => canonicalizeModelName(m, catalogIndex))
         .filter(Boolean);
     modelMappings[currentMappingCategory] = Array.from(new Set(normalized));
+    if (typed.unrecognized.length) {
+        showToast(`已添加 ${typed.recognized.length} 个型号，${typed.unrecognized.length} 个未识别型号已跳过`, 'warning');
+    }
     closeModelSelector();
     renderModelMappingTable();
 }
@@ -25717,7 +28481,7 @@ function exportModelMappingsJson() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body: JSON.stringify(items),
+            body: JSON.stringify({ mappings: items, category_order: orderedMappingCategories(items, modelMappingCategoryOrder) }),
         })
             .then(async (res) => {
                 if (!res.ok) {
@@ -25752,10 +28516,21 @@ function exportModelMappingsJson() {
 
 async function saveModelMappings() {
     try {
-        const res = await api('/model_mappings', 'POST', modelMappings);
-        if (res.error) {
-            showToast('保存失败: ' + res.error, 'error');
+        const res = await api('/model_mappings', 'POST', {
+            mappings: modelMappings,
+            category_order: orderedMappingCategories(modelMappings, modelMappingCategoryOrder),
+        });
+        if (!res.success || res.error) {
+            showToast('保存失败: ' + (res.error || res.message || '未知错误'), 'error');
         } else {
+            if (Array.isArray(res.category_order)) {
+                modelMappingCategoryOrder = res.category_order;
+                kbMappingCategoryOrder = res.category_order;
+            }
+            await refreshKBMappingTagsConfig();
+            clearKBCache();
+            renderKBTable();
+            __kbEditRenderPreview();
             showToast('配置保存成功', 'success');
             if (typeof matrixMappingCategoryFilter === 'string' && matrixMappingCategoryFilter) {
                 if (!Object.prototype.hasOwnProperty.call(modelMappings || {}, matrixMappingCategoryFilter)) {
@@ -25802,7 +28577,7 @@ function importModelMappings() {
         // Let's find index.
         let separatorIndex = -1;
         let separatorType = '';
-        
+
         const colonIndex = line.indexOf(':');
         const tabIndex = line.indexOf('\t');
         const chineseColonIndex = line.indexOf('：');
@@ -25828,13 +28603,14 @@ function importModelMappings() {
             .map(m => canonicalizeModelName(m, catalogIndex))
             .map(m => String(m || '').trim())
             .filter(Boolean);
-        
+
         if (models.length > 0) {
             // Merge logic: if category exists, add unique models
             if (!modelMappings[category]) {
                 modelMappings[category] = [];
+                modelMappingCategoryOrder.push(category);
             }
-            
+
             const existing = new Set(
                 (Array.isArray(modelMappings[category]) ? modelMappings[category] : [])
                     .map(m => canonicalizeModelName(m, catalogIndex))
@@ -25847,6 +28623,7 @@ function importModelMappings() {
             // If just category provided, create it if not exists
             if (!modelMappings[category]) {
                 modelMappings[category] = [];
+                modelMappingCategoryOrder.push(category);
                 successCount++;
             }
         }
@@ -25955,7 +28732,7 @@ window.addEventListener('DOMContentLoaded', async () => {
           await openKbActionEmbedRequest();
           return;
         }
-        
+
         // Initial load (main app page)
         switchTab('kbView');
         await loadKBProductCategoryChips();
@@ -25970,14 +28747,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Bind Login Events
   const loginBtn = document.getElementById('loginBtn');
   if (loginBtn) loginBtn.addEventListener('click', handleLogin);
-  
+
   const pwdInput = document.getElementById('password');
   if (pwdInput) {
       pwdInput.addEventListener('keypress', (e) => {
           if (e.key === 'Enter') handleLogin();
       });
   }
-  
+
   const logoutBtn = document.getElementById('logoutBtn');
   if (logoutBtn) logoutBtn.addEventListener('click', logout);
 
@@ -26006,7 +28783,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // ==========================================
   const searchInputIds = [
     'idSearch',
-    'productNameSearch', 
+    'productNameSearch',
     'questionSearch',
     'similarQuestionSearch',
     'answerSearch',
@@ -26032,7 +28809,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       // 移除可能存在的旧事件监听
       const newInput = input.cloneNode(true);
       input.parentNode.replaceChild(newInput, input);
-      
+
       // 添加防抖的input事件
       newInput.addEventListener('input', debounce(() => {
         // 根据不同的输入框触发不同的搜索
@@ -26057,7 +28834,7 @@ window.addEventListener('DOMContentLoaded', async () => {
           searchKBDebounced();
         }
       }, 500));
-      
+
       // Enter键立即搜索（不防抖）
       newInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') {
@@ -26083,7 +28860,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // ==========================================
   // 滚动性能优化 - 轻量版（移除过度优化）
   // ==========================================
-  
+
   // 只保留最基础的优化
   try {
     // 1. 使用Passive事件监听器（不阻塞滚动）
@@ -26095,7 +28872,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         }, { passive: true });
       }
     });
-    
+
     console.log('✅ 滚动优化已启用（轻量版）');
   } catch (e) {
     console.warn('滚动优化失败:', e);
@@ -26104,7 +28881,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Bind Link View Events
   setupTagsDropdown(); // Initialize tags dropdown
   setupKBTagDropdown(); // Initialize KB tag multi-select
-  
+
   const addBtn = document.getElementById('addBtn');
   if (addBtn) addBtn.addEventListener('click', async () => {
     const urlEl = document.getElementById('urlInput');
@@ -26189,7 +28966,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       closeLinkImportModal();
     }
   });
-  
+
   const clearFilterBtn = document.getElementById('clearFilter');
   if (clearFilterBtn) clearFilterBtn.addEventListener('click', () => {
     activeFilterTags = [];
@@ -26245,13 +29022,13 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   const selectAllLinks = document.getElementById('selectAll');
   if (selectAllLinks) selectAllLinks.addEventListener('change', toggleSelectAllLinks);
-  
+
   const batchDeleteBtn = document.getElementById('batchDeleteBtn');
   if (batchDeleteBtn) batchDeleteBtn.addEventListener('click', batchDeleteLinks);
-  
+
   const batchCopyBtn = document.getElementById('batchCopyBtn');
   if (batchCopyBtn) batchCopyBtn.addEventListener('click', batchCopyPreviews);
-  
+
   const kbPreviewSelectedBtn = document.getElementById('kbPreviewSelectedBtn');
   if (kbPreviewSelectedBtn) kbPreviewSelectedBtn.addEventListener('click', toggleKBPreviewSelectedOnly);
   updateKBPreviewSelectedButton();
@@ -26283,7 +29060,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (draftFilterEl) {
     draftFilterEl.addEventListener('change', () => loadKBTable(1));
   }
-  
+
   // Close Modals on outside click
   window.onclick = (e) => {
       if (e.target && e.target.id === 'dangerConfirmModal') {
@@ -26296,6 +29073,14 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
       if (e.target && e.target.id === 'kbBatchEditModal') {
           closeKBBatchEditModal();
+          return;
+      }
+      if (e.target && e.target.id === 'kbProductModelPickerModal') {
+          closeKBProductModelPicker();
+          return;
+      }
+      if (e.target && e.target.id === 'kbSimilarQuestionPickerModal') {
+          closeKBSimilarQuestionPicker();
           return;
       }
       if (e.target.classList.contains('modal')) {
@@ -26311,7 +29096,7 @@ window.addEventListener('DOMContentLoaded', async () => {
           else e.target.style.display = 'none';
       }
   };
-  
+
   // Close buttons
   document.querySelectorAll('.close-modal, .close-modal-btn').forEach(btn => {
       btn.onclick = () => {
@@ -26323,6 +29108,14 @@ window.addEventListener('DOMContentLoaded', async () => {
           }
           if (modal.id === 'linkImportModal') {
               closeLinkImportModal();
+              return;
+          }
+          if (modal.id === 'kbProductModelPickerModal') {
+              closeKBProductModelPicker();
+              return;
+          }
+          if (modal.id === 'kbSimilarQuestionPickerModal') {
+              closeKBSimilarQuestionPicker();
               return;
           }
           if (modal.id === 'bulkDuplicateModal') closeBulkDuplicateModal();
@@ -26916,7 +29709,7 @@ function insertHeading(level) {
     if (!level) return;
     const numLevel = parseInt(level, 10);
     if (isNaN(numLevel)) return;
-    
+
     const prefix = '#'.repeat(numLevel) + ' ';
     insertMarkdown(prefix, '');
 }
@@ -26949,21 +29742,21 @@ window.insertCode = insertCode;
 
 function copyToClipboard(text) {
     if (!text) return;
-    
+
     // Create a temporary textarea to handle the copy
     const textarea = document.createElement('textarea');
     textarea.value = text;
-    
+
     // Make it invisible but part of the document
     textarea.style.position = 'fixed';
     textarea.style.left = '-9999px';
     textarea.style.top = '0';
     document.body.appendChild(textarea);
-    
+
     // Select and copy
     textarea.focus();
     textarea.select();
-    
+
     try {
         const successful = document.execCommand('copy');
         if (successful) {
@@ -26977,7 +29770,7 @@ function copyToClipboard(text) {
         console.error('Copy error', err);
         alert('复制出错');
     }
-    
+
     document.body.removeChild(textarea);
 }
 
@@ -26990,23 +29783,23 @@ document.addEventListener('copy', () => {
 
 function searchKBById(id) {
     if (!id) return;
-    
+
     // Switch to KB view
     switchTab('kbView');
-    
+
     // Set ID search input
     const idInput = document.getElementById('idSearch');
     if (idInput) {
         idInput.value = id;
     }
-    
+
     // Clear other inputs to ensure precise search
     if (document.getElementById('productNameSearch')) document.getElementById('productNameSearch').value = '';
     if (document.getElementById('questionSearch')) document.getElementById('questionSearch').value = '';
     if (document.getElementById('similarQuestionSearch')) document.getElementById('similarQuestionSearch').value = '';
     if (document.getElementById('answerSearch')) document.getElementById('answerSearch').value = '';
     if (document.getElementById('urlSearch')) document.getElementById('urlSearch').value = '';
-    
+
     // Trigger search
     // Adding a small delay to ensure UI updates and tab switch completes
     setTimeout(() => {
@@ -27016,10 +29809,10 @@ function searchKBById(id) {
 
 function searchKBByUrl(url) {
     if (!url) return;
-    
+
     // Switch to KB view
     switchTab('kbView');
-    
+
     // Ensure we are scrolled to top or search area is visible
     window.scrollTo(0, 0);
 
@@ -27032,14 +29825,14 @@ function searchKBByUrl(url) {
         console.warn('URL search input not found');
         return;
     }
-    
+
     // Clear other inputs
     if (document.getElementById('idSearch')) document.getElementById('idSearch').value = '';
     if (document.getElementById('productNameSearch')) document.getElementById('productNameSearch').value = '';
     if (document.getElementById('questionSearch')) document.getElementById('questionSearch').value = '';
     if (document.getElementById('similarQuestionSearch')) document.getElementById('similarQuestionSearch').value = '';
     if (document.getElementById('answerSearch')) document.getElementById('answerSearch').value = '';
-    
+
     // Trigger search
     searchKB();
 }

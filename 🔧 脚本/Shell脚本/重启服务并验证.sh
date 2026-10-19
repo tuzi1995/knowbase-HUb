@@ -1,4 +1,6 @@
 #!/bin/bash
+# Restored Mac environment (2026-10-09)
+source "/Users/tuzi/个人项目/One/.restore/runtime.sh"
 # -*- coding: utf-8 -*-
 # 重启8085服务并验证修复
 
@@ -7,7 +9,7 @@ echo "重启8085服务"
 echo "=========================================="
 
 # 切换到项目目录
-cd "/Users/guoying/AI建设和学习/One/knowbase_hub_8085/KnowledgeBaseTool_Local"
+cd "/Users/tuzi/个人项目/One/knowbase_hub_8085/KnowledgeBaseTool_Local"
 
 echo ""
 echo "1. 检查是否有8085进程正在运行..."
@@ -46,7 +48,7 @@ echo ""
 echo "3. 启动8085服务..."
 echo "   请在新的终端窗口中运行以下命令："
 echo ""
-echo "   cd \"/Users/guoying/AI建设和学习/One/knowbase_hub_8085/KnowledgeBaseTool_Local\""
+echo "   cd \"/Users/tuzi/个人项目/One/knowbase_hub_8085/KnowledgeBaseTool_Local\""
 echo "   python3 server.py"
 echo ""
 echo "   或者运行启动脚本："

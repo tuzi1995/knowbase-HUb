@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import unittest
+import pytest
 from unittest.mock import patch
 
 import server
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VIEWER = ROOT / "link_viewer"
 
 
+@pytest.mark.usefixtures("frontend_dist")
 class LoginBootstrapTests(unittest.TestCase):
     def test_existing_scrypt_hash_requires_compatible_runtime(self):
         self.assertTrue(server._password_hash_requires_scrypt('scrypt:32768:8:1:salt:hash'))
@@ -50,7 +52,7 @@ class LoginBootstrapTests(unittest.TestCase):
         })
 
     def test_login_bootstrap_loads_before_the_main_bundle(self):
-        for page_name, bundle_name in (("index.html", "app_v8.js"), ("index.prod.html", "app_v8.min.js")):
+        for page_name, bundle_name in (("index.html", "app_v8.js"), ("dist/index.html", "app_v8.min.js")):
             page = (VIEWER / page_name).read_text(encoding="utf-8")
             self.assertIn('id="loginStatus"', page)
             self.assertIn('src="login_bootstrap.js?v=1"', page)

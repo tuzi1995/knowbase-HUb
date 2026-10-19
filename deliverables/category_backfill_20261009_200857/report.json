@@ -1,0 +1,13 @@
+{
+  "database": "knowledgebase_restored_20261009",
+  "kb": 6021,
+  "pg_matrix": 85184,
+  "sqlite_matrix": 85184,
+  "backup": "/Users/tuzi/个人项目/One/knowbase_hub_8085/deliverables/category_backfill_20261009_200857",
+  "verified": true,
+  "remaining_blank": {
+    "kb": 0,
+    "pg_matrix": 0,
+    "sqlite_matrix": 0
+  }
+}

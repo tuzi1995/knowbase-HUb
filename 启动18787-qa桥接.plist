@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.guoying.kmatrix-18787-qa-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/tuzi/个人项目/One/knowbase_hub_8085/启动18787-qa桥接.command</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/tuzi/个人项目/One/knowledge_base_content_detection/webapp</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/knowbasehub-18787-qa.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/knowbasehub-18787-qa.err</string>
+</dict>
+</plist>

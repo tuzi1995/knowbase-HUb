@@ -1,0 +1,74 @@
+{
+  "schema_version": "2026.09.21.new_product_release",
+  "migration_batch_id": "mb-20260921-155627-5ae8475c",
+  "created_at": "2026-09-21T11:11:17.230718+00:00",
+  "baseline": {
+    "kb_rows": 6054,
+    "product_rows": 82278,
+    "mod_rows": 6406,
+    "binding_rows": 82278
+  },
+  "baseline_digests": {
+    "kb": "5f06785566b01fa5ada43d71d0cc15cd0e3602b748f28248446f1527849f6a69",
+    "mods": "3557ca30ee42127a38dc21b1bbc07141ffdf20d0c79057665d2aa7ae54ec2679",
+    "products": "f85e7739e30ba249b8d6c0c2a67cff73bb23f8aee157b6f3a0146c72e7f6cb89",
+    "bindings": "8ddfb3479c61e428a39173023c18abf26d6308b0df8c3a0390cc98fc413a0525"
+  },
+  "enum_checks": {
+    "release_status_ok": true,
+    "kb_scope_ok": true,
+    "record_scope_ok": true,
+    "migration_batch_ok": true,
+    "association_status_ok": true
+  },
+  "null_checks": {
+    "product_null_release_status": 0,
+    "kb_null_kb_scope": 0,
+    "mod_null_record_scope": 0,
+    "product_null_association_status": 0
+  },
+  "counts": {
+    "product_matrix_rows": 82278,
+    "knowledge_base_rows": 6054,
+    "mod_rows": 6406,
+    "binding_rows": 82278
+  },
+  "duplicates": {
+    "product_duplicates": 0,
+    "kb_duplicates": 0,
+    "mod_duplicates": 0,
+    "binding_duplicates": 0
+  },
+  "migration_batch_status": "passed",
+  "reconciliation_status": "passed",
+  "shadow_compare": {
+    "official_set": [],
+    "shadow_set": [],
+    "official_count": 82278,
+    "shadow_count": 82278,
+    "official_sha256": "8ddfb3479c61e428a39173023c18abf26d6308b0df8c3a0390cc98fc413a0525",
+    "shadow_sha256": "8ddfb3479c61e428a39173023c18abf26d6308b0df8c3a0390cc98fc413a0525",
+    "extra_in_official": [],
+    "extra_in_shadow": []
+  },
+  "diff": {
+    "kb_missing": [],
+    "kb_extra": [],
+    "product_missing": [],
+    "product_extra": [],
+    "mod_missing": [],
+    "binding_missing": []
+  },
+  "exit_switch": {
+    "enabled": true,
+    "approval": "approved",
+    "verified_at": "2026-09-21T11:11:17.239989+00:00",
+    "verified_source": "live_local_postgresql"
+  },
+  "after_digests": {
+    "kb": "5f06785566b01fa5ada43d71d0cc15cd0e3602b748f28248446f1527849f6a69",
+    "mods": "3557ca30ee42127a38dc21b1bbc07141ffdf20d0c79057665d2aa7ae54ec2679",
+    "products": "f85e7739e30ba249b8d6c0c2a67cff73bb23f8aee157b6f3a0146c72e7f6cb89",
+    "bindings": "8ddfb3479c61e428a39173023c18abf26d6308b0df8c3a0390cc98fc413a0525"
+  }
+}

@@ -41,7 +41,7 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from scoring_logic import LLMScorer, calculate_product_overlap, load_scoring_config, save_scoring_config, load_ai_config, save_ai_config
+from scoring_logic import LLMScorer, calculate_product_overlap, load_scoring_config, save_scoring_config, load_ai_config, save_ai_config, normalize_chat_completions_url
 from prompt_runtime import (
     PromptRuntimeError,
     record_prompt_receipts,
@@ -53,6 +53,7 @@ from clone_difference_rules import (
     merge_difference_rules,
     normalize_detection_methods,
     parse_manual_difference_text,
+    parse_manual_difference_text_with_warnings,
     validate_ai_difference_rules,
 )
 from matrix_submit_validation import validate_submit_changes
@@ -81,6 +82,11 @@ from runtime_safety import (
     is_test_process as _shared_is_test_process,
     resolve_test_sqlite_path as _shared_resolve_test_sqlite_path,
 )
+from new_product_release import ProductReleaseService
+from business_config import BUSINESS_FILES, resolve_business_config_path
+from product_categories import ProductCategoryResolver, category_is_blank
+import comparison_matrix
+import comparison_matrix_migration
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 try:
@@ -101,7 +107,7 @@ def canonical_download_name(data_type, ext='xlsx', step='s01', tool='kb8085'):
 # 本地 PostgreSQL 支持
 try:
     import psycopg2
-    from psycopg2.extras import RealDictCursor
+    from psycopg2.extras import RealDictCursor, execute_values
     HAS_PSYCOPG2 = True
 except ImportError:
     HAS_PSYCOPG2 = False
@@ -382,9 +388,16 @@ def _is_internal_kb_read_authorized(remote_addr, presented_token=''):
 
 
 def _read_v1_sync_rows(client):
+    """Read the physical V1 snapshot used by import synchronization events.
+
+    Formal-release views intentionally hide records without released matrix
+    associations. Import snapshots must describe the table that was written,
+    otherwise the event diff cannot match the import result.
+    """
     return client.select_all(
         'knowledge_base_v1', columns=','.join(SYNC_FIELDS),
         order_by='question_wiki_id', order_dir='asc', page_size=1000,
+        use_formal=False,
     ) or []
 
 
@@ -421,6 +434,7 @@ BADCASE_WORKBENCH_SOURCE = 'badcase标注工作台'
 # Cross-module data contract.  The display label is intentionally kept out of
 # persistence and filtering logic so copy changes cannot invalidate audits.
 SOURCE_CODE_LABELS = {
+    'comparison_matrix': '产品对比图矩阵',
     'knowledge_base': '知识库管理',
     'product_matrix': '机型矩阵管理',
     'new_product_entry': '新品录入',
@@ -504,7 +518,7 @@ def _atomic_update_kb_current(client, wiki_id, update_data, base_version=None):
         current_rows = client.select_all(
             'knowledge_base_v1',
             filters={'question_wiki_id': f'eq.{wiki_id}'},
-            columns='question_wiki_id,content_version,product_name,update_time',
+            columns='question_wiki_id,content_version,product_name,product_category_name,update_time',
             order_by='question_wiki_id',
             page_size=1,
         ) or []
@@ -530,6 +544,10 @@ def _atomic_update_kb_current(client, wiki_id, update_data, base_version=None):
             'server_version': server_version,
         }
     payload = dict(update_data or {})
+    effective_row = dict(current, **payload)
+    _fill_kb_product_category(effective_row)
+    if effective_row.get('product_category_name') != current.get('product_category_name'):
+        payload['product_category_name'] = effective_row.get('product_category_name')
     payload['content_version'] = server_version + 1
     response = client.update('knowledge_base_v1', payload, {
         'question_wiki_id': f'eq.{wiki_id}',
@@ -616,6 +634,8 @@ def apply_no_cache_headers(response):
     return response
 
 # Models
+COMPARISON_MODELS = comparison_matrix.define_models(db)
+
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -758,6 +778,8 @@ class MatrixColumn(db.Model):
     product_name = db.Column(db.String(100), unique=True, nullable=False)
     sort_order = db.Column(db.Integer, default=0)
 
+
+
 class ProductMatrix(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     question_wiki_id = db.Column(db.String(100), nullable=False)
@@ -811,6 +833,7 @@ class MatrixCloneDifferenceRule(db.Model):
     target_model = db.Column(db.String(200), nullable=False)
     feature_id = db.Column(db.String(120), nullable=False)
     feature_name = db.Column(db.String(200), default='')
+    context = db.Column(db.String(200), default='')
     source_value = db.Column(db.String(200), default='')
     target_value = db.Column(db.String(200), default='')
     difference_type = db.Column(db.String(40), default='comparison_unavailable')
@@ -1027,7 +1050,9 @@ def _resolve_matrix_filtered_scope_ids(filters):
         col_list = [
             str(x).strip()
             for x in columns_raw
-            if str(x).strip() and str(x).strip() != '测试型号'
+            if str(x).strip()
+            and str(x).strip() != '测试型号'
+            and not _is_hidden_product_model(x)
         ]
     else:
         col_query = MatrixColumn.query.order_by(MatrixColumn.sort_order)
@@ -1044,12 +1069,21 @@ def _resolve_matrix_filtered_scope_ids(filters):
         else:
             columns = col_query.all()
             col_list = [c.product_name for c in columns]
-        col_list = [c for c in (col_list or []) if str(c or '').strip() and str(c or '').strip() != '测试型号']
-
+        col_list = [
+            c for c in (col_list or [])
+            if str(c or '').strip()
+            and str(c or '').strip() != '测试型号'
+            and not _is_hidden_product_model(c)
+        ]
+        if _formal_release_filter_enabled():
+            released_models = _released_catalog_model_names()
+            col_list = [c for c in col_list if c in released_models]
     if not col_list:
         return []
 
     base_query = db.session.query(ProductMatrix.question_wiki_id)
+    if _formal_release_filter_enabled():
+        base_query = base_query.filter(ProductMatrix.product_name.in_(col_list))
     if wid:
         base_query = base_query.filter(ProductMatrix.question_wiki_id.ilike(f'%{wid}%'))
     if q:
@@ -1498,6 +1532,7 @@ def _ensure_password_hash_runtime():
 def init_db():
     with app.app_context():
         db.create_all()
+        comparison_matrix_migration.upgrade(db, COMPARISON_MODELS)
         _ensure_password_hash_runtime()
         init_knowledge_graph_schema(_DB_PATH)
         cur_con = None
@@ -1629,6 +1664,14 @@ def init_db():
                 db.session.commit()
         except Exception:
             db.session.rollback()
+        try:
+            cols = db.session.execute(text("PRAGMA table_info(matrix_clone_difference_rule)")).fetchall()
+            col_names = {row[1] for row in cols}
+            if 'context' not in col_names:
+                db.session.execute(text("ALTER TABLE matrix_clone_difference_rule ADD COLUMN context VARCHAR(200) DEFAULT ''"))
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
         # Bootstrap a user only with an explicit password or a generated
         # one-time credential.  Never recreate the historical admin/123456
         # account on a fresh database.
@@ -1715,7 +1758,8 @@ def export_internal_kb_v1():
     }
 
     try:
-        rows = client.select_all(
+        rows = _formal_select_all(
+            client,
             'knowledge_base_v1',
             order_by='question_wiki_id',
             order_dir='asc',
@@ -1796,7 +1840,10 @@ def dispatch_kb_v1_sync_event(sync_id):
     event = get_sync_event(_DB_PATH, sync_id)
     if not event:
         return jsonify({'success': False, 'message': '同步事件不存在'}), 404
-    target = str(os.environ.get('KB_CONTENT_DETECTION_SYNC_URL') or 'http://127.0.0.1:8787/api/integrations/knowbase-hub/import-sync').strip()
+    target = str(
+        os.environ.get('KB_CONTENT_DETECTION_SYNC_URL')
+        or 'http://127.0.0.1:8787/api/integrations/knowbase-hub/import-sync'
+    ).strip()
     token = str(os.environ.get('KMATRIX_INTERNAL_READ_TOKEN') or '').strip()
     payload = {
         'sync_id': event['sync_id'], 'snapshot_id': event['snapshot_id'],
@@ -1837,6 +1884,439 @@ def status():
     if current_user.is_authenticated:
         return jsonify({'logged_in': True, 'username': current_user.username})
     return jsonify({'logged_in': False})
+
+
+def _dispatch_new_product_release_event(event):
+    target = str(os.environ.get('NEW_PRODUCT_RELEASE_DOWNSTREAM_URL') or '').strip()
+    if not target:
+        raise RuntimeError('未配置 NEW_PRODUCT_RELEASE_DOWNSTREAM_URL')
+    token = str(os.environ.get('NEW_PRODUCT_RELEASE_DOWNSTREAM_TOKEN') or '').strip()
+    headers = {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': str((event or {}).get('idempotency_key') or ''),
+    }
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    response = requests.post(target, json=(event or {}).get('payload') or {}, headers=headers, timeout=15)
+    if response.status_code >= 400:
+        raise RuntimeError(f'下游 HTTP {response.status_code}: {response.text[:500]}')
+    try:
+        return response.json()
+    except Exception:
+        return {'status_code': response.status_code, 'body': response.text[:500]}
+
+
+def _formal_release_filter_enabled():
+    """Return the persisted cutover state without weakening legacy read errors."""
+    try:
+        return bool(_NEW_PRODUCT_RELEASE_SERVICE.repository.gate().get('exit_switch'))
+    except Exception:
+        return False
+
+
+_FORMAL_READ_TABLES = {
+    'knowledge_base_v1': 'formal_knowledge_base_v1',
+    'knowledge_base_modifications': 'formal_knowledge_base_modifications',
+    'product_matrix': 'formal_product_matrix',
+}
+
+
+def _formal_read_filters(table, filters=None):
+    """Add explicit formal-scope filters for clients without migration views."""
+    result = dict(filters or {})
+    if not _formal_release_filter_enabled():
+        return result
+    if table == 'knowledge_base_v1':
+        result.setdefault('kb_scope', 'eq.formal')
+    elif table == 'knowledge_base_modifications':
+        result.setdefault('record_scope', 'eq.formal')
+    elif table == 'product_matrix':
+        result.setdefault('association_status', 'eq.active')
+        result.setdefault('release_status', 'eq.released')
+    return result
+
+
+def _formal_select_all(client, table, *, filters=None, **kwargs):
+    """Read through the formal view, falling back to explicit scope filters."""
+    if not client:
+        return []
+    if not _formal_release_filter_enabled() or table not in _FORMAL_READ_TABLES:
+        return client.select_all(table, filters=filters, **kwargs)
+
+    formal_table = _FORMAL_READ_TABLES[table]
+    # Lightweight test/dry-run clients often expose their tables as an
+    # in-memory mapping and cannot model database views. Treat an explicitly
+    # absent formal view as an unsupported capability and read the source
+    # table instead. Do not infer this from an empty result: an actual formal
+    # view may legitimately contain zero rows.
+    client_tables = getattr(client, 'tables', None)
+    if isinstance(client_tables, dict) and formal_table not in client_tables:
+        return client.select_all(table, filters=filters, **kwargs)
+    try:
+        # LocalPostgreSQLClient resolves the source name to this view itself;
+        # remote clients need the view name explicitly.
+        if isinstance(client, LocalPostgreSQLClient):
+            return client.select_all(table, filters=filters, **kwargs)
+        return client.select_all(formal_table, filters=filters, **kwargs)
+    except Exception:
+        return client.select_all(
+            table,
+            filters=_formal_read_filters(table, filters),
+            **kwargs,
+        )
+
+
+def _formal_select(client, table, *, filters=None, **kwargs):
+    """Single-page counterpart of :func:`_formal_select_all`."""
+    if not client:
+        return None
+    if not _formal_release_filter_enabled() or table not in _FORMAL_READ_TABLES:
+        return client.select(table, filters=filters, **kwargs)
+    formal_table = _FORMAL_READ_TABLES[table]
+    client_tables = getattr(client, 'tables', None)
+    if isinstance(client_tables, dict) and formal_table not in client_tables:
+        return client.select(table, filters=filters, **kwargs)
+    try:
+        if isinstance(client, LocalPostgreSQLClient):
+            return client.select(table, filters=filters, **kwargs)
+        return client.select(formal_table, filters=filters, **kwargs)
+    except Exception:
+        return client.select(
+            table,
+            filters=_formal_read_filters(table, filters),
+            **kwargs,
+        )
+
+
+def _released_catalog_model_names():
+    return {
+        str(row.get('model_id') or row.get('model') or '').strip()
+        for row in _catalog_release_rows()
+        if str(row.get('release_status') or '').strip() == 'released'
+    }
+
+
+_NEW_PRODUCT_RELEASE_SERVICE = ProductReleaseService(
+    token_secret=app.config['SECRET_KEY'],
+    downstream_dispatcher=_dispatch_new_product_release_event,
+)
+
+
+@app.route('/api/new-product-release/capabilities', methods=['GET'])
+@login_required
+def api_new_product_release_capabilities():
+    payload = _NEW_PRODUCT_RELEASE_SERVICE.capabilities()
+    return jsonify(payload)
+
+
+@app.route('/api/new-product-release/workspace', methods=['GET'])
+@login_required
+def api_new_product_release_workspace():
+    payload = _NEW_PRODUCT_RELEASE_SERVICE.workspace_state()
+    return jsonify(payload)
+
+
+@app.route('/api/new-product-release/models/<model_id>/preview', methods=['GET'])
+@login_required
+def api_new_product_release_model_preview(model_id):
+    token = request.args.get('preview_token')
+    payload = _NEW_PRODUCT_RELEASE_SERVICE.preview_model(model_id, token)
+    if not payload['ok']:
+        return jsonify(payload), payload.get('status_code', 403)
+    return jsonify(payload)
+
+
+@app.route('/api/new-product-release/models/<model_id>/publish', methods=['POST'])
+@login_required
+def api_new_product_release_model_publish(model_id):
+    payload = request.get_json(silent=True) or {}
+    payload.setdefault('actor', current_user.username)
+    payload.setdefault('requested_by', current_user.username)
+    result = _NEW_PRODUCT_RELEASE_SERVICE.publish(payload, model_id=model_id)
+    if not result['ok']:
+        return jsonify(result), result.get('status_code', 403)
+    return jsonify(result)
+
+
+@app.route('/api/new-product-release/publish', methods=['POST'])
+@login_required
+def api_new_product_release_publish():
+    return jsonify({
+        'ok': False,
+        'code': 'model_scoped_endpoint_required',
+        'message': '请使用型号专用发布接口 /api/new-product-release/models/{model_id}/publish',
+    }), 410
+
+
+@app.route('/api/new-product-release/models/<model_id>/cancel', methods=['POST'])
+@login_required
+def api_new_product_release_model_cancel(model_id):
+    payload = request.get_json(silent=True) or {}
+    request_id = payload.get('request_id') or payload.get('id')
+    payload['actor'] = current_user.username
+    result = _NEW_PRODUCT_RELEASE_SERVICE.cancel(request_id, model_id=model_id, payload=payload)
+    if not result['ok']:
+        return jsonify(result), result.get('status_code', 403)
+    return jsonify(result)
+
+
+@app.route('/api/new-product-release/cancel', methods=['POST'])
+@login_required
+def api_new_product_release_cancel():
+    return jsonify({
+        'ok': False,
+        'code': 'model_scoped_endpoint_required',
+        'message': '请使用型号专用取消接口 /api/new-product-release/models/{model_id}/cancel',
+    }), 410
+
+
+@app.route('/api/new-product-release/models/<model_id>/reapply', methods=['POST'])
+@login_required
+def api_new_product_release_model_reapply(model_id):
+    payload = request.get_json(silent=True) or {}
+    request_id = payload.get('request_id') or payload.get('id')
+    payload['actor'] = current_user.username
+    result = _NEW_PRODUCT_RELEASE_SERVICE.reapply(request_id, model_id=model_id, payload=payload)
+    if not result['ok']:
+        return jsonify(result), result.get('status_code', 403)
+    return jsonify(result)
+
+
+@app.route('/api/new-product-release/reapply', methods=['POST'])
+@login_required
+def api_new_product_release_reapply():
+    return jsonify({
+        'ok': False,
+        'code': 'model_scoped_endpoint_required',
+        'message': '请使用型号专用重新申请接口 /api/new-product-release/models/{model_id}/reapply',
+    }), 410
+
+
+@app.route('/api/new-product-release/outbox/retry', methods=['POST'])
+@login_required
+def api_new_product_release_outbox_retry():
+    payload = request.get_json(silent=True) or {}
+    batch_id = payload.get('batch_id') or payload.get('id')
+    result = _NEW_PRODUCT_RELEASE_SERVICE.retry_outbox(batch_id)
+    if not result['ok']:
+        return jsonify(result), result.get('status_code', 403)
+    return jsonify(result)
+
+
+@app.route('/api/new-product-release/reconcile', methods=['POST'])
+@login_required
+def api_new_product_release_reconcile():
+    result = _NEW_PRODUCT_RELEASE_SERVICE.reconcile()
+    if not result['ok']:
+        return jsonify(result), result.get('status_code', 403)
+    return jsonify(result)
+
+
+# Plan-facing aliases. These routes deliberately delegate to the same release
+# service as the workspace-specific endpoints above; they do not create a
+# second state machine or a second persistence path.
+@app.route('/api/models', methods=['GET', 'POST'])
+@login_required
+def api_release_models():
+    if request.method == 'GET':
+        return jsonify({'ok': True, 'models': _catalog_release_rows()})
+    payload = request.get_json(silent=True) or {}
+    model_id = str(payload.get('model_id') or payload.get('model') or payload.get('name') or '').strip()
+    category = str(payload.get('category') or payload.get('category_name') or '').strip()
+    requested_status = str(payload.get('release_status') or 'pending_release').strip()
+    if not model_id or not category:
+        return jsonify({'ok': False, 'code': 'model_and_category_required'}), 400
+    if requested_status != 'pending_release':
+        return jsonify({
+            'ok': False,
+            'code': 'direct_released_creation_requires_permission',
+            'message': '新型号默认待上线；直接创建为已上线型号需要独立权限和确认。',
+        }), 403
+    catalog = parse_product_catalog() or {}
+    if any(model_id in (models or []) for models in catalog.values() if isinstance(models, list)):
+        return jsonify({'ok': False, 'code': 'model_exists'}), 409
+    old_catalog = json.loads(json.dumps(catalog, ensure_ascii=False))
+    old_intents = parse_product_release_intents()
+    catalog.setdefault(category, []).append(model_id)
+    try:
+        save_product_catalog(catalog)
+        intents = dict(old_intents)
+        intents[model_id] = {
+            'model': model_id,
+            'release_status': 'pending_release',
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        }
+        save_product_release_intents(intents)
+        _NEW_PRODUCT_RELEASE_SERVICE.register_model(model_id, status='pending_release', actor=current_user.username)
+    except Exception as exc:
+        try:
+            save_product_catalog(old_catalog)
+            save_product_release_intents(old_intents)
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'code': 'model_create_failed', 'message': str(exc)}), 503
+    return jsonify({'ok': True, 'model': next(row for row in _catalog_release_rows() if row['model_id'] == model_id)})
+
+
+@app.route('/api/models/<model_id>', methods=['PATCH'])
+@login_required
+def api_release_model_patch(model_id):
+    payload = request.get_json(silent=True) or {}
+    requested_status = payload.get('release_status')
+    if requested_status is not None:
+        current = next((item for item in _catalog_release_rows() if item['model_id'] == model_id), None)
+        current_status = str((current or {}).get('release_status') or '')
+        if str(requested_status) != current_status:
+            return jsonify({
+                'ok': False,
+                'code': 'release_transition_requires_dedicated_flow',
+                'message': '型号发布状态只能通过专用发布流程修改。',
+            }), 409
+    row = next((item for item in _catalog_release_rows() if item['model_id'] == model_id), None)
+    if not row:
+        return jsonify({'ok': False, 'code': 'model_not_found'}), 404
+    return jsonify({'ok': True, 'model': row})
+
+
+@app.route('/api/models/<model_id>/cancel-release', methods=['POST'])
+@login_required
+def api_release_model_cancel(model_id):
+    try:
+        model = _NEW_PRODUCT_RELEASE_SERVICE.repository.model(model_id) or {}
+    except Exception as exc:
+        return jsonify({'ok': False, 'code': 'release_store_unavailable', 'message': str(exc)}), 503
+    request_id = model.get('current_application_id')
+    if not request_id:
+        return jsonify({'ok': False, 'code': 'release_application_not_found'}), 404
+    payload = request.get_json(silent=True) or {}
+    payload['actor'] = current_user.username
+    result = _NEW_PRODUCT_RELEASE_SERVICE.cancel(request_id, model_id=model_id, payload=payload)
+    return (jsonify(result), result.get('status_code', 403)) if not result.get('ok') else jsonify(result)
+
+
+@app.route('/api/models/<model_id>/release-applications', methods=['POST'])
+@login_required
+def api_release_model_new_application(model_id):
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = _NEW_PRODUCT_RELEASE_SERVICE.create_application(
+            model_id, actor=current_user.username, reason=str(payload.get('reason') or '')
+        )
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({'ok': False, 'code': 'release_store_unavailable', 'message': str(exc)}), 503
+
+
+@app.route('/api/models/<model_id>/release-preview', methods=['GET'])
+@login_required
+def api_release_model_preview_alias(model_id):
+    result = _NEW_PRODUCT_RELEASE_SERVICE.preview_model(model_id, request.args.get('preview_token'))
+    return (jsonify(result), result.get('status_code', 403)) if not result.get('ok') else jsonify(result)
+
+
+@app.route('/api/models/<model_id>/release', methods=['POST'])
+@login_required
+def api_release_model_release_alias(model_id):
+    payload = request.get_json(silent=True) or {}
+    payload.setdefault('actor', current_user.username)
+    payload.setdefault('requested_by', current_user.username)
+    result = _NEW_PRODUCT_RELEASE_SERVICE.publish(payload, model_id=model_id)
+    return (jsonify(result), result.get('status_code', 403)) if not result.get('ok') else jsonify(result)
+
+
+@app.route('/api/new-products', methods=['POST'])
+@login_required
+def api_new_products():
+    payload = request.get_json(silent=True) or {}
+    model_id = str(payload.get('model_id') or '').strip()
+    if not model_id:
+        return jsonify({'ok': False, 'code': 'model_id_required'}), 400
+    model = next((row for row in _catalog_release_rows() if row['model_id'] == model_id), None)
+    if not model:
+        return jsonify({'ok': False, 'code': 'model_not_found'}), 404
+    return jsonify({'ok': True, 'model_id': model_id, 'release_status': model['release_status'], 'model': model})
+
+
+@app.route('/api/modification-records', methods=['GET'])
+@login_required
+def api_formal_modification_records():
+    try:
+        workspace = _NEW_PRODUCT_RELEASE_SERVICE.repository.workspace()
+        records = [row for row in (workspace.get('formal_records') or []) if row.get('record_scope') == 'formal']
+        return jsonify({'ok': True, 'records': records})
+    except Exception as exc:
+        return jsonify({'ok': False, 'message': str(exc)}), 503
+
+
+@app.route('/api/release-batches/<batch_id>/sync-status', methods=['GET'])
+@login_required
+def api_release_batch_sync_status(batch_id):
+    try:
+        workspace = _NEW_PRODUCT_RELEASE_SERVICE.repository.workspace()
+        batch = next((row for row in (workspace.get('batches') or []) if row.get('batch_id') == batch_id), None)
+        outbox = [row for row in (workspace.get('outbox') or []) if row.get('batch_id') == batch_id]
+        if not batch:
+            return jsonify({'ok': False, 'code': 'batch_not_found'}), 404
+        return jsonify({'ok': True, 'batch': batch, 'outbox': outbox})
+    except Exception as exc:
+        return jsonify({'ok': False, 'message': str(exc)}), 503
+
+
+@app.route('/api/kb/<kb_id>/changes', methods=['POST'])
+@login_required
+def api_new_product_release_kb_change(kb_id):
+    payload = request.get_json(silent=True) or {}
+    payload['actor'] = current_user.username
+    result = _NEW_PRODUCT_RELEASE_SERVICE.save_change(kb_id, payload)
+    return (jsonify(result), result.get('status_code', 409)) if not result.get('ok') else jsonify(result)
+
+
+@app.route('/api/kb/<kb_id>/pending-changes', methods=['POST'])
+@login_required
+def api_new_product_release_pending_change(kb_id):
+    payload = request.get_json(silent=True) or {}
+    payload['effect_mode'] = 'with_model_release'
+    payload['actor'] = current_user.username
+    result = _NEW_PRODUCT_RELEASE_SERVICE.save_change(kb_id, payload)
+    return (jsonify(result), result.get('status_code', 409)) if not result.get('ok') else jsonify(result)
+
+
+@app.route('/api/pending-changes/<pending_id>/replace', methods=['POST'])
+@login_required
+def api_new_product_release_replace_pending(pending_id):
+    payload = request.get_json(silent=True) or {}
+    payload['actor'] = current_user.username
+    result = _NEW_PRODUCT_RELEASE_SERVICE.replace_pending(pending_id, payload)
+    return (jsonify(result), result.get('status_code', 409)) if not result.get('ok') else jsonify(result)
+
+
+@app.route('/api/pending-changes/<pending_id>/cancel', methods=['POST'])
+@login_required
+def api_new_product_release_cancel_pending(pending_id):
+    payload = request.get_json(silent=True) or {}
+    payload['actor'] = current_user.username
+    result = _NEW_PRODUCT_RELEASE_SERVICE.cancel_pending(pending_id, payload)
+    return (jsonify(result), result.get('status_code', 409)) if not result.get('ok') else jsonify(result)
+
+
+@app.route('/api/kb/<kb_id>/pending-chain', methods=['GET'])
+@login_required
+def api_new_product_release_pending_chain(kb_id):
+    try:
+        return jsonify({'ok': True, 'pending_chain': _NEW_PRODUCT_RELEASE_SERVICE.repository.pending_chain(kb_id)})
+    except Exception as exc:
+        return jsonify({'ok': False, 'message': str(exc)}), 503
+
+
+@app.route('/api/pending-records', methods=['GET'])
+@login_required
+def api_new_product_release_pending_records():
+    try:
+        filters = {key: request.args.get(key) for key in ('kb_id', 'status') if request.args.get(key)}
+        return jsonify({'ok': True, 'records': _NEW_PRODUCT_RELEASE_SERVICE.repository.pending_records(filters)})
+    except Exception as exc:
+        return jsonify({'ok': False, 'message': str(exc)}), 503
+
 
 @app.route('/api/product_manual', methods=['GET'])
 @login_required
@@ -2187,6 +2667,8 @@ def delete_link(link_id):
         print(traceback.format_exc())
         return jsonify({'success': False, 'message': str(e)}), 500
 
+
+# ---------------------------------------------------------------------------
 def _run_sync_kb_links():
     client = get_supabase_client()
     if not client:
@@ -2217,7 +2699,8 @@ def _run_sync_kb_links():
             kb_items = client.select_all(
                 'knowledge_base_v1',
                 columns='question_wiki_id,image_urls,video_urls,file_urls,link_url,link_type',
-                order_by='question_wiki_id'
+                order_by='question_wiki_id',
+                use_formal=False,
             )
         except Exception as e:
             msg = str(e)
@@ -2538,6 +3021,8 @@ from scoring_logic import LLMScorer, calculate_product_overlap, DEFAULT_SYSTEM_P
 BASE_DIR = _BASE_DIR
 
 def _get_config_path(filename):
+    if filename in BUSINESS_FILES and str(os.environ.get('KMATRIX_BUSINESS_CONFIG_DIR') or '').strip():
+        return resolve_business_config_path(filename, BASE_DIR, _CONFIG_DIR)
     explicit_config_dir = str(os.environ.get('KMATRIX_CONFIG_DIR') or '').strip()
     ext_path = os.path.join(_CONFIG_DIR, filename)
     if os.path.exists(ext_path):
@@ -2548,7 +3033,47 @@ def _get_config_path(filename):
     return ext_path
 
 PRODUCT_CATALOG_FILE = _get_config_path('product_catalog.json')
+PRODUCT_RELEASE_INTENTS_FILE = _get_config_path('product_release_intents.json')
 MODEL_MAPPINGS_FILE = _get_config_path('model_mappings.json')
+MODEL_MAPPINGS_BACKUP_DIR = os.path.join(os.path.dirname(MODEL_MAPPINGS_FILE), '.model_mappings_history')
+MODEL_MAPPINGS_BACKUP_LIMIT = 50
+_HIDDEN_PRODUCT_MODELS = frozenset({'Z1 Ultra 超水解'})
+
+
+def _atomic_write_json(path, payload):
+    """Write a JSON config beside the target, then replace it atomically."""
+    directory = os.path.dirname(os.path.abspath(path)) or '.'
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f'.{os.path.basename(path)}.', suffix='.tmp', dir=directory,
+    )
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise
+
+
+def _is_hidden_product_model(value):
+    return str(value or '').strip() in _HIDDEN_PRODUCT_MODELS
+
+
+def _without_hidden_models_in_catalog(catalog):
+    if not isinstance(catalog, dict):
+        return catalog
+    return {
+        category: [model for model in models if not _is_hidden_product_model(model)]
+        if isinstance(models, list) else models
+        for category, models in catalog.items()
+    }
 
 def parse_product_catalog():
     """
@@ -2559,7 +3084,7 @@ def parse_product_catalog():
     if os.path.exists(PRODUCT_CATALOG_FILE):
         try:
             with open(PRODUCT_CATALOG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                return _without_hidden_models_in_catalog(json.load(f))
         except Exception as e:
             print(f"Error loading product catalog file: {e}")
             
@@ -2579,16 +3104,166 @@ def parse_product_catalog():
     
     # Save to file for future use
     try:
-        with open(PRODUCT_CATALOG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(catalog, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(PRODUCT_CATALOG_FILE, catalog)
     except Exception as e:
         print(f"Error saving product catalog file: {e}")
         
     return catalog
 
 def save_product_catalog(catalog):
-    with open(PRODUCT_CATALOG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(catalog, f, indent=2, ensure_ascii=False)
+    catalog = _without_hidden_models_in_catalog(catalog)
+    _atomic_write_json(PRODUCT_CATALOG_FILE, catalog)
+
+
+def _fill_kb_product_category(row, resolver=None):
+    if not category_is_blank(row.get('product_category_name')):
+        return row
+    resolver = resolver or ProductCategoryResolver(parse_product_catalog())
+    category = resolver.resolve(row.get('product_name'))
+    if category:
+        row['product_category_name'] = category
+    return row
+
+
+def _backfill_kb_categories_for_sync(client, rows):
+    resolver = ProductCategoryResolver(parse_product_catalog())
+    filled = 0
+    for row in rows or []:
+        previous = row.get('product_category_name')
+        if not category_is_blank(previous):
+            continue
+        category = resolver.resolve(row.get('product_name'))
+        wiki_id = row.get('question_wiki_id')
+        if not category or not wiki_id:
+            continue
+        # Do not overwrite a concurrent category or model edit during sync.
+        filters = {
+            'question_wiki_id': f'eq.{wiki_id}',
+            'product_category_name': 'is.null' if previous is None else f'eq.{previous}',
+            'product_name': f"eq.{row.get('product_name')}",
+        }
+        payload = {'product_category_name': category}
+        if row.get('content_version') is not None:
+            version = int(row['content_version'])
+            filters['content_version'] = f'eq.{version}'
+            payload['content_version'] = version + 1
+        response = client.update('knowledge_base_v1', payload, filters)
+        if response is None or getattr(response, 'status_code', 500) >= 400:
+            raise RuntimeError(f'分类补齐失败：{wiki_id}')
+        current = client.select_all(
+            'knowledge_base_v1', filters={'question_wiki_id': f'eq.{wiki_id}'},
+            columns='*',
+            order_by='question_wiki_id', page_size=1, use_formal=False,
+        ) or []
+        if not current:
+            raise RuntimeError(f'分类补齐后记录不存在：{wiki_id}')
+        row.update(current[0])
+        if category_is_blank(row.get('product_category_name')):
+            raise RuntimeError(f'分类补齐遇到并发修改，请重试：{wiki_id}')
+        filled += 1
+    return filled
+
+
+def parse_product_release_intents():
+    """Load per-model release intent while keeping the legacy catalog unchanged."""
+    if not os.path.exists(PRODUCT_RELEASE_INTENTS_FILE):
+        return {}
+    try:
+        with open(PRODUCT_RELEASE_INTENTS_FILE, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+        return raw if isinstance(raw, dict) else {}
+    except Exception as exc:
+        print(f"Error loading product release intents: {exc}")
+        return {}
+
+
+def save_product_release_intents(intents):
+    _atomic_write_json(
+        PRODUCT_RELEASE_INTENTS_FILE,
+        intents if isinstance(intents, dict) else {},
+    )
+
+
+def _catalog_release_rows():
+    catalog = parse_product_catalog() or {}
+    intents = parse_product_release_intents()
+    repository_read_ok = True
+    try:
+        persisted_models = _NEW_PRODUCT_RELEASE_SERVICE.repository.model_state_map()
+        if not isinstance(persisted_models, dict):
+            persisted_models = {}
+            repository_read_ok = False
+    except Exception:
+        persisted_models = {}
+        repository_read_ok = False
+    rows = []
+    for category, models in catalog.items():
+        if not isinstance(models, list):
+            continue
+        for model in models:
+            name = str(model or '').strip()
+            if not name or _is_hidden_product_model(name):
+                continue
+            has_intent = isinstance(intents.get(name), dict)
+            item = intents.get(name) if has_intent else {}
+            raw_status = str(item.get('release_status') or '').strip()
+            status = {'pending': 'pending_release', 'rejected': 'release_cancelled', 'cancelled': 'release_cancelled'}.get(raw_status, raw_status)
+            request_id = str(item.get('request_id') or '')
+            has_persisted_status = False
+            persisted = persisted_models.get(name)
+            if persisted and persisted.get('release_status'):
+                status = str(persisted['release_status'])
+                has_persisted_status = True
+                request_id = str(persisted.get('current_application_id') or request_id)
+            if status not in {'pending_release', 'releasing', 'released', 'release_cancelled'}:
+                # A missing intent is the legacy, already-formal case. An
+                # explicit but invalid/empty status is unknown and must not
+                # be treated as released by a write path.
+                status = 'unknown' if has_intent or has_persisted_status or not repository_read_ok else 'released'
+            rows.append({'model': name, 'model_id': name, 'category': str(category),
+                         'release_status': status, 'request_id': request_id})
+    return rows
+
+
+def list_pending_product_models():
+    return [row for row in _catalog_release_rows() if row.get('release_status') == 'pending_release']
+
+
+def set_product_release_status(model, status='released', transition_token=None):
+    model = str(model or '').strip()
+    status = str(status or '').strip().lower()
+    allowed = {'pending_release', 'releasing', 'released', 'release_cancelled'}
+    if not model or status not in allowed:
+        return False
+    known = {row['model'] for row in _catalog_release_rows()}
+    if model not in known:
+        return False
+    intents = parse_product_release_intents()
+    current = intents.get(model) if isinstance(intents.get(model), dict) else {}
+    has_intent = isinstance(intents.get(model), dict)
+    previous_status = current.get('release_status') if current.get('release_status') in allowed else 'released'
+    permitted = (
+        previous_status == status
+        or (status == 'released' and previous_status in {'pending_release', 'releasing'} and str(transition_token or '').startswith('RB-'))
+        or (status == 'releasing' and previous_status == 'pending_release' and str(transition_token or '').startswith('RB-'))
+        or (status == 'release_cancelled' and previous_status == 'pending_release' and transition_token == 'cancel_application')
+        or (status == 'pending_release' and previous_status == 'release_cancelled' and transition_token == 'new_application')
+        or (status == 'pending_release' and not has_intent and transition_token == 'model_create')
+    )
+    if not permitted:
+        return False
+    current.update({'model': model, 'release_status': status, 'updated_at': datetime.now(timezone.utc).isoformat()})
+    intents[model] = current
+    save_product_release_intents(intents)
+    return True
+
+
+_NEW_PRODUCT_RELEASE_SERVICE.set_catalog_hooks(
+    list_pending_product_models,
+    set_product_release_status,
+    model_provider=_catalog_release_rows,
+)
+
 
 def get_model_mappings():
     if os.path.exists(MODEL_MAPPINGS_FILE):
@@ -2596,6 +3271,13 @@ def get_model_mappings():
             with open(MODEL_MAPPINGS_FILE, 'r', encoding='utf-8') as f:
                 raw = json.load(f)
                 normalized = normalize_model_mappings_dict(raw)
+                # A catalog edit must not turn a populated mapping into an
+                # empty object merely because model names temporarily stop
+                # matching. Keep the source data visible so it can be
+                # repaired explicitly from the mapping UI.
+                if raw and not normalized:
+                    print('Warning: model mapping normalization produced an empty result; preserving source mappings')
+                    return raw
                 if normalized != raw:
                     save_model_mappings(normalized)
                 return normalized
@@ -2603,10 +3285,71 @@ def get_model_mappings():
             print(f"Error loading model mappings: {e}")
     return {}
 
-def save_model_mappings(mappings):
+def get_model_mapping_category_order(mappings, category_order=None):
+    """Use the saved manual order, appending new categories deterministically.
+
+    The mapping JSON object itself is also written in this order. That makes
+    the order survive deployments which copy only ``model_mappings.json``;
+    the sidecar remains a compatibility/recovery source for older files.
+    """
+    if category_order is None:
+        try:
+            with open(MODEL_MAPPINGS_FILE + '.order.json', encoding='utf-8') as f:
+                category_order = json.load(f)
+        except (OSError, ValueError):
+            category_order = list(mappings.keys()) if isinstance(mappings, dict) else []
+    ordered = []
+    seen = set()
+    for category in category_order if isinstance(category_order, list) else []:
+        if isinstance(category, str) and category in mappings and category not in seen:
+            ordered.append(category)
+            seen.add(category)
+    ordered.extend(sorted(category for category in mappings if category not in seen))
+    return ordered
+
+
+def save_model_mappings(mappings, category_order=None):
     mappings = normalize_model_mappings_dict(mappings)
-    with open(MODEL_MAPPINGS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(mappings, f, indent=2, ensure_ascii=False)
+    ordered_categories = get_model_mapping_category_order(mappings, category_order)
+    mappings = {category: mappings[category] for category in ordered_categories}
+    # Keep a local version before every overwrite. The mapping editor writes
+    # the JSON file directly, so this is the recovery point if a stale tab or
+    # an accidental import replaces a newer configuration.
+    backup_path = None
+    if os.path.isfile(MODEL_MAPPINGS_FILE):
+        try:
+            os.makedirs(MODEL_MAPPINGS_BACKUP_DIR, exist_ok=True)
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            backup_path = os.path.join(
+                MODEL_MAPPINGS_BACKUP_DIR,
+                f'model_mappings_{stamp}.json',
+            )
+            shutil.copy2(MODEL_MAPPINGS_FILE, backup_path)
+            backups = sorted(
+                (os.path.join(MODEL_MAPPINGS_BACKUP_DIR, name)
+                 for name in os.listdir(MODEL_MAPPINGS_BACKUP_DIR)
+                 if name.startswith('model_mappings_') and name.endswith('.json')),
+                key=os.path.getmtime,
+                reverse=True,
+            )
+            for stale in backups[MODEL_MAPPINGS_BACKUP_LIMIT:]:
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
+        except OSError as exc:
+            # Saving the requested configuration should still work if the
+            # optional local backup directory is unavailable.
+            print(f'Warning: could not back up model mappings: {exc}')
+    _atomic_write_json(MODEL_MAPPINGS_FILE, mappings)
+    if category_order is not None:
+        order = ordered_categories
+        order_path = MODEL_MAPPINGS_FILE + '.order.json'
+        temporary_path = order_path + '.tmp'
+        with open(temporary_path, 'w', encoding='utf-8') as f:
+            json.dump(order, f, indent=2, ensure_ascii=False)
+        os.replace(temporary_path, order_path)
+    return backup_path
 
 def get_all_valid_models():
     """
@@ -2629,6 +3372,10 @@ def normalize_model_mappings_dict(mappings):
     if not isinstance(mappings, dict):
         return {}
     valid_map, valid_set = get_all_valid_models()
+    # An unavailable/empty catalog cannot safely be used to prune persisted
+    # mappings. Preserve the source until the catalog is available again.
+    if mappings and not valid_set:
+        return mappings
     normalized = {}
     for cat, models in mappings.items():
         cat_name = str(cat).strip() if cat is not None else ''
@@ -2637,6 +3384,11 @@ def normalize_model_mappings_dict(mappings):
         model_list = normalize_model_list(models, valid_map, valid_set)
         if model_list:
             normalized[cat_name] = model_list
+    # Never silently destroy a populated mapping because all names failed to
+    # match one transient catalog snapshot. The audit view can expose these
+    # as out-of-catalog entries for explicit cleanup.
+    if mappings and not normalized:
+        return mappings
     return normalized
 
 def normalize_model_list(models, valid_map, valid_set):
@@ -2662,6 +3414,50 @@ def normalize_model_list(models, valid_map, valid_set):
                 out.append(official)
                 seen.add(official)
     return out
+
+
+def _model_mapping_model_key(value):
+    return re.sub(r'\s+', '', str(value or '').replace('\u3000', ' ')).casefold().strip()
+
+
+def _model_mapping_scope_key(product_value):
+    return frozenset(
+        _model_mapping_model_key(value)
+        for value in _normalize_product_names_for_current(product_value)
+        if _model_mapping_model_key(value)
+    )
+
+
+def _build_kb_mapping_tag_index(mappings):
+    index = {}
+    for category in get_model_mapping_category_order(mappings):
+        raw_models = mappings[category]
+        category_name = str(category or '').strip()
+        if not category_name or not isinstance(raw_models, list):
+            continue
+        mapping_keys = _model_mapping_scope_key(raw_models)
+        if mapping_keys:
+            index.setdefault(mapping_keys, []).append(category_name)
+    return index
+
+
+def _mapping_categories_for_product_value(product_value, mappings=None, index=None):
+    """Match mappings only when the KB model set equals a mapping model set."""
+    if index is None:
+        mappings = mappings if isinstance(mappings, dict) else get_model_mappings()
+        index = _build_kb_mapping_tag_index(mappings)
+    return list(index.get(_model_mapping_scope_key(product_value), []))
+
+
+def _attach_kb_mapping_tags(rows, mappings=None):
+    """Derived tags use current model sets; they never enter the manual tag table."""
+    mappings = mappings if isinstance(mappings, dict) else get_model_mappings()
+    index = _build_kb_mapping_tag_index(mappings)
+    for row in rows or []:
+        if isinstance(row, dict):
+            row['kb_mapping_tags'] = _mapping_categories_for_product_value(row.get('product_name'), index=index)
+    return rows
+
 
 def validate_product_string(product_str, valid_map=None, valid_set=None):
     if _is_blank_cell_value(product_str):
@@ -2786,10 +3582,15 @@ def handle_product_catalog():
     if isinstance(payload, dict) and 'catalog' in payload:
         new_catalog = payload.get('catalog')
         confirm_cleanup = bool(payload.get('confirm_cleanup'))
+        pending_models = payload.get('pending_models') or []
+        release_statuses = payload.get('release_statuses') or {}
     else:
         new_catalog = payload
+        pending_models = []
+        release_statuses = {}
     if not new_catalog or not isinstance(new_catalog, dict):
         return jsonify({'success': False, 'message': 'Invalid catalog format'}), 400
+    new_catalog = _without_hidden_models_in_catalog(new_catalog)
 
     impact = _build_product_catalog_impact(new_catalog)
     if impact.get('requires_confirmation') and not confirm_cleanup:
@@ -2801,8 +3602,47 @@ def handle_product_catalog():
         }), 409
     
     old_catalog = parse_product_catalog()
+    old_intents = parse_product_release_intents()
+    old_models = _flatten_catalog_models(old_catalog)
+    requested_statuses = {}
+    if isinstance(release_statuses, dict):
+        requested_statuses.update({str(k).strip(): str(v).strip().lower() for k, v in release_statuses.items()})
+    for model in pending_models if isinstance(pending_models, list) else []:
+        requested_statuses[str(model).strip()] = 'pending_release'
+    current_statuses = {row['model_id']: row['release_status'] for row in _catalog_release_rows()}
+    forbidden = []
+    for model, status in requested_statuses.items():
+        canonical = 'pending_release' if status in {'pending', 'pending_release'} else status
+        if canonical not in {'pending_release', 'released'}:
+            forbidden.append(model)
+        elif model in old_models and canonical != current_statuses.get(model, 'released'):
+            forbidden.append(model)
+    if forbidden:
+        return jsonify({
+            'success': False,
+            'code': 'release_transition_requires_dedicated_flow',
+            'message': '现有型号发布状态只能通过专用发布流程修改',
+            'models': forbidden,
+        }), 409
     try:
         save_product_catalog(new_catalog)
+        # Existing models retain their state. Newly created models may start in
+        # either supported state; later transitions still require the release flow.
+        intents = parse_product_release_intents()
+        valid_models = _flatten_catalog_models(new_catalog)
+        for model in sorted(valid_models - old_models):
+            previous = intents.get(model) if isinstance(intents.get(model), dict) else {}
+            requested = requested_statuses.get(model, 'pending_release')
+            requested = 'pending_release' if requested in {'pending', 'pending_release'} else requested
+            if requested not in {'pending_release', 'released'}:
+                requested = 'pending_release'
+            previous.update({'model': model, 'release_status': requested, 'updated_at': datetime.now(timezone.utc).isoformat()})
+            intents[model] = previous
+            _NEW_PRODUCT_RELEASE_SERVICE.register_model(
+                model, status=requested,
+                actor=current_user.username if current_user.is_authenticated else 'system',
+            )
+        save_product_release_intents(intents)
         _sync_product_catalog_to_matrix(new_catalog)
         db.session.commit()
         
@@ -2815,6 +3655,7 @@ def handle_product_catalog():
         db.session.rollback()
         try:
             save_product_catalog(old_catalog)
+            save_product_release_intents(old_intents)
         except Exception:
             pass
         print(f"Error syncing catalog to matrix: {e}")
@@ -2823,6 +3664,31 @@ def handle_product_catalog():
         
     return jsonify({'success': True, 'impact': impact})
 
+
+@app.route('/api/kb/product_catalog/release_intents', methods=['GET', 'POST'])
+@login_required
+def handle_product_catalog_release_intents():
+    """Read release state; writes cannot perform release transitions."""
+    if request.method == 'GET':
+        rows = _catalog_release_rows()
+        return jsonify({'success': True, 'models': rows, 'pending_models': [r for r in rows if r['release_status'] == 'pending_release']})
+    payload = request.get_json(silent=True) or {}
+    statuses = payload.get('release_statuses') if isinstance(payload, dict) else None
+    if statuses is None and isinstance(payload, dict):
+        statuses = {str(m): 'pending_release' for m in (payload.get('pending_models') or [])}
+    if not isinstance(statuses, dict):
+        return jsonify({'success': False, 'message': 'release_statuses must be an object'}), 400
+    current = {row['model_id']: row['release_status'] for row in _catalog_release_rows()}
+    attempted = [str(model) for model, status in statuses.items() if current.get(str(model)) != str(status)]
+    if attempted:
+        return jsonify({
+            'success': False,
+            'code': 'release_transition_requires_dedicated_flow',
+            'message': '型号发布状态只能通过取消、重新申请或专用上线流程修改',
+            'models': attempted,
+        }), 409
+    return jsonify({'success': True, 'changed': [], 'pending_models': list_pending_product_models()})
+
 @app.route('/api/kb/product_catalog/preview', methods=['POST'])
 @login_required
 def preview_product_catalog_update():
@@ -2830,6 +3696,7 @@ def preview_product_catalog_update():
     new_catalog = payload.get('catalog') if isinstance(payload, dict) and 'catalog' in payload else payload
     if not isinstance(new_catalog, dict):
         return jsonify({'success': False, 'message': 'Invalid catalog format'}), 400
+    new_catalog = _without_hidden_models_in_catalog(new_catalog)
     return jsonify({'success': True, 'impact': _build_product_catalog_impact(new_catalog)})
 
 @app.route('/api/kb/product_catalog/export', methods=['GET'])
@@ -2860,14 +3727,39 @@ def export_product_catalog_xlsx():
 @login_required
 def handle_model_mappings():
     if request.method == 'GET':
-        return jsonify(get_model_mappings())
+        mappings = get_model_mappings()
+        if request.args.get('include_order') == '1':
+            return jsonify({'mappings': mappings, 'category_order': get_model_mapping_category_order(mappings)})
+        return jsonify(mappings)
     
     mappings = request.json
+    category_order = None
+    # Keep the original dict API available for existing callers.
+    if isinstance(mappings, dict) and isinstance(mappings.get('mappings'), dict):
+        category_order = mappings.get('category_order')
+        if not isinstance(category_order, list) or any(not isinstance(c, str) for c in category_order):
+            return jsonify({'success': False, 'message': '分类顺序必须是分类名称列表'}), 400
+        mappings = mappings['mappings']
     if not isinstance(mappings, dict):
         return jsonify({'success': False, 'message': 'Invalid format'}), 400
+
+    # The mapping editor never uses an empty payload as a deliberate bulk
+    # delete. Reject it when persisted mappings exist so a stale/partially
+    # initialized UI cannot erase the configuration.
+    if not mappings and get_model_mappings():
+        return jsonify({
+            'success': False,
+            'code': 'empty_mapping_write_rejected',
+            'message': '空映射不会覆盖已有配置，请先加载配置后再保存。',
+        }), 409
         
-    save_model_mappings(mappings)
-    return jsonify({'success': True})
+    backup_path = save_model_mappings(mappings, category_order=category_order)
+    persisted_mappings = get_model_mappings()
+    return jsonify({
+        'success': True,
+        'backup_created': bool(backup_path),
+        'category_order': get_model_mapping_category_order(persisted_mappings),
+    })
 
 
 @app.route('/api/model_mappings/export_excel', methods=['POST'])
@@ -2879,13 +3771,17 @@ def export_model_mappings_excel():
     """
     try:
         payload = request.get_json(silent=True)
+        category_order = None
+        if isinstance(payload, dict) and isinstance(payload.get('mappings'), dict):
+            category_order = payload.get('category_order')
+            payload = payload['mappings']
         if isinstance(payload, dict):
             mappings = normalize_model_mappings_dict(payload)
         else:
             mappings = get_model_mappings()
 
         rows = []
-        for category in sorted((mappings or {}).keys(), key=lambda x: str(x)):
+        for category in get_model_mapping_category_order(mappings or {}, category_order):
             models = mappings.get(category) or []
             if not isinstance(models, list):
                 models = []
@@ -2935,7 +3831,7 @@ def sample_scoring_data():
     
     # 2. Fetch all KB IDs
     # Lightweight fetch
-    kb_resp = client.select_all('knowledge_base_v1', columns='question_wiki_id', order_by='question_wiki_id')
+    kb_resp = _formal_select_all(client, 'knowledge_base_v1', columns='question_wiki_id', order_by='question_wiki_id')
     all_kb_ids = [item['question_wiki_id'] for item in kb_resp]
     
     # 3. Categorize
@@ -3252,7 +4148,7 @@ def get_scoring_data():
                 if not id_filter:
                     continue
                 try:
-                    kb_resp = client.select('knowledge_base_v1', filters={'question_wiki_id': id_filter}, columns=kb_cols)
+                    kb_resp = _formal_select(client, 'knowledge_base_v1', filters={'question_wiki_id': id_filter}, columns=kb_cols)
                     if kb_resp.status_code < 400:
                         for item in kb_resp.json():
                             kb_map[item['question_wiki_id']] = item
@@ -3380,7 +4276,9 @@ def export_scoring_data():
         scores = {item['kb_id']: item for item in scores_resp}
         
         # Fetch all KB items
-        kb_resp = client.select_all('knowledge_base_v1', order_by='question_wiki_id')
+        kb_resp = client.select_all(
+            'knowledge_base_v1', order_by='question_wiki_id', use_formal=False,
+        )
         
         # Generate CSV
         import csv
@@ -3454,7 +4352,9 @@ def _run_scoring_sync():
     if not client:
         return {'success': False, 'message': '本地主库未配置', '_http_status': 500}
     try:
-        kb_resp = client.select_all('knowledge_base_v1', order_by='question_wiki_id')
+        kb_resp = client.select_all(
+            'knowledge_base_v1', order_by='question_wiki_id', use_formal=False,
+        )
         if not kb_resp:
             return {'success': True, 'message': 'No KB items to sync', 'count': 0, 'added': 0, 'updated': 0, 'deleted': 0}
 
@@ -4067,18 +4967,13 @@ def _ai_flesch_reading_ease(text):
 def _ai_len(text):
     return len(str(text or "").strip())
 
-def _ai_call_llm(config, system_prompt, user_prompt, temperature=0.2):
+def _ai_call_llm(config, system_prompt, user_prompt, temperature=0.2, max_retries=3, timeout=120):
     api_key = (config or {}).get('api_key') or ''
     base_url = (config or {}).get('base_url') or ''
     model = (config or {}).get('model') or ''
     if not api_key or not base_url or not model:
         raise ValueError("AI 配置不完整（api_key/base_url/model）")
-    base = str(base_url).strip().rstrip("/")
-    if base.endswith("/v1"):
-        base_v1 = base
-    else:
-        base_v1 = base + "/v1"
-    url = base_v1 + "/chat/completions"
+    url = normalize_chat_completions_url(base_url)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -4089,32 +4984,47 @@ def _ai_call_llm(config, system_prompt, user_prompt, temperature=0.2):
             {"role": "system", "content": system_prompt or "You are a helpful assistant."},
             {"role": "user", "content": user_prompt or ""},
         ],
-        "temperature": float(temperature or 0.2),
+        "temperature": float(temperature if temperature is not None else 0.2),
+        "stream": False,
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    resp.encoding = 'utf-8'
-    if resp.status_code >= 400:
-        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
-    data = resp.json() or {}
-    return (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp.encoding = 'utf-8'
+            if resp.status_code >= 400:
+                err_text = f"HTTP {resp.status_code}: {resp.text}"
+                # 瞬时类错误（429 并发超限 / 5xx 网关错误）自动重试
+                retryable = resp.status_code == 429 or resp.status_code >= 500
+                if retryable and attempt < max_retries:
+                    time.sleep(2 * attempt)
+                    continue
+                raise RuntimeError(err_text)
+            data = resp.json() or {}
+            return (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+        except requests.RequestException as e:
+            last_err = e
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
+                continue
+            raise
+    if last_err:
+        raise last_err
 
 
-def _ai_call_llm_stream(config, system_prompt, user_prompt, temperature=0.2):
+def _ai_call_llm_stream(config, system_prompt, user_prompt, temperature=0.2, max_retries=3):
     """
     Stream OpenAI-compatible chat.completions content deltas.
     Yields text chunks (delta content) as they arrive, and returns full text when completed.
+    对中转网关的瞬时错误（并发超限 429 / 上游断流 / 5xx）自动重试；
+    已输出过内容后不再重试，避免重复拼接。
     """
     api_key = (config or {}).get('api_key') or ''
     base_url = (config or {}).get('base_url') or ''
     model = (config or {}).get('model') or ''
     if not api_key or not base_url or not model:
         raise ValueError("AI 配置不完整（api_key/base_url/model）")
-    base = str(base_url).strip().rstrip("/")
-    if base.endswith("/v1"):
-        base_v1 = base
-    else:
-        base_v1 = base + "/v1"
-    url = base_v1 + "/chat/completions"
+    url = normalize_chat_completions_url(base_url)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -4130,37 +5040,68 @@ def _ai_call_llm_stream(config, system_prompt, user_prompt, temperature=0.2):
         "stream": True,
     }
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=120, stream=True)
-    resp.encoding = 'utf-8'
-    if resp.status_code >= 400:
-        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
-
-    full = []
-    for raw_line in resp.iter_lines(decode_unicode=False):
-        if not raw_line:
-            continue
-        if isinstance(raw_line, bytes):
-            raw_line = raw_line.decode('utf-8', errors='replace')
-        line = raw_line.strip()
-        if not line.startswith("data:"):
-            continue
-        data_str = line[len("data:"):].strip()
-        if data_str == "[DONE]":
-            break
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        emitted = False
         try:
-            obj = json.loads(data_str)
-            choices = obj.get("choices") or []
-            if not choices:
-                continue
-            delta = (choices[0].get("delta") or {})
-            content = delta.get("content")
-            if isinstance(content, str) and content:
-                full.append(content)
-                yield content
-        except Exception:
-            continue
+            resp = requests.post(url, headers=headers, json=payload, timeout=120, stream=True)
+            resp.encoding = 'utf-8'
+            if resp.status_code >= 400:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
 
-    return "".join(full).strip()
+            full = []
+            for raw_line in resp.iter_lines(decode_unicode=False):
+                if not raw_line:
+                    continue
+                if isinstance(raw_line, bytes):
+                    raw_line = raw_line.decode('utf-8', errors='replace')
+                line = raw_line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[len("data:"):].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data_str)
+                except Exception:
+                    continue
+                # 网关/上游错误事件：显式抛出而不是静默忽略，便于触发重试或提示用户
+                if isinstance(obj, dict) and obj.get("error"):
+                    err = obj.get("error")
+                    err_type = err.get("type", "") if isinstance(err, dict) else ""
+                    err_msg = err.get("message", "") if isinstance(err, dict) else str(err)
+                    raise RuntimeError(f"AI 网关错误（{err_type}）: {err_msg}")
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = (choices[0].get("delta") or {})
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    emitted = True
+                    full.append(content)
+                    yield content
+
+            return "".join(full).strip()
+        except (RuntimeError, requests.RequestException) as e:
+            last_err = e
+            # 已经输出过内容，重试会导致文本重复，直接抛出
+            if emitted:
+                raise
+            err_text = str(e)
+            # 仅对瞬时类错误重试：429 并发超限、5xx 网关/上游错误、网络异常
+            retryable = (
+                "429" in err_text
+                or "gateway" in err_text.lower()
+                or "upstream" in err_text.lower()
+                or "HTTP 5" in err_text
+                or isinstance(e, requests.RequestException)
+            )
+            if retryable and attempt < max_retries:
+                time.sleep(2 * attempt)
+                continue
+            raise
+    if last_err:
+        raise last_err
 
 
 @app.route('/api/ai/optimize_stream', methods=['POST'])
@@ -4992,6 +5933,8 @@ def get_kb_data():
     tag_names_search = request.args.get('tagNames') or request.args.get('tag_names') or ''
     tag_mode_search = str(request.args.get('tagMode') or 'OR').strip().upper()  # OR / AND
     tag_mode = 'AND' if tag_mode_search == 'AND' else 'OR'
+    mapping_category = str(request.args.get('mappingCategory') or '').strip()
+    mapping_config = get_model_mappings()
     
     # Security check: only allow specific tables
     allowed_tables = ['knowledge_base_v1']
@@ -5024,6 +5967,8 @@ def get_kb_data():
 
     # Build filters
     filters = {}
+    if _formal_release_filter_enabled():
+        filters['kb_scope'] = 'eq.formal'
     ids = []
     if ids_raw:
         s = str(ids_raw).strip()
@@ -5242,13 +6187,16 @@ def get_kb_data():
 
         # 有相似问题关键词时，改用 Python 层过滤，避免 JSONB + ilike 的兼容问题导致“暂无数据”。
         # 只要传了 similar_question（非空），就强制走这条分支并返回 debug_similar（避免前端拿到 array 而无法诊断）。
-        if want_similar_debug:
+        if want_similar_debug or mapping_category:
             data_all = client.select_all(
                 table_name,
                 order_by=sort_by,
                 order_dir=sort_dir,
                 filters=filters,
-                columns=kb_columns or '*'
+                columns=kb_columns or '*',
+                # 知识库管理需要包含 creating/modifying 等未发布记录。
+                # 正式视图会要求 product_matrix 已 released，导致新增内容在管理页不可见。
+                use_formal=False,
             )
             debug_samples = []
             try:
@@ -5260,6 +6208,14 @@ def get_kb_data():
             else:
                 # 归一化后为空时：不做相似问过滤，但仍返回 debug 信息，避免“看似无数据”的假象
                 filtered = list(data_all or [])
+            if python_filter_categories:
+                filtered = [r for r in filtered if _matches_category_filter(r, python_filter_categories)]
+            if mapping_category:
+                mapping_index = _build_kb_mapping_tag_index(mapping_config)
+                filtered = [
+                    r for r in filtered if isinstance(r, dict)
+                    and mapping_category in _mapping_categories_for_product_value(r.get('product_name'), index=mapping_index)
+                ]
             try:
                 # Log a couple of samples to diagnose format issues
                 samples = []
@@ -5339,6 +6295,7 @@ def get_kb_data():
             except Exception as e:
                 print(f"WARN: attach kb tags failed (similar branch): {e}")
 
+            _attach_kb_mapping_tags(data_out, mapping_config)
             # Always return an object when similar_question is used, so frontend can read debug_similar.
             return jsonify({
                 'success': True,
@@ -5365,7 +6322,9 @@ def get_kb_data():
                 order_dir=sort_dir,
                 filters=filters,
                 columns=kb_columns or '*',
-                count='estimated'
+                count='estimated',
+                # 管理页展示编辑中的主表记录，不走 formal_knowledge_base_v1 发布视图。
+                use_formal=False,
             )
             if resp.status_code >= 400:
                 print(f"Database Error: {resp.text}")
@@ -5444,6 +6403,7 @@ def get_kb_data():
             except Exception as e:
                 print(f"WARN: attach kb tags failed (paged branch): {e}")
 
+            _attach_kb_mapping_tags(rows, mapping_config)
             return jsonify({
                 'success': True,
                 'data': rows,
@@ -5451,7 +6411,14 @@ def get_kb_data():
             })
         else:
             # Fallback to select_all for backward compatibility or small tables
-            data = client.select_all(table_name, order_by=sort_by, order_dir=sort_dir, filters=filters)
+            data = client.select_all(
+                table_name,
+                order_by=sort_by,
+                order_dir=sort_dir,
+                filters=filters,
+                use_formal=False,
+            )
+            _attach_kb_mapping_tags(data, mapping_config)
             return jsonify(data)
     except Exception as e:
         print(f"Error fetching KB data: {e}")
@@ -5603,10 +6570,50 @@ def _convert_array_fields_to_json(record_or_records):
     else:
         return convert_single(record_or_records)
 
+def _current_release_migration_batch_id(client):
+    """Return the batch currently authorized by the local release switch.
+
+    Modification logging must remain usable when the additive release schema is
+    not installed yet, so lookup failures deliberately return an empty value.
+    """
+    try:
+        rows = client.select_all(
+            'release_migration_exit_switch',
+            filters={'switch_name': 'eq.new_product_release'},
+            order_by='switch_name',
+            order_dir='asc',
+            columns='migration_batch_id,enabled',
+            page_size=1,
+        ) or []
+        if rows and isinstance(rows[0], dict):
+            batch_id = str(rows[0].get('migration_batch_id') or '').strip()
+            return batch_id
+    except Exception:
+        pass
+    return ''
+
+def _prepare_modification_payload(client, payload):
+    """Apply the durable release metadata at the modification write boundary."""
+    batch_id = _current_release_migration_batch_id(client)
+    rows = payload if isinstance(payload, list) else [payload]
+    prepared = []
+    for row in rows:
+        if not isinstance(row, dict):
+            prepared.append(row)
+            continue
+        item = dict(row)
+        item.setdefault('record_scope', 'formal')
+        item.setdefault('release_status', 'released')
+        if batch_id:
+            item.setdefault('migration_batch_id', batch_id)
+        item.pop('update_time', None)
+        prepared.append(item)
+    return prepared if isinstance(payload, list) else prepared[0]
+
 def _supabase_insert_drop_unknown_columns(client, table, payload):
     if not client or not table:
         return None
-    data = payload
+    data = _prepare_modification_payload(client, payload) if table == 'knowledge_base_modifications' else payload
     last = None
     removed_cols = 0
     while True:
@@ -5664,6 +6671,11 @@ def _build_kb_modification_record(source, modifier, change_type, kb_id, before_o
     rec['source_code'] = _resolve_kb_source_code({}, source)
     rec['modification_time'] = _now_iso_with_tz()
     rec['change_type'] = change_type
+    # knowledge_base_modifications has its own audit contract.  update_time
+    # belongs to knowledge_base_v1 and record_scope is required by the audit
+    # table, so make both invariants explicit at the construction boundary.
+    rec.pop('update_time', None)
+    rec['record_scope'] = 'formal'
     rec.pop('id', None)
     rec.pop('review_status', None)
     _attach_change_meta(rec, {
@@ -5694,7 +6706,8 @@ def _activity_archive_rows(client, wiki_ids):
     ids = list(dict.fromkeys(ids))
     if not ids:
         return []
-    return client.select_all(
+    return _formal_select_all(
+        client,
         'knowledge_base_v1',
         filters={'question_wiki_id': _postgrest_in_str(ids)},
         columns='*',
@@ -5860,7 +6873,6 @@ def _kb_all_fields_allowlist():
         'file_urls',
         'link_type',
         'link_url',
-        'update_time',
         'product_category_name',
         'product_name',
         'review_status'
@@ -6010,6 +7022,62 @@ def _aggregate_links_from_fields(obj):
         seen.add(s)
         out.append(s)
     return out
+
+
+def _without_hidden_product_models(value):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        return [item for item in value if not _is_hidden_product_model(item)]
+
+    raw = str(value).strip()
+    if not raw:
+        return raw
+    if raw.startswith('[') and raw.endswith(']'):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return _without_hidden_product_models(parsed)
+        except (TypeError, ValueError):
+            pass
+    parts = [item.strip() for item in re.split(r'[,，\n\r]+', raw) if item.strip()]
+    if not parts:
+        return raw
+    return ', '.join(item for item in parts if not _is_hidden_product_model(item))
+
+
+def _without_hidden_products_in_snapshot(snapshot):
+    if not isinstance(snapshot, dict):
+        return snapshot
+    cleaned = dict(snapshot)
+    for field in ('products', 'product_name'):
+        if field in cleaned:
+            cleaned[field] = _without_hidden_product_models(cleaned.get(field))
+    return cleaned
+
+
+def _without_hidden_products_in_mod_item(item):
+    if not isinstance(item, dict):
+        return item
+    cleaned = dict(item)
+    for field in ('products', 'product_name'):
+        if field in cleaned:
+            cleaned[field] = _without_hidden_product_models(cleaned.get(field))
+    for field in ('before', 'after'):
+        cleaned[field] = _without_hidden_products_in_snapshot(cleaned.get(field))
+    if 'association_changes' in cleaned:
+        cleaned['association_changes'] = _without_hidden_product_associations(cleaned.get('association_changes'))
+    return cleaned
+
+
+def _without_hidden_product_associations(changes):
+    if not isinstance(changes, list):
+        return []
+    return [
+        change for change in changes
+        if not isinstance(change, dict)
+        or not _is_hidden_product_model(change.get('target_model') or change.get('product_name'))
+    ]
 
 def _snapshot_mod_fields(row):
     if not isinstance(row, dict):
@@ -6368,7 +7436,8 @@ def _get_v1_ids_missing_from_file(client, file_ids):
         'knowledge_base_v1',
         columns='question_wiki_id',
         order_by='question_wiki_id',
-        page_size=1000
+        page_size=1000,
+        use_formal=False,
     ) or []
     missing = []
     for row in rows:
@@ -6538,24 +7607,44 @@ def _normalize_mod_record(row):
                    or _resolve_kb_source_code({}, src))
     wiki_id = row.get('question_wiki_id') or row.get('kb_id') or ''
     change_type = row.get('change_type') or row.get('modification_type') or 'edit'
-    before_obj = meta.get('before') if isinstance(meta, dict) else None
-    after_obj = meta.get('after') if isinstance(meta, dict) else None
+    model_id = (row.get('model_id') or row.get('target_model')
+                or (meta.get('model_id') if isinstance(meta, dict) else None)
+                or (meta.get('target_model') if isinstance(meta, dict) else None) or '')
+    model_id = _without_hidden_product_models(str(model_id or '').strip())
+    before_obj = _without_hidden_products_in_snapshot(meta.get('before')) if isinstance(meta, dict) else None
+    after_obj = _without_hidden_products_in_snapshot(meta.get('after')) if isinstance(meta, dict) else None
     changed_fields = meta.get('changed_fields') if isinstance(meta, dict) else None
     operation_id = row.get('operation_id') or (meta.get('operation_id') if isinstance(meta, dict) else None)
     action_kind = meta.get('action_kind') if isinstance(meta, dict) else None
-    association_changes = meta.get('association_changes') if isinstance(meta, dict) else []
+    association_changes = _without_hidden_product_associations(
+        meta.get('association_changes') if isinstance(meta, dict) else []
+    )
     if not isinstance(after_obj, dict) or not after_obj:
-        after_obj = _snapshot_mod_fields(row)
+        after_obj = _without_hidden_products_in_snapshot(_snapshot_mod_fields(row))
     if isinstance(before_obj, dict) and not before_obj:
         before_obj = None
+    if model_id:
+        for snapshot in (before_obj, after_obj):
+            if isinstance(snapshot, dict) and not any(key in snapshot for key in ('products', 'product_name')):
+                configured = snapshot.get('configured')
+                snapshot['products'] = '' if configured is False else model_id
     if not isinstance(changed_fields, list):
         if isinstance(before_obj, dict) and isinstance(after_obj, dict):
             changed_fields = _compute_mod_changed_fields(before_obj, after_obj)
         else:
             changed_fields = []
+    elif (not changed_fields and model_id and isinstance(before_obj, dict) and isinstance(after_obj, dict)
+          and ('configured' in before_obj or 'configured' in after_obj)
+          and before_obj.get('products') != after_obj.get('products')):
+        changed_fields = ['products']
     q_val = (after_obj.get('question') if isinstance(after_obj, dict) else None) or row.get('question') or row.get('question_content') or ''
     a_val = (after_obj.get('answer') if isinstance(after_obj, dict) else None) or row.get('answer') or row.get('answer_content') or ''
-    p_val = (after_obj.get('products') if isinstance(after_obj, dict) else None) or row.get('products') or row.get('product_name') or '-'
+    p_val = _without_hidden_product_models(
+        (after_obj.get('products') if isinstance(after_obj, dict) else None)
+        or row.get('products')
+        or row.get('product_name')
+        or model_id
+    ) or '-'
     qtype_val = (after_obj.get('question_type') if isinstance(after_obj, dict) else None) or row.get('question_type')
     atype_val = (after_obj.get('answer_type') if isinstance(after_obj, dict) else None) or row.get('answer_type')
     err_val = (after_obj.get('error_list') if isinstance(after_obj, dict) else None) or row.get('error_list')
@@ -6577,6 +7666,7 @@ def _normalize_mod_record(row):
         'supabase_id': row.get('id'),
         'question_wiki_id': wiki_id,
         'kb_id': row.get('kb_id') or wiki_id,
+        'model_id': model_id,
         'modifier': row.get('modifier'),
         'question': q_val,
         'question_type': qtype_val,
@@ -6856,6 +7946,9 @@ def update_kb_item():
         base_version = int(raw_payload.get('base_version')) if raw_payload.get('base_version') is not None else None
     except (TypeError, ValueError):
         return jsonify({'success': False, 'message': 'base_version 必须是整数'}), 400
+    strict_version = raw_payload.get('strict_version') is True
+    if strict_version and base_version is None:
+        return jsonify({'success': False, 'message': '严格写入必须提供 base_version'}), 400
     raw_confirmed_references = raw_payload.get('confirmed_references')
     data = raw_payload
     client = get_supabase_client()
@@ -7053,7 +8146,7 @@ def update_kb_item():
                     # latest row.  Same-field edits remain an explicit conflict.
                     business_fields = set(_kb_all_fields_allowlist()) - {'question_wiki_id', 'review_status'}
                     changed_fields = [field for field in requested_changed_fields if field in business_fields]
-                    if changed_fields and conflict_resolution not in ('force', 'conflict_forced'):
+                    if not strict_version and changed_fields and conflict_resolution not in ('force', 'conflict_forced'):
                         server_changed = []
                         for field in changed_fields:
                             base_value = base_values.get(field)
@@ -7075,7 +8168,7 @@ def update_kb_item():
                                 'base_version': base_version,
                                 'current': before_row,
                             }), 409
-                    elif conflict_resolution in ('force', 'conflict_forced') and force_version == current_version:
+                    elif not strict_version and conflict_resolution in ('force', 'conflict_forced') and force_version == current_version:
                         base_version = current_version
                         conflict_resolution = 'conflict_forced'
                     else:
@@ -7094,6 +8187,15 @@ def update_kb_item():
                     base_version = int(before_row.get('content_version') or 1)
                 except (TypeError, ValueError):
                     base_version = 1
+
+        # Strict media replacement changes only the selected media fields;
+        # category backfill remains part of ordinary KB editing.
+        if not strict_version or 'product_name' in data or 'product_category_name' in data:
+            effective_row = dict(before_row or {})
+            effective_row.update(data)
+            _fill_kb_product_category(effective_row)
+            if effective_row.get('product_category_name') != (before_row or {}).get('product_category_name'):
+                data['product_category_name'] = effective_row.get('product_category_name')
 
         after_row_for_diff = dict(before_row or {})
         after_row_for_diff.update(data or {})
@@ -7124,6 +8226,8 @@ def update_kb_item():
         modification_record['modifier'] = current_user.username if current_user.is_authenticated else 'system'
         modification_record['modification_time'] = _now_iso_with_tz()
         modification_record['change_type'] = 'edit' if kb_id else 'create'
+        modification_record.pop('update_time', None)
+        modification_record['record_scope'] = 'formal'
         _attach_change_meta(modification_record, {
             'source': change_source,
             'source_code': source_code,
@@ -7163,7 +8267,12 @@ def update_kb_item():
             if base_version is not None:
                 update_filters['content_version'] = f'eq.{base_version}'
                 data['content_version'] = base_version + 1
-            response = client.update('knowledge_base_v1', data, update_filters)
+            if strict_version:
+                response = client.update('knowledge_base_v1', data, update_filters, returning=True)
+                if response is not None and response.status_code < 400 and not response.json():
+                    return jsonify({'success': False, 'conflict': True, 'message': '内容版本并发冲突，未写入 KB'}), 409
+            else:
+                response = client.update('knowledge_base_v1', data, update_filters)
             saved_id = kb_id
         else:
             # Insert new
@@ -7446,6 +8555,8 @@ def batch_update_kb_items():
                 modification_record['modifier'] = current_user.username if current_user.is_authenticated else 'system'
                 modification_record['modification_time'] = operation_time
                 modification_record['change_type'] = 'edit'
+                modification_record.pop('update_time', None)
+                modification_record['record_scope'] = 'formal'
                 modification_record['source_code'] = _resolve_kb_source_code(payload, _resolve_kb_change_source(payload))
                 _attach_change_meta(modification_record, {
                     'source': _resolve_kb_change_source(payload),
@@ -7561,7 +8672,15 @@ def delete_kb_item():
         print(f"[DEBUG] Deleting IDs: {ids}")
         print(f"[DEBUG] Filter string: in.{id_str}")
         
-        fetch_resp = client.select('knowledge_base_v1', page_size=1000, filters={'question_wiki_id': f'in.{id_str}'})
+        # Snapshot the physical V1 rows.  The formal-release view may hide a
+        # pending row, which would leave the delete log without its source
+        # snapshot even though the status update succeeds.
+        fetch_resp = client.select(
+            'knowledge_base_v1',
+            page_size=1000,
+            filters={'question_wiki_id': f'in.{id_str}'},
+            use_formal=False,
+        )
         
         items_to_log = []
         if fetch_resp.status_code < 400:
@@ -7598,6 +8717,10 @@ def delete_kb_item():
                 mod_rec['modifier'] = current_user.username if current_user.is_authenticated else 'system'
                 mod_rec['modification_time'] = _now_iso_with_tz()
                 mod_rec['change_type'] = 'delete'
+                # knowledge_base_modifications does not have knowledge_base_v1's
+                # update_time column and requires an explicit audit scope.
+                mod_rec.pop('update_time', None)
+                mod_rec['record_scope'] = 'formal'
                 before_obj = _snapshot_mod_fields(item)
                 after_obj = None
                 changed_fields = _compute_mod_changed_fields(before_obj, after_obj)
@@ -7910,6 +9033,101 @@ def get_all_kb_tags():
         # 错误时返回空数组，避免前端报错
         return jsonify([]), 500
 
+def _kb_tag_management_rows(client):
+    tags = client.select_all('kb_tags', columns='id,name', order_by='id', page_size=1000) or []
+    relations = client._execute_query(
+        'SELECT tag_id, COUNT(DISTINCT question_wiki_id) AS knowledge_count '
+        'FROM kb_item_tags WHERE library_type = %s GROUP BY tag_id', ['current'],
+    ) or []
+    counts = {str(row['tag_id']): int(row['knowledge_count']) for row in relations}
+    return sorted([
+        {'id': str(row['id']), 'name': str(row['name']),
+         'knowledge_count': counts.get(str(row['id']), 0)}
+        for row in tags
+    ], key=lambda row: row['name'])
+
+
+@app.route('/api/kb/tags/manage', methods=['GET'])
+@login_required
+def get_kb_tag_management():
+    client = get_supabase_client()
+    if not isinstance(client, LocalPostgreSQLClient):
+        return jsonify({'success': False, 'message': '标签管理需要可用的本地 PostgreSQL 主库'}), 503
+    try:
+        return jsonify({'success': True, 'tags': _kb_tag_management_rows(client)})
+    except Exception:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': '标签列表加载失败，请重试'}), 500
+    finally:
+        if isinstance(client, LocalPostgreSQLClient):
+            client.close()
+
+
+@app.route('/api/kb/tags/manage/<uuid:tag_id>', methods=['PUT', 'DELETE'])
+@login_required
+def mutate_kb_tag_management(tag_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'message': '请求格式错误'}), 400
+    expected_name = data.get('expected_name')
+    expected_count = data.get('expected_count')
+    if not isinstance(expected_name, str) or type(expected_count) is not int or expected_count < 0:
+        return jsonify({'success': False, 'message': '请刷新标签列表后重试'}), 400
+    new_name = data.get('name')
+    if request.method == 'PUT':
+        if not isinstance(new_name, str) or not new_name.strip():
+            return jsonify({'success': False, 'message': '标签名称不能为空'}), 400
+        new_name = new_name.strip()
+        if len(new_name) > 100 or re.search(r'[,，\r\n]', new_name):
+            return jsonify({'success': False, 'message': '标签名称最多 100 个字符，不能包含逗号或换行'}), 400
+    client = get_supabase_client()
+    # Global mutations must commit the dictionary and relations together.
+    if not isinstance(client, LocalPostgreSQLClient):
+        return jsonify({'success': False, 'message': '标签管理需要可用的本地 PostgreSQL 主库'}), 503
+    try:
+        client.begin_deferred_transaction()
+        client._execute_query('LOCK TABLE kb_tags, kb_item_tags IN SHARE ROW EXCLUSIVE MODE', fetch=False)
+        rows = _kb_tag_management_rows(client)
+        tag = next((row for row in rows if row['id'] == str(tag_id)), None)
+        if not tag:
+            return jsonify({'success': False, 'message': '标签已被删除，请刷新列表'}), 404
+        if tag['name'] != expected_name or tag['knowledge_count'] != expected_count:
+            return jsonify({'success': False, 'message': '标签名称或关联数量已变化，请刷新列表后重试'}), 409
+        if request.method == 'PUT' and any(
+            row['id'] != str(tag_id) and row['name'].strip().casefold() == new_name.casefold()
+            for row in rows
+        ):
+            return jsonify({'success': False, 'message': '该标签名称已存在，请使用其他名称'}), 409
+        if request.method == 'PUT':
+            responses = [client.update('kb_tags', {'name': new_name}, {'id': f'eq.{tag_id}'})]
+        else:
+            responses = [client.delete('kb_item_tags', {'tag_id': f'eq.{tag_id}'})]
+            if responses[0] is None or getattr(responses[0], 'status_code', 500) >= 400:
+                raise RuntimeError('删除标签关联失败')
+            responses.append(client.delete('kb_tags', {'id': f'eq.{tag_id}'}))
+        if any(response is None or getattr(response, 'status_code', 500) >= 400 for response in responses):
+            raise RuntimeError('标签写入失败')
+        remaining = client.select_all('kb_tags', filters={'id': f'eq.{tag_id}'}, columns='id,name') or []
+        if (request.method == 'PUT' and (len(remaining) != 1 or remaining[0]['name'] != new_name)
+                or request.method == 'DELETE' and remaining):
+            raise RuntimeError('标签写入校验失败')
+        if request.method == 'DELETE' and client.select_all(
+            'kb_item_tags', filters={'tag_id': f'eq.{tag_id}'}, columns='tag_id', order_by='question_wiki_id',
+        ):
+            raise RuntimeError('标签关联清理校验失败')
+        client.commit_deferred_transaction()
+        return jsonify({'success': True, 'id': str(tag_id), 'old_name': tag['name'],
+                        'name': new_name if request.method == 'PUT' else None,
+                        'knowledge_count': tag['knowledge_count']})
+    except Exception:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': '标签操作失败，已回滚，请重试'}), 500
+    finally:
+        if getattr(client, '_defer_commit', False):
+            client.rollback_deferred_transaction()
+        client.close()
+
+
 @app.route('/api/kb/item/tags', methods=['GET'])
 @login_required
 def get_kb_item_tags():
@@ -7926,6 +9144,15 @@ def get_kb_item_tags():
         return jsonify({'success': False, 'message': 'question_wiki_id is required'}), 400
 
     try:
+        kb_rows = client.select_all(
+            'knowledge_base_v1',
+            filters={'question_wiki_id': f'eq.{wiki_id}'},
+            columns='question_wiki_id,product_name',
+            order_by='question_wiki_id',
+            page_size=1,
+            use_formal=False,
+        ) or []
+        mapping_tags = _mapping_categories_for_product_value(kb_rows[0].get('product_name')) if kb_rows else []
         # 1) Fetch tag_ids for this item
         in_row = client.select_all(
             'kb_item_tags',
@@ -7937,7 +9164,7 @@ def get_kb_item_tags():
         tag_ids = [r.get('tag_id') for r in in_row if isinstance(r, dict) and r.get('tag_id')]
 
         if not tag_ids:
-            return jsonify({'success': True, 'tags': []})
+            return jsonify({'success': True, 'tags': [], 'mapping_tags': mapping_tags})
 
         # 2) Fetch tag names for those ids
         id_in = _postgrest_in_str(tag_ids)
@@ -7963,7 +9190,7 @@ def get_kb_item_tags():
             if key in id_to_name and key not in seen:
                 seen.add(key)
                 out.append(id_to_name[key])
-        return jsonify({'success': True, 'tags': out})
+        return jsonify({'success': True, 'tags': out, 'mapping_tags': mapping_tags})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
@@ -8074,18 +9301,68 @@ def complete_revision():
         return jsonify({'success': False, 'message': '本地主库未配置'}), 500
         
     try:
-        # Update all items with review_status 'creating' / 'modifying' / 'deleting' to 'unadjusted'
-        # We use the 'in' filter for bulk update
-        
-        # The filter string format for PostgREST 'in' is: in.("val1","val2")
-        filter_str = 'in.("creating","modifying","deleting")'
-        
-        update_resp = client.update('knowledge_base_v1', {'review_status': 'unadjusted'}, {'review_status': filter_str})
-        
-        if update_resp.status_code >= 400:
-             return jsonify({'success': False, 'message': update_resp.text}), 500
-             
-        return jsonify({'success': True})
+        # Completing a revision commits pending edits, but a row marked
+        # ``deleting`` is a staged physical delete.  The previous
+        # implementation reset all three states to ``unadjusted`` and thus
+        # silently resurrected rows the user had already approved for delete.
+        deleting_ids = []
+        page = 1
+        page_size = 1000
+        while True:
+            deleting_resp = client.select(
+                'knowledge_base_v1',
+                page=page,
+                page_size=page_size,
+                filters={'review_status': 'eq.deleting'},
+                columns='question_wiki_id',
+                order_by='question_wiki_id',
+                order_dir='asc',
+                use_formal=False,
+            )
+            if deleting_resp is None or getattr(deleting_resp, 'status_code', 500) >= 400:
+                return jsonify({'success': False, 'message': getattr(deleting_resp, 'text', '') or '读取待删除记录失败'}), 500
+            rows = deleting_resp.json() or []
+            deleting_ids.extend(
+                _normalize_kb_import_id(row.get('question_wiki_id'))
+                for row in rows
+                if isinstance(row, dict) and _normalize_kb_import_id(row.get('question_wiki_id'))
+            )
+            if len(rows) < page_size:
+                break
+            page += 1
+        deleting_ids = list(dict.fromkeys(deleting_ids))
+        deletion = _delete_kb_items_physical(client, deleting_ids)
+        if not deletion.get('success'):
+            return jsonify({
+                'success': False,
+                'message': deletion.get('message') or '完成修订时删除待删除记录失败',
+                'deleted_count': deletion.get('count', 0),
+                'deleted_ids': deletion.get('ids', []),
+                'warnings': deletion.get('warnings', []),
+            }), 500
+
+        # Edits and newly-created rows remain in the KB, but are no longer
+        # pending once the revision batch is completed.
+        filter_str = 'in.("creating","modifying")'
+        update_resp = client.update(
+            'knowledge_base_v1',
+            {'review_status': 'unadjusted'},
+            {'review_status': filter_str},
+        )
+        if update_resp is None or getattr(update_resp, 'status_code', 500) >= 400:
+            return jsonify({
+                'success': False,
+                'message': getattr(update_resp, 'text', '') or '完成修订时重置修改状态失败',
+                'deleted_count': deletion.get('count', 0),
+                'deleted_ids': deletion.get('ids', []),
+            }), 500
+
+        return jsonify({
+            'success': True,
+            'deleted_count': deletion.get('count', 0),
+            'deleted_ids': deletion.get('ids', []),
+            'warnings': deletion.get('warnings', []),
+        })
         
     except Exception as e:
         traceback.print_exc()
@@ -8117,11 +9394,11 @@ def get_kb_modifications():
     sort_dir = request.args.get('sortDir', 'desc')
 
     filters = {}
+    if _formal_release_filter_enabled():
+        filters['record_scope'] = 'eq.formal'
     filters['archived_at'] = 'is.null'
     if kb_id:
         filters['kb_id'] = f"ilike.*{kb_id}*"
-    if product:
-        filters['product_name'] = f"ilike.*{product}*"
     if question:
         filters['question'] = f"ilike.*{question}*"
     if answer:
@@ -8260,7 +9537,7 @@ def get_kb_modifications():
                 if _is_empty_snapshot(before_obj) and str(it.get('change_type') or '').lower() == 'edit':
                     inferred = _lookup_prev_snapshot(wid, it.get('modification_time'))
                     if isinstance(inferred, dict) and not _is_empty_snapshot(inferred):
-                        before_obj = inferred
+                        before_obj = _without_hidden_products_in_snapshot(inferred)
                 for k in ['question', 'answer', 'question_type', 'answer_type', 'if_bm25', 'similar_questions', 'error_list', 'keyword_list', 'image_urls', 'video_urls', 'file_urls', 'link_type', 'link_url']:
                     if k not in before_obj or before_obj.get(k) in [None, '']:
                         if b.get(k) is not None:
@@ -8272,7 +9549,7 @@ def get_kb_modifications():
                 it['after'] = after_obj
             return items
 
-        if source_module or operation or archived_keys:
+        if source_module or operation or product or archived_keys:
             data = client.select_all('knowledge_base_modifications', order_by=sort_by, order_dir=sort_dir, filters=filters, page_size=1000)
             normalized = []
             for row in (data or []):
@@ -8284,6 +9561,8 @@ def get_kb_modifications():
                 if not _mod_source_match(item.get('source_module'), source_module):
                     continue
                 if operation and not _mod_operation_match(item.get('change_type'), operation):
+                    continue
+                if product and str(product).lower() not in str(item.get('products') or '').lower():
                     continue
                 normalized.append(item)
 
@@ -8476,10 +9755,10 @@ def export_kb_modifications_raw():
     sort_dir = request.args.get('sortDir', 'desc')
 
     filters = {}
+    if _formal_release_filter_enabled():
+        filters['record_scope'] = 'eq.formal'
     if kb_id:
         filters['kb_id'] = f"ilike.*{kb_id}*"
-    if product:
-        filters['product_name'] = f"ilike.*{product}*"
     if question:
         filters['question'] = f"ilike.*{question}*"
     if modifier:
@@ -8505,6 +9784,8 @@ def export_kb_modifications_raw():
             if source_module and not _mod_source_match(item.get('source_module'), source_module):
                 continue
             if operation and not _mod_operation_match(item.get('change_type'), operation):
+                continue
+            if product and str(product).lower() not in str(item.get('products') or '').lower():
                 continue
             normalized.append(item)
 
@@ -8597,10 +9878,10 @@ def export_kb_modifications_smart_merge():
     end_time = request.args.get('end_time')
 
     filters = {}
+    if _formal_release_filter_enabled():
+        filters['record_scope'] = 'eq.formal'
     if kb_id:
         filters['kb_id'] = f"ilike.*{kb_id}*"
-    if product:
-        filters['product_name'] = f"ilike.*{product}*"
     if question:
         filters['question'] = f"ilike.*{question}*"
     if modifier:
@@ -8617,7 +9898,7 @@ def export_kb_modifications_smart_merge():
         filters['and'] = f"({','.join(and_conditions)})"
 
     try:
-        filtered_raw = client.select_all('knowledge_base_modifications', order_by='modification_time', order_dir='desc', filters=filters, page_size=1000)
+        filtered_raw = client.select_all('knowledge_base_modifications', order_by='id', order_dir='desc', filters=filters, page_size=1000)
         filtered_norm = []
         for r in (filtered_raw or []):
             it = _normalize_mod_record(r)
@@ -8626,6 +9907,8 @@ def export_kb_modifications_smart_merge():
             if source_module and not _mod_source_match(it.get('source_module'), source_module):
                 continue
             if operation and not _mod_operation_match(it.get('change_type'), operation):
+                continue
+            if product and str(product).lower() not in str(it.get('products') or '').lower():
                 continue
             filtered_norm.append(it)
 
@@ -8662,9 +9945,12 @@ def export_kb_modifications_smart_merge():
                 mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
 
+        kb_filters = {'question_wiki_id': id_filter_str}
+        if _formal_release_filter_enabled():
+            kb_filters['kb_scope'] = 'eq.formal'
         kb_rows = client.select_all(
             'knowledge_base_v1',
-            filters={'question_wiki_id': id_filter_str},
+            filters=kb_filters,
             order_by='question_wiki_id',
             order_dir='asc',
             columns='question_wiki_id,question,answer,question_type,answer_type,if_bm25,similar_questions,error_list,keyword_list,image_urls,video_urls,file_urls,link_type,link_url,product_name',
@@ -8676,10 +9962,13 @@ def export_kb_modifications_smart_merge():
             if wid:
                 kb_map[wid] = r
 
+        mod_filters = {'kb_id': id_filter_str}
+        if _formal_release_filter_enabled():
+            mod_filters['record_scope'] = 'eq.formal'
         all_mod_rows = client.select_all(
             'knowledge_base_modifications',
-            filters={'kb_id': id_filter_str},
-            order_by='modification_time',
+            filters=mod_filters,
+            order_by='id',
             order_dir='desc',
             page_size=1000
         ) or []
@@ -8689,6 +9978,12 @@ def export_kb_modifications_smart_merge():
             if it and not it.get('archived_at'):
                 all_mod_norm.append(it)
         all_mod_norm = [it for it in all_mod_norm if not _is_archived_mod_item(it, archived_keys)]
+
+        def modification_timestamp(item):
+            parsed = _safe_parse_dt(item.get('modification_time'))
+            return parsed.timestamp() if parsed else float('-inf')
+
+        all_mod_norm.sort(key=modification_timestamp, reverse=True)
 
         by_id = {}
         for it in all_mod_norm:
@@ -8701,16 +9996,17 @@ def export_kb_modifications_smart_merge():
             'error_list', 'keyword_list', 'similar_questions', 'if_bm25',
             'image_urls', 'video_urls', 'file_urls', 'link_type', 'link_url'
         ]
+        content_fields = tuple(fields_b) + ('product_name', 'products')
 
         out_rows = []
         for wid in ids:
             mods = by_id.get(wid, [])
             kb_base = kb_map.get(wid, {}) if isinstance(kb_map.get(wid, {}), dict) else {}
 
-            # The V1 row is the sole current-value source.  Modification rows
-            # only select candidates and provide audit/source metadata.  A
-            # delete event is the explicit exception: when its current row is
-            # gone, export the immutable pre-delete snapshot instead.
+            # The V1 row is the normal current-value source. Modification rows
+            # only select candidates and provide audit/source metadata. Delete
+            # events use their immutable pre-delete snapshot; create events
+            # below use their after snapshot when V1 has not materialized yet.
             latest_mod = mods[0] if mods else {}
             final_opera = latest_mod.get('change_type') or latest_mod.get('opera') or 'edit'
             delete_mod = next((m for m in mods if str(m.get('change_type') or '').lower() in ('delete', 'del', 'remove')), None)
@@ -8724,13 +10020,43 @@ def export_kb_modifications_smart_merge():
                         'repair_required': True,
                         'question_wiki_id': wid,
                     }), 409
-                final_obj = {'question_wiki_id': wid, 'products': delete_snapshot.get('products') or delete_snapshot.get('product_name') or ''}
+                final_obj = {
+                    'question_wiki_id': wid,
+                    'products': _without_hidden_product_models(
+                        delete_snapshot.get('products') or delete_snapshot.get('product_name') or ''
+                    ),
+                }
                 for f in fields_b:
                     final_obj[f] = delete_snapshot.get(f)
             else:
-                final_obj = {'question_wiki_id': wid, 'products': kb_base.get('product_name') or ''}
+                # Newly added records can be present in the modification log
+                # before their V1 row is materialized.  In that window the
+                # create record's after snapshot is the only complete source
+                # for the export; otherwise the current V1 row remains
+                # authoritative.
+                content_source = kb_base
+                create_mod = next(
+                    (
+                        m for m in mods
+                        if str(m.get('change_type') or '').strip().lower()
+                        in ('create', 'insert', 'add', '新增', '增加')
+                    ),
+                    None,
+                )
+                if create_mod and isinstance(create_mod.get('after'), dict):
+                    has_current_content = any(kb_base.get(field) not in (None, '', [], {}) for field in content_fields)
+                    has_snapshot_content = any(create_mod['after'].get(field) not in (None, '', [], {}) for field in content_fields)
+                    if not has_current_content and has_snapshot_content:
+                        content_source = create_mod['after']
+                final_obj = {
+                    'question_wiki_id': wid,
+                    'products': '',
+                }
                 for f in fields_b:
-                    final_obj[f] = kb_base.get(f)
+                    final_obj[f] = content_source.get(f)
+                final_obj['products'] = _without_hidden_product_models(
+                    content_source.get('product_name') or content_source.get('products') or ''
+                )
             op_raw = str(final_opera or '').strip().lower()
             if op_raw in ('create', 'insert', 'add', '新增', '增加'):
                 op_label = '增加'
@@ -9244,15 +10570,26 @@ def _clean_modification_ids(values):
 
 
 def _collect_archive_candidates(client, operation_id=None, ids=None):
-    all_rows = client.select_all('knowledge_base_modifications', order_by='modification_time', order_dir='desc', page_size=1000) or []
+    # Use the unique id as the paging order. Ordering only by modification_time
+    # can repeat/skip tied rows when select_all walks large offset pages.
+    filters = {'record_scope': 'eq.formal'} if _formal_release_filter_enabled() else None
+    all_rows = client.select_all('knowledge_base_modifications', filters=filters, order_by='id', order_dir='asc', page_size=1000) or []
     normalized = []
     raw_ids = []
+    seen_raw_ids = set()
     operation_id = str(operation_id or '').strip()
     selected_ids = _clean_modification_ids(ids)
     selected_id_set = {str(v).strip() for v in selected_ids if str(v).strip()}
     for r in all_rows:
         rid = r.get('id') if isinstance(r, dict) else None
-        if selected_id_set and str(rid).strip() not in selected_id_set:
+        rid_key = str(rid).strip()
+        if selected_id_set and rid_key not in selected_id_set:
+            continue
+        if rid_key:
+            if rid_key in seen_raw_ids:
+                continue
+            seen_raw_ids.add(rid_key)
+        else:
             continue
         it = _normalize_mod_record(r)
         if not it or it.get('archived_at'):
@@ -9260,8 +10597,7 @@ def _collect_archive_candidates(client, operation_id=None, ids=None):
         if operation_id and str(it.get('operation_id') or '').strip() != operation_id:
             continue
         normalized.append(it)
-        if rid is not None:
-            raw_ids.append(rid)
+        raw_ids.append(rid)
     return normalized, raw_ids
 
 
@@ -9524,6 +10860,7 @@ def get_archive_records(batch_id):
             it = json.loads(record_json)
         except Exception:
             continue
+        it = _without_hidden_products_in_mod_item(it)
         if kb_id and kb_id not in str(it.get('question_wiki_id') or ''):
             continue
         if question and str(question).strip().lower() not in str(it.get('question') or '').lower():
@@ -9665,6 +11002,7 @@ def export_archive(batch_id):
             it = json.loads(record_json)
         except Exception:
             continue
+        it = _without_hidden_products_in_mod_item(it)
         if kb_id and kb_id not in str(it.get('question_wiki_id') or ''):
             continue
         if question and str(question).strip().lower() not in str(it.get('question') or '').lower():
@@ -9711,8 +11049,11 @@ def export_archive(batch_id):
         mimetype='text/csv'
     )
 
-def _client_count(client, table, filters=None):
-    resp = client.select(table, page=1, page_size=1, filters=filters or {}, columns='*')
+def _client_count(client, table, filters=None, use_formal=True):
+    resp = client.select(
+        table, page=1, page_size=1, filters=filters or {}, columns='*',
+        use_formal=use_formal,
+    )
     if resp is None or getattr(resp, 'status_code', 500) >= 400:
         raise RuntimeError(getattr(resp, 'text', '') or f'count {table} failed')
     content_range = getattr(resp, 'headers', {}).get('Content-Range') if getattr(resp, 'headers', None) else None
@@ -9887,7 +11228,7 @@ def evaluate_items():
                 id_filter = _postgrest_in_str(batch_ids)
                 if not id_filter:
                     continue
-                resp = client.select('knowledge_base_v1', page_size=1000, filters={'question_wiki_id': id_filter})
+                resp = _formal_select(client, 'knowledge_base_v1', page_size=1000, filters={'question_wiki_id': id_filter})
                 if isinstance(resp, list):
                     for item in resp:
                         if isinstance(item, dict) and item.get('question_wiki_id'):
@@ -9899,7 +11240,7 @@ def evaluate_items():
             
             # 2. Fetch ALL KB Data for Overlap Calculation (Lightweight)
             # Only fetch minimal columns needed
-            all_kb_resp = client.select_all('knowledge_base_v1', columns='question_wiki_id, question, product_name', order_by='question_wiki_id')
+            all_kb_resp = _formal_select_all(client, 'knowledge_base_v1', columns='question_wiki_id, question, product_name', order_by='question_wiki_id')
             overlap_items = []
             for item in all_kb_resp:
                 # Normalize key to 'kb_id' for calculate_product_overlap
@@ -10232,7 +11573,7 @@ def _load_governance_reference_maps():
                 score_map[kb_id] = s
 
             v1_map = {}
-            v1_rows = client.select_all('knowledge_base_v1', columns='question_wiki_id,question', order_by='question_wiki_id', order_dir='asc', page_size=1000) or []
+            v1_rows = _formal_select_all(client, 'knowledge_base_v1', columns='question_wiki_id,question', order_by='question_wiki_id', order_dir='asc', page_size=1000) or []
             for v in v1_rows:
                 if not isinstance(v, dict):
                     continue
@@ -11463,7 +12804,8 @@ def _quality_fetch_kb_items(wiki_ids, columns=None):
     for i in range(0, len(ids), 80):
         batch = ids[i:i + 80]
         try:
-            resp = client.select(
+            resp = _formal_select(
+                client,
                 'knowledge_base_v1',
                 page=1,
                 page_size=len(batch),
@@ -12712,7 +14054,7 @@ class SupabaseClient:
                 def json(self): return {}
             return MockResponse()
 
-    def select(self, table, page=1, page_size=20, filters=None, order_by=None, order_dir='desc', columns='*', count='exact'):
+    def select(self, table, page=1, page_size=20, filters=None, order_by=None, order_dir='desc', columns='*', count='exact', use_formal=True):
         headers = self.headers.copy()
         if count:
             count_val = str(count).strip().lower()
@@ -12791,7 +14133,7 @@ class SupabaseClient:
         }
         return self.session.get(url, headers=headers, timeout=300)
 
-    def update(self, table, data, filters):
+    def update(self, table, data, filters, returning=False):
         _assert_external_write_allowed(f'Supabase update:{table}')
         # filters: dict of {col: val} for equality check or raw operator string
         params = {}
@@ -12801,8 +14143,8 @@ class SupabaseClient:
             else:
                 params[k] = f"eq.{v}"
         try:
-            response = self.session.patch(f"{self.url}/rest/v1/{table}", headers=self.headers, json=data, params=params, timeout=120)
-            if self.enable_outbox and response is not None and getattr(response, "status_code", 0) in (429, 500, 502, 503, 504):
+            response = self.session.patch(f"{self.url}/rest/v1/{table}", headers=({**self.headers, 'Prefer': 'return=representation'} if returning else self.headers), json=data, params=params, timeout=120)
+            if not returning and self.enable_outbox and response is not None and getattr(response, "status_code", 0) in (429, 500, 502, 503, 504):
                 _outbox_enqueue("update", table, payload=data, filters=filters, extra={"params": params}, last_error=getattr(response, "text", ""), status_code=getattr(response, "status_code", None))
                 class MockResponse:
                     status_code = 202
@@ -12811,7 +14153,7 @@ class SupabaseClient:
                 return MockResponse()
             return response
         except Exception as e:
-            if self.enable_outbox:
+            if not returning and self.enable_outbox:
                 _outbox_enqueue("update", table, payload=data, filters=filters, extra={"params": params}, last_error=str(e), status_code=None)
                 class MockResponse:
                     status_code = 202
@@ -12889,7 +14231,7 @@ class SupabaseClient:
                 def json(self): return {}
             return MockResponse()
 
-    def select_all(self, table, filters=None, order_by='id', order_dir='asc', columns='*', page_size=1000):
+    def select_all(self, table, filters=None, order_by='id', order_dir='asc', columns='*', page_size=1000, use_formal=True):
         # Fetch all data using pagination
         all_data = []
         page = 1
@@ -12898,7 +14240,10 @@ class SupabaseClient:
         while True:
             if page % 10 == 0:
                 print(f"DEBUG: Fetching page {page}...")
-            response = self.select(table, page, page_size, filters, order_by, order_dir, columns)
+            response = self.select(
+                table, page, page_size, filters, order_by, order_dir, columns,
+                use_formal=use_formal,
+            )
             if response.status_code >= 400:
                 raise Exception(f"Database Error: {response.text}")
             
@@ -12930,6 +14275,7 @@ class LocalPostgreSQLClient:
         """
         self.config = config
         self.connection = None
+        self._defer_commit = False
         self.host = config.get('host', 'localhost')
         self.port = config.get('port', 5432)
         self.database = config.get('database', 'knowledgebase_local')
@@ -12975,6 +14321,28 @@ class LocalPostgreSQLClient:
         if columns is None or str(columns).strip() == '*' or str(columns).strip() == '':
             return '*'
         return ', '.join(self._quote_field_expr(c.strip()) for c in str(columns).split(',') if c.strip())
+
+    def _formal_read_table(self, table):
+        """Resolve the single formal-read boundary, with a pre-migration fallback."""
+        source = str(table or '').strip()
+        candidate = {
+            'knowledge_base_v1': 'formal_knowledge_base_v1',
+            'knowledge_base_modifications': 'formal_knowledge_base_modifications',
+            'product_matrix': 'formal_product_matrix',
+        }.get(source, source)
+        if candidate == source:
+            return source
+        try:
+            rows = self._execute_query('SELECT to_regclass(%s) AS relation_name',
+                                       [f'public.{candidate}'], fetch=True)
+            if rows and rows[0].get('relation_name'):
+                return candidate
+        except Exception:
+            try:
+                self.connection.rollback()
+            except Exception:
+                pass
+        return source
 
     def _split_postgrest_items(self, raw):
         s = str(raw or '')
@@ -13228,7 +14596,8 @@ class LocalPostgreSQLClient:
                     results = cur.fetchall()
                     return [dict(row) for row in results]
                 else:
-                    self.connection.commit()
+                    if not getattr(self, '_defer_commit', False):
+                        self.connection.commit()
                     return []
         except Exception as e:
             self.connection.rollback()
@@ -13361,8 +14730,61 @@ class LocalPostgreSQLClient:
                 text = str(e)
                 def json(self): return {"error": str(e)}
             return MockResponse()
+
+    def replace_product_matrix(self, rows):
+        """Replace product_matrix in the caller-managed transaction."""
+        _assert_external_write_allowed('Local PostgreSQL replace:product_matrix')
+        self._ensure_connection()
+        columns = (
+            'question_wiki_id', 'product_name', 'is_configured', 'manual_edit',
+            'edit_source', 'last_synced_at', 'question_content', 'answer_content',
+            'update_time', 'product_category', 'release_status',
+            'association_status', 'migration_batch_id', 'product_release_scope',
+        )
+        try:
+            with self.connection.cursor() as cur:
+                cur.execute('DELETE FROM "product_matrix"')
+                if rows:
+                    values = [tuple(row.get(column) for column in columns) for row in rows]
+                    execute_values(
+                        cur,
+                        'INSERT INTO "product_matrix" '
+                        '("question_wiki_id","product_name","is_configured","manual_edit",'
+                        '"edit_source","last_synced_at","question_content","answer_content",'
+                        '"update_time","product_category","release_status","association_status",'
+                        '"migration_batch_id","product_release_scope") VALUES %s '
+                        'ON CONFLICT ("question_wiki_id","product_name") DO UPDATE SET '
+                        '"is_configured"=EXCLUDED."is_configured",'
+                        '"manual_edit"=EXCLUDED."manual_edit",'
+                        '"edit_source"=EXCLUDED."edit_source",'
+                        '"last_synced_at"=EXCLUDED."last_synced_at",'
+                        '"question_content"=EXCLUDED."question_content",'
+                        '"answer_content"=EXCLUDED."answer_content",'
+                        '"update_time"=EXCLUDED."update_time",'
+                        '"product_category"=EXCLUDED."product_category",'
+                        '"release_status"=EXCLUDED."release_status",'
+                        '"association_status"=EXCLUDED."association_status",'
+                        '"migration_batch_id"=EXCLUDED."migration_batch_id",'
+                        '"product_release_scope"=EXCLUDED."product_release_scope"',
+                        values,
+                        page_size=1000,
+                    )
+
+            class MockResponse:
+                status_code = 200
+                text = f'Replaced {len(rows)} rows'
+                def json(self): return {'count': len(rows)}
+            return MockResponse()
+        except Exception as exc:
+            self.connection.rollback()
+            error_text = str(exc)
+            class MockResponse:
+                status_code = 500
+                text = error_text
+                def json(self): return {'error': error_text}
+            return MockResponse()
     
-    def select(self, table, page=1, page_size=20, filters=None, order_by=None, order_dir='desc', columns='*', count='exact'):
+    def select(self, table, page=1, page_size=20, filters=None, order_by=None, order_dir='desc', columns='*', count='exact', use_formal=True):
         """
         查询数据（兼容 SupabaseClient.select）
         :return: MockResponse 对象，包含 .json() 方法和 headers 属性
@@ -13371,7 +14793,10 @@ class LocalPostgreSQLClient:
             # 构建 SELECT 子句
             select_clause = self._quote_select_columns(columns)
             
-            table_sql = self._quote_qualified_identifier(table)
+            # Most reads honor the formal-release boundary. Import consistency
+            # checks must opt out so they compare against the physical V1 table.
+            read_table = self._formal_read_table(table) if use_formal else str(table or '').strip()
+            table_sql = self._quote_qualified_identifier(read_table)
             sql = f"SELECT {select_clause} FROM {table_sql}"
             params = []
             
@@ -13450,7 +14875,7 @@ class LocalPostgreSQLClient:
                 def json(self): return []
             return MockResponse()
     
-    def update(self, table, data, filters):
+    def update(self, table, data, filters, returning=False):
         """
         更新数据（兼容 SupabaseClient.update）
         :param table: 表名
@@ -13491,12 +14916,18 @@ class LocalPostgreSQLClient:
                 if where_conditions:
                     sql += " WHERE " + " AND ".join(where_conditions)
             
-            self._execute_query(sql, values if values else None, fetch=False)
+            if returning:
+                sql += ' RETURNING *'
+            if returning:
+                _assert_external_write_allowed('Local PostgreSQL conditional write')
+            affected_rows = self._execute_query(sql, values if values else None, fetch=returning)
+            if returning and not getattr(self, '_defer_commit', False):
+                self.connection.commit()
             
             class MockResponse:
                 status_code = 200
                 text = "Updated successfully"
-                def json(self): return {"updated": True}
+                def json(self): return affected_rows if returning else {"updated": True}
             return MockResponse()
         
         except Exception as e:
@@ -13580,7 +15011,7 @@ class LocalPostgreSQLClient:
                 def json(self): return {"error": str(e)}
             return MockResponse()
     
-    def select_all(self, table, filters=None, order_by='id', order_dir='asc', columns='*', page_size=1000):
+    def select_all(self, table, filters=None, order_by='id', order_dir='asc', columns='*', page_size=1000, use_formal=True):
         """
         查询所有数据（兼容 SupabaseClient.select_all）
         """
@@ -13588,7 +15019,10 @@ class LocalPostgreSQLClient:
         page = 1
         
         while True:
-            response = self.select(table, page, page_size, filters, order_by, order_dir, columns)
+            response = self.select(
+                table, page, page_size, filters, order_by, order_dir, columns,
+                use_formal=use_formal,
+            )
             if response.status_code >= 400:
                 raise Exception(f"Database Error: {response.text}")
             
@@ -13625,7 +15059,8 @@ class LocalPostgreSQLClient:
 
             # PostgreSQL functions may write rows even though they are invoked
             # with SELECT. Persist those writes before returning success.
-            self.connection.commit()
+            if not getattr(self, '_defer_commit', False):
+                self.connection.commit()
             
             class MockResponse:
                 status_code = 200
@@ -13733,6 +15168,20 @@ class LocalPostgreSQLClient:
             self.connection.close()
             print("🔒 数据库连接已关闭")
 
+    def begin_deferred_transaction(self):
+        self._ensure_connection()
+        self._defer_commit = True
+
+    def commit_deferred_transaction(self):
+        self._ensure_connection()
+        self.connection.commit()
+        self._defer_commit = False
+
+    def rollback_deferred_transaction(self):
+        if self.connection and not self.connection.closed:
+            self.connection.rollback()
+        self._defer_commit = False
+
 
 CONFIG_FILE = 'supabase_config_local.json'
 
@@ -13787,6 +15236,7 @@ def _db_client_unavailable_message():
     return '数据库客户端不可用'
 
 
+comparison_matrix.register_routes(app, db, COMPARISON_MODELS, sys.modules[__name__])
 register_parameter_check_routes(app, login_required, parse_product_catalog)
 register_knowledge_graph_routes(app, login_required, _DB_PATH, PRODUCT_CATALOG_FILE)
 
@@ -14351,6 +15801,7 @@ def _maybe_backfill_matrix_and_logs_from_local_pg(force=False):
 
     try:
         include_button_diff_json = _supabase_has_column(client, 'button', 'diff_json')
+        category_resolver = ProductCategoryResolver(parse_product_catalog())
         btn_columns = 'operation_id,question_wiki_id,product_name,old_is_configured,new_is_configured,edit_source,submitted_by,submitted_at'
         if include_button_diff_json:
             btn_columns += ',diff_json'
@@ -14388,7 +15839,7 @@ def _maybe_backfill_matrix_and_logs_from_local_pg(force=False):
                     'question_content': (r or {}).get('question_content'),
                     'answer_content': (r or {}).get('answer_content'),
                     'update_time': (r or {}).get('update_time'),
-                    'product_category': (r or {}).get('product_category'),
+                    'product_category': category_resolver.resolve((r or {}).get('product_name'), (r or {}).get('product_category')),
                 } if str((r or {}).get('question_wiki_id') or '').strip() and str((r or {}).get('product_name') or '').strip() else None),
                 force=force
             ),
@@ -14532,6 +15983,7 @@ def _maybe_pull_matrix_and_logs_from_supabase(force=False):
             page_size=1000
         )
         to_upsert = []
+        category_resolver = ProductCategoryResolver(parse_product_catalog())
         max_last_synced_at = None
         for r in pm_rows or []:
             wid = str((r or {}).get('question_wiki_id') or '').strip()
@@ -14553,7 +16005,7 @@ def _maybe_pull_matrix_and_logs_from_supabase(force=False):
                 'question_content': (r or {}).get('question_content', None),
                 'answer_content': (r or {}).get('answer_content', None),
                 'update_time': (r or {}).get('update_time', None),
-                'product_category': (r or {}).get('product_category', None)
+                'product_category': category_resolver.resolve(pn, (r or {}).get('product_category'))
             })
         if to_upsert:
             _upsert_sqlite_rows(ProductMatrix, to_upsert, conflict_cols=('question_wiki_id', 'product_name'))
@@ -15032,6 +16484,13 @@ def _kb_import_column_mapping():
     }
 
 
+def _apply_kb_import_system_fields(record):
+    """Keep bulk imports on the formal KB path regardless of file columns."""
+    normalized = dict(record or {})
+    normalized['kb_scope'] = 'formal'
+    return normalized
+
+
 _KB_MAIL_ALLOWED_EXTENSIONS = {'.xlsx', '.xls', '.csv'}
 _KB_MAIL_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 _KB_MAIL_CACHE_TTL_SECONDS = 10 * 60
@@ -15039,6 +16498,7 @@ _KB_MAIL_CACHE_MAX_BYTES = 10 * 1024 * 1024
 _KB_MAIL_KEYCHAIN_ACCOUNT = 'knowbase-hub'
 _KB_MAIL_KEYCHAIN_EMAIL_SERVICE = 'com.kmatrix.knowbase-hub.feishu-imap.email'
 _KB_MAIL_KEYCHAIN_PASSWORD_SERVICE = 'com.kmatrix.knowbase-hub.feishu-imap.password'
+_KB_MAIL_LEGACY_KEYCHAIN_SERVICE = 'auto-download-emails'
 _kb_mail_cache_lock = threading.Lock()
 _kb_mail_cache = None
 _kb_mail_cache_timer = None
@@ -15088,35 +16548,79 @@ def _read_kb_mail_keychain_value(service):
     return result.stdout.strip() if result.returncode == 0 else ''
 
 
+def _read_kb_mail_legacy_keychain_password(email_address):
+    """Read the credential used by the original standalone mail downloader."""
+    if sys.platform != 'darwin' or not email_address:
+        return ''
+    service = str(
+        os.environ.get('FEISHU_IMAP_KEYCHAIN_SERVICE')
+        or _KB_MAIL_LEGACY_KEYCHAIN_SERVICE
+    ).strip()
+    if not service:
+        return ''
+    try:
+        result = subprocess.run(
+            [
+                '/usr/bin/security', 'find-generic-password',
+                '-a', email_address,
+                '-s', service,
+                '-w',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+    return result.stdout.strip() if result.returncode == 0 else ''
+
+
 def _kb_mail_config():
     email_address = str(
         os.environ.get('KMATRIX_IMAP_EMAIL')
+        or os.environ.get('FEISHU_IMAP_EMAIL')
         or _read_kb_mail_keychain_value(_KB_MAIL_KEYCHAIN_EMAIL_SERVICE)
         or ''
     ).strip()
     password = str(
         os.environ.get('KMATRIX_IMAP_PASSWORD')
+        or os.environ.get('FEISHU_IMAP_PASSWORD')
         or _read_kb_mail_keychain_value(_KB_MAIL_KEYCHAIN_PASSWORD_SERVICE)
+        or _read_kb_mail_legacy_keychain_password(email_address)
         or ''
     ).strip()
     if not email_address or not password:
         raise ValueError(
-            '飞书邮箱未配置，请设置 KMATRIX_IMAP_EMAIL/KMATRIX_IMAP_PASSWORD 或 macOS 钥匙串凭证；'
+            '飞书邮箱未配置，请设置 KMATRIX_IMAP_EMAIL/KMATRIX_IMAP_PASSWORD（兼容 FEISHU_IMAP_EMAIL/FEISHU_IMAP_PASSWORD）'
+            '或 macOS 钥匙串凭证；'
             '也可双击 KnowledgeBaseTool_Local/mac脚本/configure_feishu_imap_keychain.command 安全录入。'
         )
 
     try:
-        port = int(os.environ.get('KMATRIX_IMAP_PORT', '993'))
-        scan_days = int(os.environ.get('KMATRIX_IMAP_SCAN_DAYS', '7'))
+        port = int(os.environ.get('KMATRIX_IMAP_PORT') or os.environ.get('FEISHU_IMAP_PORT') or '993')
+        scan_days = int(
+            os.environ.get('KMATRIX_IMAP_SCAN_DAYS')
+            or os.environ.get('FEISHU_IMAP_SCAN_DAYS')
+            or '7'
+        )
     except ValueError as exc:
         raise ValueError('KMATRIX_IMAP_PORT 和 KMATRIX_IMAP_SCAN_DAYS 必须为整数。') from exc
 
     return {
         'email': email_address,
         'password': password,
-        'host': str(os.environ.get('KMATRIX_IMAP_HOST') or 'imap.feishu.cn').strip(),
+        'host': str(
+            os.environ.get('KMATRIX_IMAP_HOST')
+            or os.environ.get('FEISHU_IMAP_HOST')
+            or 'imap.feishu.cn'
+        ).strip(),
         'port': max(1, min(port, 65535)),
-        'keyword': str(os.environ.get('KMATRIX_IMAP_SUBJECT_KEYWORD') or '最新KB').strip(),
+        'keyword': str(
+            os.environ.get('KMATRIX_IMAP_SUBJECT_KEYWORD')
+            or os.environ.get('FEISHU_IMAP_KEYWORD')
+            or '最新KB'
+        ).strip(),
         'scan_days': max(1, min(scan_days, 30)),
     }
 
@@ -15581,58 +17085,16 @@ def kb_import():
         # 规则：根据该行的 product_name（可能是多个型号逗号分隔）反查其所属分类；
         # 若命中多个分类，用英文逗号连接，排序后写入 product_category_name
         try:
-            catalog = parse_product_catalog() or {}
-            # 建立 归一化型号 -> 分类集合 的映射，提高匹配鲁棒性
-            norm_model_to_categories = {}
-            for cat, models in (catalog.items() if isinstance(catalog, dict) else []):
-                if not cat: continue
-                if not isinstance(models, list): continue
-                for m in models:
-                    ms = str(m).strip()
-                    if not ms: continue
-                    # 归一化处理（去空格，转小写）
-                    norm_key = ms.replace(" ", "").lower()
-                    norm_model_to_categories.setdefault(norm_key, set()).add(str(cat).strip())
-
+            resolver = ProductCategoryResolver(parse_product_catalog())
             if 'product_name' in df.columns:
                 if 'product_category_name' not in df.columns:
                     df['product_category_name'] = ''
-
                 for idx, row in df.iterrows():
-                    cur_cat = str(row.get('product_category_name') or '').strip()
-                    # 如果分类已存在（且不是 nan/null 等），则跳过自动回填，尊重手动设置
-                    if cur_cat and cur_cat.lower() not in ('nan', 'null', 'none'):
+                    if not category_is_blank(row.get('product_category_name')):
                         continue
-                    
-                    raw_models = str(row.get('product_name') or '').strip()
-                    if not raw_models or raw_models.lower() in ('nan', 'null', 'none'):
-                        continue
-                    
-                    # split and normalize each model for matching
-                    parts = [p.strip() for p in re.split(r'[,，]', raw_models) if p.strip()]
-                    cats = set()
-                    for p in parts:
-                        # 同样进行归一化匹配
-                        p_norm = p.replace(" ", "").lower()
-                        
-                        # 1. 精确匹配
-                        hit = norm_model_to_categories.get(p_norm)
-                        if hit:
-                            cats.update(hit)
-                            continue
-                            
-                        # 2. 模糊匹配：如果输入是 "P10S Pro"，目录里是 "P10S Pro 系列"
-                        # 或者输入带了“系列”，目录里没带
-                        p_pure = p_norm.replace("系列", "").replace("series", "")
-                        for norm_key, cat_set in norm_model_to_categories.items():
-                            norm_pure = norm_key.replace("系列", "").replace("series", "")
-                            if p_pure == norm_pure:
-                                cats.update(cat_set)
-                                break
-                    
-                    if cats:
-                        df.at[idx, 'product_category_name'] = ",".join(sorted(cats))
-                        print(f"[Import] Auto-filled categories for row {idx+2} ({raw_models}): {df.at[idx, 'product_category_name']}")
+                    category = resolver.resolve(row.get('product_name'))
+                    if category:
+                        df.at[idx, 'product_category_name'] = category
         except Exception as _e:
             # 回填失败不阻断导入，保持兼容
             print(f"WARN: auto fill product_category_name failed: {_e}")
@@ -15763,6 +17225,7 @@ def kb_import():
                     'product_name'
                 ]
                 cleaned_record = {k: cleaned_record.get(k) for k in allow if k in cleaned_record}
+                cleaned_record = _apply_kb_import_system_fields(cleaned_record)
             
             # Remove question_wiki_id if it is None/Empty to allow auto-increment (if supported)
             # or avoid sending null for PK
@@ -15847,7 +17310,7 @@ def kb_import():
                 }), 409
 
         if mode == 'overwrite':
-            current_count = _client_count(client, 'knowledge_base_v1')
+            current_count = _client_count(client, 'knowledge_base_v1', use_formal=False)
             score_count = _client_count(client, 'kb_scores')
             confirm_overwrite = str(request.form.get('confirm_overwrite') or '').strip().lower() in ('1', 'true', 'yes', 'y')
             if not confirm_overwrite:
@@ -15882,6 +17345,10 @@ def kb_import():
 
         # Capture the authoritative pre-import business state only after all user
         # confirmations passed, so cancelled imports never create a sync event.
+        import_transaction_started = False
+        if isinstance(client, LocalPostgreSQLClient):
+            client.begin_deferred_transaction()
+            import_transaction_started = True
         before_sync_rows = _read_v1_sync_rows(client)
 
         # Mode 2: Overwrite (Clear all data first)
@@ -16122,6 +17589,8 @@ def kb_import():
                     client, 'knowledge_base_v1', v1_backup_rows, conflict_col='question_wiki_id'
                 )
                 restore_info['score_restore'] = _restore_table_rows(client, 'kb_scores', score_backup_rows, conflict_col='id')
+            if import_transaction_started:
+                client.rollback_deferred_transaction()
             return jsonify({
                 'success': False,
                 'message': f"Import failed/partial. Errors: {error_summary}",
@@ -16137,6 +17606,8 @@ def kb_import():
         if delete_missing_ids:
             delete_missing_result = _delete_kb_items_physical(client, delete_missing_ids)
             if not delete_missing_result.get('success'):
+                if import_transaction_started:
+                    client.rollback_deferred_transaction()
                 return jsonify({
                     'success': False,
                     'message': delete_missing_result.get('message') or '导入已执行，但物理删除缺失 ID 失败。',
@@ -16166,10 +17637,17 @@ def kb_import():
             out['score_backup_path'] = score_backup_path
         if delete_missing_result is not None:
             out['delete_missing'] = delete_missing_result
+        if import_transaction_started:
+            client.commit_deferred_transaction()
         return jsonify(out)
 
     except Exception as e:
         traceback.print_exc()
+        if 'import_transaction_started' in locals() and import_transaction_started:
+            try:
+                client.rollback_deferred_transaction()
+            except Exception:
+                pass
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/kb/import/preview', methods=['POST'])
@@ -16234,7 +17712,7 @@ def kb_import_preview():
                             'invalid_models': invalid
                         })
 
-        current_count = _client_count(client, 'knowledge_base_v1')
+        current_count = _client_count(client, 'knowledge_base_v1', use_formal=False)
         score_count = _client_count(client, 'kb_scores')
         return jsonify({
             'success': True,
@@ -16588,6 +18066,11 @@ def kb_item_upsert():
         # Perform Upsert
         # Note: data must contain primary key for upsert to update. 
         # If question_wiki_id is missing, Supabase might insert new if it's auto-generated, or fail.
+        effective_row = dict(before_row or {})
+        effective_row.update(data)
+        _fill_kb_product_category(effective_row)
+        if effective_row.get('product_category_name') != (before_row or {}).get('product_category_name'):
+            data['product_category_name'] = effective_row.get('product_category_name')
         resp = client.upsert('knowledge_base_v1', [data], on_conflict='question_wiki_id')
         
         if resp.status_code >= 400:
@@ -18804,6 +20287,36 @@ def _sm_db_get_job(job_id):
                 return None
         return None
 
+def _sm_db_get_latest_job(username):
+    """Return the most recent persisted smart-mapping job for this user.
+
+    Compare results are persisted in SQLite while the workbench itself is a
+    browser cache.  Keeping this lookup server-side lets a refreshed browser
+    recover the last completed run when its localStorage cache was cleared or
+    the page was opened on a different frontend origin.
+    """
+    try:
+        query = SmartMappingJob.query
+        if username:
+            query = query.filter_by(username=str(username))
+        return query.filter(SmartMappingJob.status == 'done').order_by(
+            SmartMappingJob.updated_ts.desc(), SmartMappingJob.created_ts.desc()
+        ).first()
+    except Exception as e:
+        msg = str(e).lower()
+        if 'no such table' in msg and 'smart_mapping_job' in msg:
+            try:
+                init_db()
+                query = SmartMappingJob.query
+                if username:
+                    query = query.filter_by(username=str(username))
+                return query.filter(SmartMappingJob.status == 'done').order_by(
+                    SmartMappingJob.updated_ts.desc(), SmartMappingJob.created_ts.desc()
+                ).first()
+            except Exception:
+                return None
+        return None
+
 def _sm_cleanup(ttl_sec=3600):
     now = time.time()
     global _SM_DB_CLEAN_TS
@@ -19697,6 +21210,32 @@ def sm_compare_status():
     })
 
 
+@app.route('/api/smart_mapping/compare/latest', methods=['GET'])
+@login_required
+def sm_compare_latest():
+    """Load the latest completed run so the workbench survives browser cache loss."""
+    job = _sm_db_get_latest_job(current_user.username if current_user.is_authenticated else '')
+    if not job:
+        return jsonify({'success': True, 'found': False, 'results': []})
+    try:
+        results = json.loads(job.results_json or '[]') or []
+    except Exception:
+        results = []
+    if not isinstance(results, list) or not results:
+        return jsonify({'success': True, 'found': False, 'results': []})
+    return jsonify({
+        'success': True,
+        'found': True,
+        'job_id': job.job_id,
+        'status': job.status,
+        'total': int(job.total or len(results)),
+        'done': int(job.done or len(results)),
+        'message': job.message or '',
+        'updated_ts': job.updated_ts,
+        'results': results,
+    })
+
+
 @app.route('/api/smart_mapping/embedding/score', methods=['POST'])
 @login_required
 def sm_embedding_score():
@@ -20219,7 +21758,8 @@ def _fetch_kb_products_map(table_name, wiki_ids):
             if not in_str:
                 continue
             try:
-                rows = client.select_all(
+                rows = _formal_select_all(
+                    client,
                     table_name,
                     filters={'question_wiki_id': in_str},
                     columns='question_wiki_id,product_name',
@@ -20442,7 +21982,7 @@ def get_matrix_data():
         
         catalog = parse_product_catalog()
         product_categories = [str(k) for k in catalog.keys() if k and str(k).strip()]
-        mapping_categories = sorted([str(k) for k in mappings.keys()])
+        mapping_categories = get_model_mapping_category_order(mappings)
         
         pc_models = []
         if pc:
@@ -20486,7 +22026,15 @@ def get_matrix_data():
             columns = col_query.all()
             col_list = [c.product_name for c in columns]  # Return names directly as per frontend expectation
 
-        col_list = [c for c in (col_list or []) if str(c or '').strip() and str(c or '').strip() != '测试型号']
+        col_list = [
+            c for c in (col_list or [])
+            if str(c or '').strip()
+            and str(c or '').strip() != '测试型号'
+            and not _is_hidden_product_model(c)
+        ]
+        if _formal_release_filter_enabled():
+            released_models = _released_catalog_model_names()
+            col_list = [c for c in col_list if c in released_models]
         
         if not col_list:
             return jsonify({
@@ -20506,6 +22054,8 @@ def get_matrix_data():
         # Using distinct() on wiki_id.
         
         base_query = db.session.query(ProductMatrix.question_wiki_id)
+        if _formal_release_filter_enabled():
+            base_query = base_query.filter(ProductMatrix.product_name.in_(col_list))
         
         if wid:
             base_query = base_query.filter(ProductMatrix.question_wiki_id.ilike(f'%{wid}%'))
@@ -20866,6 +22416,8 @@ def get_matrix_mark_total():
             return jsonify({'success': True, 'total': 0, 'base_total': 0})
 
         base_query = db.session.query(ProductMatrix.question_wiki_id)
+        if _formal_release_filter_enabled():
+            base_query = base_query.filter(ProductMatrix.product_name.in_(col_list))
 
         if wid:
             base_query = base_query.filter(ProductMatrix.question_wiki_id.ilike(f'%{wid}%'))
@@ -21130,12 +22682,22 @@ def export_matrix_data():
         else:
             columns = col_query.all()
             col_list = [c.product_name for c in columns]
-        col_list = [c for c in (col_list or []) if str(c or '').strip() and str(c or '').strip() != '测试型号']
+        col_list = [
+            c for c in (col_list or [])
+            if str(c or '').strip()
+            and str(c or '').strip() != '测试型号'
+            and not _is_hidden_product_model(c)
+        ]
+        if _formal_release_filter_enabled():
+            released_models = _released_catalog_model_names()
+            col_list = [c for c in col_list if c in released_models]
         
         if not col_list:
             return jsonify({'success': False, 'message': 'No columns found'}), 404
 
         base_query = db.session.query(ProductMatrix.question_wiki_id)
+        if _formal_release_filter_enabled():
+            base_query = base_query.filter(ProductMatrix.product_name.in_(col_list))
         
         if wid:
             base_query = base_query.filter(ProductMatrix.question_wiki_id.ilike(f'%{wid}%'))
@@ -21588,6 +23150,33 @@ def get_matrix_mismatch_changes():
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
+def _sync_submit_matrix_columns(client, changes):
+    """Register locally validated model columns before the authoritative RPC."""
+    product_names = sorted({
+        str(change.get('product_name') or '').strip()
+        for change in (changes or [])
+        if str(change.get('product_name') or '').strip()
+    })
+    if not product_names:
+        return 0
+
+    columns = MatrixColumn.query.filter(MatrixColumn.product_name.in_(product_names)).all()
+    columns_by_name = {str(column.product_name): column for column in columns}
+    missing = [name for name in product_names if name not in columns_by_name]
+    if missing:
+        raise RuntimeError(f'本地矩阵缺少型号列: {", ".join(missing)}')
+
+    payload = [{
+        'product_name': name,
+        'sort_order': int(columns_by_name[name].sort_order or 0),
+    } for name in product_names]
+    response = client.upsert('matrix_column', payload, on_conflict='product_name')
+    if response is None or getattr(response, 'status_code', 500) >= 400:
+        detail = getattr(response, 'text', '') if response is not None else 'no response'
+        raise RuntimeError(f'主库型号列同步失败: {detail or "unknown error"}')
+    return len(payload)
+
+
 @app.route('/api/matrix/submit_changes', methods=['POST'])
 @login_required
 def submit_matrix_changes():
@@ -21600,6 +23189,7 @@ def submit_matrix_changes():
     except Exception:
         attempt = 1
     changes = data.get('changes') or []
+    pending_result = None
     
     if not isinstance(changes, list) or len(changes) == 0:
         return jsonify({'success': False, 'message': 'No changes'}), 400
@@ -21607,6 +23197,38 @@ def submit_matrix_changes():
     
     if errors:
         return jsonify({'success': False, 'message': 'Validation failed', 'errors': errors}), 400
+
+    # Pending-release target models must not enter the formal modification log.
+    # Keep the matrix/button write intact, but route their audit records through
+    # the dedicated pending ledger and let model release promote them later.
+    release_status_by_model = {
+        str(row.get('model_id') or row.get('model') or '').strip(): str(row.get('release_status') or 'released')
+        for row in _catalog_release_rows()
+    }
+    unknown_models = sorted({
+        str(change.get('product_name') or '').strip()
+        for change in normalized
+        if release_status_by_model.get(str(change.get('product_name') or '').strip()) == 'unknown'
+    })
+    missing_models = sorted({
+        str(change.get('product_name') or '').strip()
+        for change in normalized
+        if str(change.get('product_name') or '').strip() not in release_status_by_model
+    })
+    if unknown_models or missing_models:
+        affected = unknown_models + [model for model in missing_models if model not in unknown_models]
+        return jsonify({
+            'success': False,
+            'code': 'model_release_status_unknown',
+            'message': '无法确认目标型号的上线状态，已阻止提交，避免误写正式修改记录',
+            'models': affected,
+        }), 409
+
+    pending_changes = [
+        change for change in normalized
+        if release_status_by_model.get(str(change.get('product_name') or '').strip()) == 'pending_release'
+    ]
+    formal_changes = [change for change in normalized if change not in pending_changes]
 
     blocked_batches = _active_clone_review_batches_for_changes(normalized)
     if blocked_batches:
@@ -21631,14 +23253,23 @@ def submit_matrix_changes():
     # Otherwise a blocked or stale clone batch could be committed remotely and
     # only then receive a 409 response from this process.
     unified_remote = None
-    if is_supabase_matrix_enabled():
+    if is_supabase_matrix_enabled() and formal_changes and not pending_changes:
         remote_client = get_supabase_client()
         if remote_client:
+            try:
+                _sync_submit_matrix_columns(remote_client, normalized)
+            except RuntimeError as exc:
+                return jsonify({
+                    'success': False,
+                    'code': 'matrix_column_sync_failed',
+                    'message': str(exc),
+                    'operation_id': operation_id,
+                }), 409
             rpc_response = remote_client.rpc('public.submit_matrix_changes_unified', {
                 'p_operation_id': operation_id,
                 'p_actor': current_user.username,
                 'p_source_code': source_code,
-                'p_changes': normalized,
+                'p_changes': formal_changes,
             })
             if rpc_response is None or getattr(rpc_response, 'status_code', 500) >= 400:
                 return jsonify({
@@ -21834,6 +23465,17 @@ def submit_matrix_changes():
                 if not supabase_info['button']['ok']:
                     raise RuntimeError(f"按钮提交日志写入失败 ({supabase_info['button']['status_code']}): {supabase_info['button']['text'] or 'unknown error'}")
         
+        if pending_changes:
+            pending_result = _NEW_PRODUCT_RELEASE_SERVICE.record_matrix_changes(
+                pending_changes,
+                actor=current_user.username,
+                source_module='新品录入' if source_code == 'new_product_entry' else '机型矩阵管理',
+                operation_id=operation_id,
+                pending_model_ids=list({str(c.get('product_name') or '').strip() for c in pending_changes}),
+            )
+            if not pending_result.get('ok'):
+                raise RuntimeError(pending_result.get('message') or '待上线修改记录写入失败，已阻止矩阵提交落库')
+
         existing_op.status = 'success'
         _mark_ready_clone_review_batches_submitted()
         db.session.commit()
@@ -21882,6 +23524,8 @@ def submit_matrix_changes():
                         _supabase_upsert_chunks(client, 'button', btn_payload, on_conflict='operation_id,question_wiki_id,product_name', chunk_size=500)
                     matrix_payload = []
                     for row in submitted_matrix_rows:
+                        row_model = str(row.product_name or '').strip()
+                        row_release_status = release_status_by_model[row_model]
                         matrix_payload.append({
                             'question_wiki_id': str(row.question_wiki_id or '').strip(),
                             'product_name': str(row.product_name or '').strip(),
@@ -21893,6 +23537,9 @@ def submit_matrix_changes():
                             'answer_content': row.answer_content,
                             'update_time': row.update_time,
                             'product_category': row.product_category,
+                            'release_status': row_release_status,
+                            'association_status': 'pending_release' if row_release_status == 'pending_release' else 'active',
+                            'product_release_scope': 'pending' if row_release_status == 'pending_release' else 'formal',
                         })
                     if matrix_payload:
                         _supabase_upsert_chunks(
@@ -21924,13 +23571,13 @@ def submit_matrix_changes():
                 kb_rows = _fetch_kb_detail_map(wiki_ids)
                 
                 wid_to_changes = {}
-                for c in normalized:
+                for c in formal_changes:
                     wid = str(c.get('question_wiki_id') or '').strip()
                     if not wid:
                         continue
                     wid_to_changes.setdefault(wid, []).append(c)
 
-                snapshot_map = _build_matrix_submit_snapshot_map(normalized, kb_rows)
+                snapshot_map = _build_matrix_submit_snapshot_map(formal_changes, kb_rows)
                 mod_records = []
                 for wid, cs in wid_to_changes.items():
                     base = kb_rows.get(wid, {})
@@ -21987,13 +23634,19 @@ def submit_matrix_changes():
             pass
         except Exception as e:
             warnings.append(f"修改记录写入异常: {str(e)}")
-        
+
         out = {'success': True, 'operation_id': operation_id, 'written': len(to_write), 'supabase': supabase_info}
         if warnings:
             out['warnings'] = warnings
         return jsonify(out)
     except Exception as e:
         db.session.rollback()
+        if pending_changes and pending_result and pending_result.get('ok'):
+            _NEW_PRODUCT_RELEASE_SERVICE.compensate_matrix_operation(
+                operation_id,
+                actor=current_user.username,
+                reason=f'矩阵提交事务失败: {str(e)[:300]}',
+            )
         try:
             op = MatrixSubmitOperation.query.filter_by(operation_id=operation_id).first()
             if not op:
@@ -22182,7 +23835,10 @@ def get_matrix_products():
         data_products_res = db.session.query(ProductMatrix.product_name).distinct().all()
         data_products = {p[0] for p in data_products_res if p[0]}
         
-        all_products = sorted(list(catalog_products | db_products | data_products))
+        all_products = sorted(
+            product for product in (catalog_products | db_products | data_products)
+            if not _is_hidden_product_model(product)
+        )
         return jsonify({
             'success': True, 
             'data': all_products,
@@ -22345,6 +24001,7 @@ def _clone_review_rule_payload(row):
         'target_model': row.target_model,
         'feature_id': row.feature_id,
         'feature_name': row.feature_name,
+        'context': row.context or '',
         'source_value': row.source_value,
         'target_value': row.target_value,
         'difference_type': row.difference_type,
@@ -22360,6 +24017,49 @@ def _clone_review_rule_payload(row):
 
 def _clone_review_item_has_detection_error(row):
     return row.detection_status in {'pending_scan', 'scan_failed', 'stale'}
+
+
+def _clone_review_item_has_unresolved_detection_error(row):
+    if not _clone_review_item_has_detection_error(row):
+        return False
+    return not (
+        row.detection_status == 'scan_failed'
+        and bool(row.decided_by)
+        and row.decision in {'keep', 'link_existing', 'remove_target'}
+        and row.apply_status in {'applied', 'not_required'}
+    )
+
+
+def _clone_review_batch_error_is_resolved_by_manual_decisions(batch, items):
+    detection_error_items = [item for item in items if _clone_review_item_has_detection_error(item)]
+    return bool(
+        batch.error_message
+        and detection_error_items
+        and not any(_clone_review_item_has_unresolved_detection_error(item) for item in detection_error_items)
+    )
+
+
+def _clone_review_rule_is_resolved_by_manual_decisions(rule, items):
+    if rule.status != 'source_conflict':
+        return False
+    linked_items = [
+        item for item in items
+        if str(rule.rule_id) in {
+            str(rule_id)
+            for rule_id in _clone_review_json(item.difference_rule_ids_json, [])
+        }
+    ]
+    return not linked_items or all(
+        not _clone_review_item_requires_attention(item)
+        for item in linked_items
+    )
+
+
+def _clone_review_hard_rule_is_unresolved(rule, items):
+    return (
+        rule.status in {'pending_parse', 'source_conflict', 'parse_failed', 'stale'}
+        and not _clone_review_rule_is_resolved_by_manual_decisions(rule, items)
+    )
 
 
 def _normalize_clone_review_default_item(row):
@@ -22393,7 +24093,7 @@ def _clone_review_item_is_default_pass(row):
 def _clone_review_item_requires_attention(row):
     if row.detection_status == 'source_removed':
         return False
-    if _clone_review_item_has_detection_error(row):
+    if _clone_review_item_has_unresolved_detection_error(row):
         return True
     if _clone_review_item_ai_pending(row):
         return True
@@ -22464,7 +24164,11 @@ def _clone_review_batch_requires_completion(batch, rules=None, items=None):
     items = items if items is not None else MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all()
     for item_index, item in enumerate(items, start=1):
         _normalize_clone_review_default_item(item)
-    if any(rule.status in {'needs_confirmation', 'pending_parse', 'source_conflict', 'parse_failed', 'stale'} for rule in rules):
+    if any(
+        rule.status == 'needs_confirmation'
+        or _clone_review_hard_rule_is_unresolved(rule, items)
+        for rule in rules
+    ):
         return True
     if any(
         _clone_review_item_requires_attention(item)
@@ -22473,7 +24177,11 @@ def _clone_review_batch_requires_completion(batch, rules=None, items=None):
         return True
     if methods == ['manual_difference_ai'] and not batch.manual_scope_confirmed_by:
         return True
-    if 'parameter_check' in methods and batch.error_message:
+    if (
+        'parameter_check' in methods
+        and batch.error_message
+        and not _clone_review_batch_error_is_resolved_by_manual_decisions(batch, items)
+    ):
         return True
     return False
 
@@ -22719,13 +24427,19 @@ def _clone_review_batch_payload(batch, include_items=True):
             scope_snapshot.get('exclude_tag_names')
         )
         payload['excluded_count'] = int(scope_snapshot.get('excluded_count') or 0)
+        payload['parse_warnings'] = scope_snapshot.get('parse_warnings') or []
     if isinstance(scope_snapshot, dict) and scope_snapshot.get('parameter_refresh'):
         payload['parameter_refresh'] = scope_snapshot['parameter_refresh']
     methods = _clone_review_json(batch.detection_methods_json, [])
+    parameter_refresh = scope_snapshot.get('parameter_refresh') if isinstance(scope_snapshot, dict) else {}
+    parameter_snapshot_id = str((parameter_refresh or {}).get('snapshot_id') or '').strip()
+    parameter_category = str((parameter_refresh or {}).get('category_name') or '').strip()
     if 'parameter_check' in methods and include_items:
         parameter_rules, parameter_error = _clone_review_parameter_difference_rules(
             batch.source_value,
             (_clone_review_json(batch.target_models_json, []) or [''])[0],
+            snapshot_id=parameter_snapshot_id or None,
+            category_name=parameter_category or None,
         )
         parameter_rules = _clone_review_parameter_rules_with_ids(parameter_rules)
         payload['parameter_rules'] = parameter_rules
@@ -22738,7 +24452,11 @@ def _clone_review_batch_payload(batch, include_items=True):
         ]
         target_model = (_clone_review_json(batch.target_models_json, []) or [''])[0]
         audit_rows, audit_error = _clone_review_parameter_catalog_audit(
-            manual_rules, batch.source_value, target_model,
+            manual_rules,
+            batch.source_value,
+            target_model,
+            snapshot_id=parameter_snapshot_id or None,
+            category_name=parameter_category or None,
         )
         payload['parameter_catalog_audit'] = {
             'source': 'ParamAggregator 8511',
@@ -22835,7 +24553,7 @@ def _clone_review_backup_workbook(batch, items, rules):
 
     rule_sheet = workbook.create_sheet('差异规则')
     rule_headers = [
-        'rule_id', 'batch_id', 'target_model', 'feature_id', 'feature_name',
+        'rule_id', 'batch_id', 'target_model', 'feature_id', 'feature_name', 'context',
         'source_value', 'target_value', 'difference_type', 'evidence_sources_json',
         'source_search_terms_json', 'target_search_terms_json', 'kb_intents_json',
         'evidence_quote', 'status', 'rule_version', 'created_at',
@@ -22844,7 +24562,7 @@ def _clone_review_backup_workbook(batch, items, rules):
     for rule in rules:
         _append_clone_review_backup_row(rule_sheet, [
             rule.rule_id, rule.batch_id, rule.target_model, rule.feature_id,
-            rule.feature_name or '', rule.source_value or '', rule.target_value or '',
+            rule.feature_name or '', rule.context or '', rule.source_value or '', rule.target_value or '',
             rule.difference_type, rule.evidence_sources_json or '[]',
             rule.source_search_terms_json or '[]', rule.target_search_terms_json or '[]',
             rule.kb_intents_json or '[]', rule.evidence_quote or '', rule.status,
@@ -22860,15 +24578,21 @@ def _clone_review_backup_workbook(batch, items, rules):
     return workbook
 
 
-def _clone_review_ai_rules(manual_text, target_model):
-    deterministic = parse_manual_difference_text(manual_text, target_model=target_model)
+def _clone_review_ai_rules(manual_text, target_model, source_model='', include_warnings=False):
+    deterministic, parse_warnings = parse_manual_difference_text_with_warnings(
+        manual_text,
+        target_model=target_model,
+        source_model=source_model,
+    )
+    def result(rules, status):
+        return (rules, status, parse_warnings) if include_warnings else (rules, status)
     # Deterministic parsing is the stable baseline. AI only supplements fields it cannot parse.
     ai_switch = str(os.environ.get('MATRIX_CLONE_REVIEW_AI_SYNC', '1') or '').strip().lower()
     if ai_switch in {'0', 'false', 'no', 'off'}:
-        return deterministic, ('completed_deterministic' if deterministic else 'needs_confirmation')
+        return result(deterministic, 'completed_deterministic' if deterministic else 'needs_confirmation')
     config = load_ai_config() or {}
     if not all(str(config.get(key) or '').strip() for key in ('api_key', 'base_url', 'model')):
-        return deterministic, ('completed_deterministic' if deterministic else 'needs_confirmation')
+        return result(deterministic, 'completed_deterministic' if deterministic else 'needs_confirmation')
     system_prompt = (
         '你是知识库机型差异规则辅助解析器。确定性解析结果是基准，不能改写、反转或覆盖它；'
         '你只补充基准未识别的字段。只提取用户原文明确写出的旧型号(source)和目标型号(target)事实，'
@@ -22876,7 +24600,7 @@ def _clone_review_ai_rules(manual_text, target_model):
         '按一个功能字段输出一条规则，绝不能把同一句中的不同单位交叉配对；两边数值相同则不输出规则。'
         'model order may be target first or source first; use the model labels, never the text order. '
         '返回严格 JSON 对象，字段 rules 为数组；每项包含 feature_id、feature_name、source_value、'
-        'target_value、difference_type、source_search_terms、target_search_terms、kb_intents、'
+        'target_value、context、difference_type、source_search_terms、target_search_terms、kb_intents、'
         'confidence、evidence_quote。evidence_quote 必须是原文连续片段。'
     )
     known_features = [
@@ -22901,9 +24625,17 @@ def _clone_review_ai_rules(manual_text, target_model):
             if str(rule.get('feature_id') or '') not in known_feature_ids
         ]
         merged = merge_difference_rules(deterministic, ai_rules)
-        return merged, ('completed_ai' if ai_rules else ('completed_ai_no_change' if deterministic else 'parse_failed'))
-    except Exception:
-        return deterministic, ('completed_ai_fallback' if deterministic else 'parse_failed')
+        return result(merged, 'completed_ai' if ai_rules else ('completed_ai_no_change' if deterministic else 'parse_failed'))
+    except Exception as exc:
+        # Keep the deterministic rules, but expose the actual AI failure in
+        # the batch payload so the UI does not present a silent fallback as a
+        # successful parse.
+        parse_warnings.append({
+            'code': 'ai_parse_failed',
+            'message': f'AI 差异解析失败，已保留确定性规则：{str(exc)[:240]}',
+            'evidence': '',
+        })
+        return result(deterministic, 'completed_ai_fallback' if deterministic else 'parse_failed')
 
 
 def _clone_review_parameter_category(source_model, target_model):
@@ -23214,29 +24946,142 @@ def _clone_review_candidate_priority(evidence_matches, hard_conflicts=None):
 
 
 _CLONE_REVIEW_CATALOG_FEATURE_ALIASES = {
+    'max_suction': ('吸力',),
     'suction_power': ('最大吸力',),
     'object_recognition_count': ('避障方式',),
 }
 
 
-def _clone_review_catalog_snapshot(target_model):
+def _clone_review_manual_feature_name(rule):
+    feature_name = str(rule.get('feature_name') or rule.get('feature_id') or '').strip()
+    if feature_name not in {'用户输入差异', 'manual_difference'}:
+        return feature_name
+    evidence = str(rule.get('evidence_quote') or '')
+    match = re.match(r'^\s*(?:\d+\s*[.、．)]\s*)?(?P<label>[^：:]{1,80})\s*[：:]', evidence)
+    return str(match.group('label') if match else feature_name).strip()
+
+
+def _clone_review_catalog_feature_key(value):
+    text = _clone_review_rule_value(value)
+    text = text.replace('（', '(').replace('）', ')')
+    text = text.replace('物流中转箱(外包装)', '包装').replace('物流中转箱', '包装')
+    text = text.replace('外包装', '包装')
+    text = re.sub(r'^产品净重(?:\(不含桩\))?$', '主机重量', text)
+    text = text.replace('底座', '充电座').replace('占地', '尺寸')
+    if '噪音' in text:
+        text = re.sub(r'(?:自动|强力|轻拖|吸水)模式', '', text)
+        text = re.sub(r'^(?:极速|静音)(?=烘干噪音$)', '', text)
+        text = text.replace('工作噪音', '清洁噪音')
+        text = text.replace('清洁时的噪音', '清洁噪音')
+        text = text.replace('烘干时的噪音', '烘干噪音')
+    text = re.sub(r'\((?:mm|cm|毫米|厘米)\)', '', text, flags=re.IGNORECASE)
+    return re.sub(r'[\s()（）【】\[\]：:、，,._\-/]+', '', text)
+
+
+def _clone_review_dimension_signature(value):
+    text = _clone_review_rule_value(value).replace('×', '*').replace('x', '*')
+    if '*' not in text:
+        return None
+    numbers = re.findall(r'\d+(?:\.\d+)?', text)
+    if len(numbers) not in {2, 3}:
+        return None
+    unit = 'cm' if 'cm' in text else ('mm' if 'mm' in text else '')
+    if not unit:
+        return None
+    scale = 10.0 if unit == 'cm' else 1.0
+    return tuple(float(number) * scale for number in numbers)
+
+
+def _clone_review_manual_catalog_value_matches(feature_name, manual_value, catalog_value):
+    manual_dimension = _clone_review_dimension_signature(manual_value)
+    catalog_dimension = _clone_review_dimension_signature(catalog_value)
+    if manual_dimension and catalog_dimension:
+        return manual_dimension == catalog_dimension
+    return _clone_review_catalog_value_matches(feature_name, manual_value, catalog_value)
+
+
+def _clone_review_resolve_catalog_feature(rule, catalog_features, source_values, target_values):
+    manual_name = _clone_review_manual_feature_name(rule)
+    requested_names = [
+        manual_name,
+        *_CLONE_REVIEW_CATALOG_FEATURE_ALIASES.get(str(rule.get('feature_id') or ''), ()),
+    ]
+    available_features = [
+        (str(feature_id or '').strip(), str(name or '').strip())
+        for feature_id, name in catalog_features.items()
+        if str(feature_id or '').strip() and str(name or '').strip()
+    ]
+
+    def resolve_matches(matches):
+        if len(matches) == 1:
+            feature_id, name = matches[0]
+            return name, feature_id, 'matched', []
+        if len(matches) > 1:
+            scored = []
+            for feature_id, name in matches:
+                score = int(_clone_review_manual_catalog_value_matches(
+                    name, rule.get('source_value'), source_values.get(name),
+                )) + int(_clone_review_manual_catalog_value_matches(
+                    name, rule.get('target_value'), target_values.get(name),
+                ))
+                scored.append((score, feature_id, name))
+            best_score = max(score for score, _feature_id, _name in scored)
+            best_matches = [item for item in scored if item[0] == best_score]
+            if best_score and len(best_matches) == 1:
+                _score, feature_id, name = best_matches[0]
+                return name, feature_id, 'matched', []
+            candidates = [f'{name} ({feature_id})' for feature_id, name in matches]
+            return '', '', 'ambiguous', sorted(candidates)
+        return None
+
+    for requested_name in requested_names:
+        resolved = resolve_matches([
+            item for item in available_features if item[1] == requested_name
+        ])
+        if resolved:
+            return resolved
+
+    for requested_name in requested_names:
+        requested_key = _clone_review_catalog_feature_key(requested_name)
+        if not requested_key:
+            continue
+        resolved = resolve_matches([
+            item for item in available_features
+            if _clone_review_catalog_feature_key(item[1]) == requested_key
+        ])
+        if resolved:
+            return resolved
+    return '', '', 'unmatched', []
+
+
+def _clone_review_catalog_snapshot(target_model, *, snapshot_id=None, category_name=None):
     connection = None
     try:
         connection = connect_main_database()
         with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            clauses = [
+                "binding.status = 'confirmed'",
+                "REPLACE(LOWER(binding.source_name), ' ', '') = %s",
+                "snapshot.sync_status = 'ready'",
+            ]
+            params = [normalize_model_name(target_model)]
+            if snapshot_id:
+                clauses.append('binding.source_snapshot_id = %s')
+                params.append(str(snapshot_id))
+            if category_name:
+                clauses.append('binding.source_category_name = %s')
+                params.append(str(category_name))
             cursor.execute(
-                """
+                f"""
                 SELECT snapshot.content_json, binding.model_id
                 FROM parameter_model_alias_binding AS binding
                 JOIN parameter_snapshot AS snapshot
                   ON snapshot.snapshot_id = binding.source_snapshot_id
-                WHERE binding.status = 'confirmed'
-                  AND REPLACE(LOWER(binding.source_name), ' ', '') = %s
-                  AND snapshot.sync_status = 'ready'
+                WHERE {' AND '.join(clauses)}
                 ORDER BY snapshot.synced_at DESC
                 LIMIT 1
                 """,
-                (normalize_model_name(target_model),),
+                tuple(params),
             )
             row = cursor.fetchone()
         if not row:
@@ -23260,29 +25105,51 @@ def _clone_review_catalog_snapshot(target_model):
             connection.close()
 
 
-def _clone_review_catalog_model_data(model_name):
+def _clone_review_catalog_model_data(model_name, *, snapshot_id=None, category_name=None):
     """Read confirmed values and feature metadata for one mapped catalog model."""
     connection = None
     try:
         connection = connect_main_database()
         with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            clauses = [
+                "REPLACE(LOWER(binding.source_name), ' ', '') = %s",
+                "snapshot.sync_status = 'ready'",
+            ]
+            params = [normalize_model_name(model_name)]
+            if snapshot_id:
+                clauses.append('binding.source_snapshot_id = %s')
+                params.append(str(snapshot_id))
+            if category_name:
+                clauses.append('binding.source_category_name = %s')
+                params.append(str(category_name))
             cursor.execute(
-                """
-                SELECT snapshot.content_json, binding.model_id
+                f"""
+                SELECT snapshot.content_json, binding.model_id, binding.status,
+                       binding.evidence_json
                 FROM parameter_model_alias_binding AS binding
                 JOIN parameter_snapshot AS snapshot
                   ON snapshot.snapshot_id = binding.source_snapshot_id
-                WHERE binding.status = 'confirmed'
-                  AND REPLACE(LOWER(binding.source_name), ' ', '') = %s
-                  AND snapshot.sync_status = 'ready'
-                ORDER BY snapshot.synced_at DESC
-                LIMIT 1
+                WHERE {' AND '.join(clauses)}
+                ORDER BY CASE binding.status WHEN 'confirmed' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+                         snapshot.synced_at DESC
                 """,
-                (normalize_model_name(model_name),),
+                tuple(params),
             )
-            row = cursor.fetchone()
-        if not row:
-            return {}, {}, '型号尚未完成唯一参数映射'
+            rows = [dict(item) for item in cursor.fetchall()]
+        confirmed_rows = {
+            str(item.get('model_id') or ''): item
+            for item in rows
+            if item.get('status') == 'confirmed' and str(item.get('model_id') or '')
+        }
+        if len(confirmed_rows) > 1:
+            return {}, {}, f'型号“{model_name}”存在 {len(confirmed_rows)} 个已确认参数映射，请先消除歧义'
+        if not confirmed_rows:
+            pending = next((item for item in rows if item.get('status') == 'pending'), None)
+            target_name = str(((pending or {}).get('evidence_json') or {}).get('target_model_name') or '').strip()
+            if target_name:
+                return {}, {}, f'型号“{model_name}”已匹配参数型号“{target_name}”，但映射仍待确认'
+            return {}, {}, f'型号“{model_name}”尚未完成唯一参数映射'
+        row = next(iter(confirmed_rows.values()))
         snapshot = row.get('content_json') or {}
         features = {
             str(feature.get('name') or ''): {
@@ -23329,15 +25196,25 @@ def _clone_review_parameter_rule_id(rule):
 
 def _clone_review_parameter_rules_with_ids(rules):
     return [
-        {**rule, 'rule_id': str(rule.get('rule_id') or _clone_review_parameter_rule_id(rule))}
+        {**rule, 'context': str(rule.get('context') or ''), 'rule_id': str(rule.get('rule_id') or _clone_review_parameter_rule_id(rule))}
         for rule in (rules or [])
     ]
 
 
-def _clone_review_parameter_difference_rules(source_model, target_model):
+def _clone_review_parameter_difference_rules(
+    source_model,
+    target_model,
+    *,
+    snapshot_id=None,
+    category_name=None,
+):
     """Create read-only clone rules from confirmed source and target catalog values."""
-    source_values, source_features, source_error = _clone_review_catalog_model_data(source_model)
-    target_values, target_features, target_error = _clone_review_catalog_model_data(target_model)
+    source_values, source_features, source_error = _clone_review_catalog_model_data(
+        source_model, snapshot_id=snapshot_id, category_name=category_name,
+    )
+    target_values, target_features, target_error = _clone_review_catalog_model_data(
+        target_model, snapshot_id=snapshot_id, category_name=category_name,
+    )
     if source_error or target_error:
         return [], source_error or target_error
     rules = []
@@ -23362,6 +25239,7 @@ def _clone_review_parameter_difference_rules(source_model, target_model):
             'source_model': source_model,
             'feature_id': str(metadata.get('feature_id') or feature_name),
             'feature_name': feature_name,
+            'context': '',
             # Explanatory context only. A description does not independently create risk.
             'feature_description': feature_description,
             'source_value': source_value,
@@ -23394,6 +25272,30 @@ def _clone_review_catalog_value_matches(feature_name, manual_value, catalog_valu
     catalog_text = _clone_review_rule_value(catalog_value)
     if manual_text == catalog_text:
         return True
+    if feature_name in {'越障高度', '最大越障高度'}:
+        def obstacle_height_claims(value):
+            claims = {}
+            patterns = (
+                ('maximum', r'(?:最高|最大)[^0-9]{0,12}'),
+                ('everyday', r'(?:日常|常规)(?:越障)?[^0-9]{0,12}'),
+            )
+            for key, label_pattern in patterns:
+                match = re.search(
+                    label_pattern + r'(?P<number>\d+(?:\.\d+)?)\s*(?P<unit>毫米|厘米|mm|cm)',
+                    value,
+                    re.IGNORECASE,
+                )
+                if not match:
+                    continue
+                number = float(match.group('number'))
+                unit = match.group('unit').lower()
+                claims[key] = f'{number * (0.1 if unit in {"mm", "毫米"} else 1):.12g}cm'
+            return claims
+
+        manual_heights = obstacle_height_claims(manual_text)
+        catalog_heights = obstacle_height_claims(catalog_text)
+        if manual_heights or catalog_heights:
+            return bool(manual_heights) and manual_heights == catalog_heights
     manual_boolean = _clone_review_boolean_state(manual_text)
     catalog_boolean = _clone_review_boolean_state(catalog_text)
     if manual_boolean is not None or catalog_boolean is not None:
@@ -23422,36 +25324,54 @@ def _clone_review_catalog_value_matches(feature_name, manual_value, catalog_valu
 def _clone_review_catalog_comparison(feature_name, manual_value, catalog_value, numeric_features):
     if not catalog_value:
         return 'missing_parameter'
-    if _clone_review_catalog_value_matches(feature_name, manual_value, catalog_value):
+    if _clone_review_manual_catalog_value_matches(feature_name, manual_value, catalog_value):
         return 'consistent'
     if feature_name in numeric_features and _clone_review_catalog_normalized_value(feature_name, catalog_value) is None:
         return 'comparison_unavailable'
     return 'catalog_suspected'
 
 
-def _clone_review_parameter_catalog_audit(manual_rules, source_model, target_model):
-    source_values, source_feature_names, source_error = _clone_review_catalog_snapshot(source_model)
-    target_values, target_feature_names, target_error = _clone_review_catalog_snapshot(target_model)
+def _clone_review_parameter_catalog_audit(
+    manual_rules,
+    source_model,
+    target_model,
+    *,
+    snapshot_id=None,
+    category_name=None,
+):
+    source_values, source_feature_names, source_error = _clone_review_catalog_snapshot(
+        source_model, snapshot_id=snapshot_id, category_name=category_name,
+    )
+    target_values, target_feature_names, target_error = _clone_review_catalog_snapshot(
+        target_model, snapshot_id=snapshot_id, category_name=category_name,
+    )
     if source_error or target_error:
         return [], source_error or target_error
     feature_names = {**source_feature_names, **target_feature_names}
-    feature_ids_by_name = {name: feature_id for feature_id, name in feature_names.items()}
     numeric_features = {rule['feature_name'] for rule in NUMERIC_CLAIM_RULES}
     rows = []
     for rule in manual_rules:
         feature_id = str(rule.get('feature_id') or '')
-        feature_name = str(rule.get('feature_name') or feature_id)
-        catalog_names = [feature_name, *_CLONE_REVIEW_CATALOG_FEATURE_ALIASES.get(feature_id, ())]
-        catalog_name = next((name for name in catalog_names if source_values.get(name) or target_values.get(name)), '')
+        feature_name = _clone_review_manual_feature_name(rule)
+        catalog_name, catalog_feature_id, catalog_match_status, catalog_match_candidates = _clone_review_resolve_catalog_feature(
+            rule, feature_names, source_values, target_values,
+        )
         source_catalog_value = source_values.get(catalog_name, '')
         target_catalog_value = target_values.get(catalog_name, '')
-        source_result = _clone_review_catalog_comparison(
-            catalog_name, rule.get('source_value'), source_catalog_value, numeric_features,
-        )
-        target_result = _clone_review_catalog_comparison(
-            catalog_name, rule.get('target_value'), target_catalog_value, numeric_features,
-        )
-        if 'catalog_suspected' in {source_result, target_result}:
+        if catalog_match_status != 'matched':
+            source_result = target_result = f'field_{catalog_match_status}'
+        else:
+            source_result = _clone_review_catalog_comparison(
+                catalog_name, rule.get('source_value'), source_catalog_value, numeric_features,
+            )
+            target_result = _clone_review_catalog_comparison(
+                catalog_name, rule.get('target_value'), target_catalog_value, numeric_features,
+            )
+        if 'field_ambiguous' in {source_result, target_result}:
+            result = 'field_ambiguous'
+        elif 'field_unmatched' in {source_result, target_result}:
+            result = 'field_unmatched'
+        elif 'catalog_suspected' in {source_result, target_result}:
             result = 'catalog_suspected'
         elif 'comparison_unavailable' in {source_result, target_result}:
             result = 'comparison_unavailable'
@@ -23470,8 +25390,10 @@ def _clone_review_parameter_catalog_audit(manual_rules, source_model, target_mod
             'target_manual_value': str(rule.get('target_value') or ''),
             'target_catalog_value': target_catalog_value or None,
             'target_result': target_result,
-            'catalog_feature_id': feature_ids_by_name.get(catalog_name),
+            'catalog_feature_id': catalog_feature_id or None,
             'catalog_feature_name': catalog_name or None,
+            'catalog_match_status': catalog_match_status,
+            'catalog_match_candidates': catalog_match_candidates,
             'result': result,
         })
     return rows, None
@@ -23610,6 +25532,10 @@ def _clone_review_has_source_conflict(rules):
                 _clone_review_rule_value(parameter_rule.get('source_value'))
                 == _clone_review_rule_value(manual_rule.get('source_value'))
             )
+            parameter_context = _clone_review_rule_value(parameter_rule.get('context'))
+            manual_context = _clone_review_rule_value(manual_rule.get('context'))
+            if parameter_context and manual_context and parameter_context != manual_context:
+                continue
             if not (same_feature or same_source_value):
                 continue
             feature_name = str(manual_rule.get('feature_name') or parameter_rule.get('feature_name') or '')
@@ -23767,19 +25693,23 @@ def _clone_review_candidate_evidence(item, rules, row, cached_similarity=None):
     }
 
 
-def _clone_review_reuse_candidates(item, rules):
+def _clone_review_reuse_candidates(item, rules, rows=None):
     candidates = []
     if not rules:
         return candidates
-    rows = ProductMatrix.query.filter(
-        ProductMatrix.question_wiki_id != item.question_wiki_id,
-        ProductMatrix.is_configured.is_(True),
-    ).order_by(ProductMatrix.question_wiki_id.asc()).all()
+    if rows is None:
+        query = ProductMatrix.query.filter(
+            ProductMatrix.question_wiki_id != item.question_wiki_id,
+            ProductMatrix.is_configured.is_(True),
+        )
+        if item.product_category:
+            query = query.filter(ProductMatrix.product_category == item.product_category)
+        rows = query.order_by(ProductMatrix.question_wiki_id.asc()).all()
     cached_scores = _clone_review_cached_similarity_scores(item, rows)
     seen = set()
     for row in rows:
         wiki_id = str(row.question_wiki_id or '')
-        if not wiki_id or wiki_id in seen:
+        if not wiki_id or wiki_id == str(item.question_wiki_id or '') or wiki_id in seen:
             continue
         if item.product_category and row.product_category and item.product_category != row.product_category:
             continue
@@ -23854,10 +25784,16 @@ def _scan_clone_review_batch(batch, commit_every=0, pending_only=False, item_ids
     rules_by_id = {rule.rule_id: rule for rule in stored_rules}
     parameter_rules = []
     parameter_error = None
+    scope_snapshot = _clone_review_json(batch.scope_snapshot_json, {})
+    parameter_refresh = scope_snapshot.get('parameter_refresh') if isinstance(scope_snapshot, dict) else {}
+    parameter_snapshot_id = str((parameter_refresh or {}).get('snapshot_id') or '').strip()
+    parameter_category = str((parameter_refresh or {}).get('category_name') or '').strip()
     if 'parameter_check' in methods:
         parameter_rules, parameter_error = _clone_review_parameter_difference_rules(
             batch.source_value,
             (_clone_review_json(batch.target_models_json, []) or [''])[0],
+            snapshot_id=parameter_snapshot_id or None,
+            category_name=parameter_category or None,
         )
         parameter_rules = _clone_review_parameter_rules_with_ids(parameter_rules)
 
@@ -23866,6 +25802,7 @@ def _scan_clone_review_batch(batch, commit_every=0, pending_only=False, item_ids
     pending_ai_items = []
     pending_ai_started_at = None
     ai_futures = []
+    candidate_rows_by_category = {}
     ai_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='clone-review-ai')
 
     def submit_ai_micro_batch(force=False):
@@ -23958,9 +25895,24 @@ def _scan_clone_review_batch(batch, commit_every=0, pending_only=False, item_ids
         consistent.extend(target_aligned_rule_data)
         source_conflict = _clone_review_has_source_conflict(matched_rule_data)
         source_conflict_found = source_conflict_found or source_conflict
+        candidate_rows = None
+        if not source_conflict and (direct_conflicting or probable_conflicting):
+            category_key = str(item.product_category or '')
+            if category_key not in candidate_rows_by_category:
+                candidate_query = ProductMatrix.query.filter(
+                    ProductMatrix.question_wiki_id != item.question_wiki_id,
+                    ProductMatrix.is_configured.is_(True),
+                )
+                if category_key:
+                    candidate_query = candidate_query.filter(ProductMatrix.product_category == category_key)
+                candidate_rows_by_category[category_key] = candidate_query.order_by(
+                    ProductMatrix.question_wiki_id.asc()
+                ).all()
+            candidate_rows = candidate_rows_by_category[category_key]
         candidates = [] if source_conflict else _clone_review_reuse_candidates(
             item,
             direct_conflicting + probable_conflicting,
+            rows=candidate_rows,
         )
         matched_rule_rows = exact_rule_rows + contextual_rule_rows + target_aligned_rule_rows
         matched_parameter_rules = item_parameter_exact_rules + item_parameter_contextual_rules
@@ -24173,7 +26125,14 @@ def _run_incremental_clone_review_batch(batch_id, scope, auto_scan=True, actor='
                     batch.operation_id, phase='解析差异规则', completed=0, total=batch.item_count,
                     detail='草稿已生成，正在将新旧型号差异转为可复核规则',
                 )
-                manual_rules, ai_parse_status = _clone_review_ai_rules(batch.manual_difference_text, target_model)
+                manual_rules, ai_parse_status, parse_warnings = _clone_review_ai_rules(
+                    batch.manual_difference_text,
+                    target_model,
+                    batch.source_value,
+                    include_warnings=True,
+                )
+                scope_snapshot['parse_warnings'] = parse_warnings
+                batch.scope_snapshot_json = json.dumps(scope_snapshot, ensure_ascii=False)
             merged_rules = merge_difference_rules(manual_rules)
             batch.difference_rules_json = json.dumps(merged_rules, ensure_ascii=False)
             batch.ai_parse_status = ai_parse_status
@@ -24243,6 +26202,7 @@ def _persist_clone_review_rules(batch, rules):
             target_model=str(rule.get('target_model') or ''),
             feature_id=str(rule.get('feature_id') or ''),
             feature_name=str(rule.get('feature_name') or ''),
+            context=str(rule.get('context') or ''),
             source_value=str(rule.get('source_value') or ''),
             target_value=str(rule.get('target_value') or ''),
             difference_type=str(rule.get('difference_type') or 'comparison_unavailable'),
@@ -24257,6 +26217,65 @@ def _persist_clone_review_rules(batch, rules):
         db.session.add(row)
         persisted.append(row)
     return persisted
+
+
+def _reset_clone_review_item_for_rule_reparse(item):
+    if item.apply_status == 'applied':
+        raise ValueError('已有条目执行成功，不能重新解析本批次规则')
+    if item.detection_status == 'source_removed':
+        return
+    item.detection_status = 'pending_scan'
+    item.risk_level = 'unknown'
+    item.suggested_action = 'defer'
+    item.decision = 'pending'
+    item.decision_reason = ''
+    item.difference_rule_ids_json = '[]'
+    item.evidence_sources_json = '[]'
+    item.reuse_candidate_ids_json = '[]'
+    item.ai_impact_review_json = '{}'
+    item.selected_existing_wiki_id = None
+    item.apply_status = 'not_applied'
+    item.result_wiki_id = None
+    item.decided_by = None
+    item.decided_at = None
+    item.applied_at = None
+    item.error_message = None
+
+
+def _reparse_clone_review_batch_rules(batch, manual_difference_text=None):
+    """Rebuild unsubmitted rules from the stored source text and rescan items."""
+    if manual_difference_text is not None:
+        batch.manual_difference_text = str(manual_difference_text).strip()
+    methods = _clone_review_json(batch.detection_methods_json, [])
+    targets = _clone_review_json(batch.target_models_json, [])
+    target_model = str((targets or [''])[0])
+    manual_rules = []
+    ai_parse_status = 'not_required'
+    parse_warnings = []
+    if 'manual_difference_ai' in methods:
+        manual_rules, ai_parse_status, parse_warnings = _clone_review_ai_rules(
+            batch.manual_difference_text,
+            target_model,
+            batch.source_value,
+            include_warnings=True,
+        )
+    merged_rules = merge_difference_rules(manual_rules)
+    MatrixCloneDifferenceRule.query.filter_by(batch_id=batch.batch_id).delete(synchronize_session=False)
+    batch.difference_rules_json = json.dumps(merged_rules, ensure_ascii=False)
+    batch.difference_rule_version = max(int(batch.difference_rule_version or 0) + 1, 2)
+    batch.ai_parse_status = ai_parse_status
+    scope_snapshot = _clone_review_json(batch.scope_snapshot_json, {})
+    if not isinstance(scope_snapshot, dict):
+        scope_snapshot = {}
+    scope_snapshot['parse_warnings'] = parse_warnings
+    batch.scope_snapshot_json = json.dumps(scope_snapshot, ensure_ascii=False)
+    batch.manual_scope_confirmed_by = None
+    batch.manual_scope_confirmed_at = None
+    batch.error_message = None
+    for item in MatrixCloneReviewItem.query.filter_by(batch_id=batch.batch_id).all():
+        _reset_clone_review_item_for_rule_reparse(item)
+    _persist_clone_review_rules(batch, merged_rules)
+    return merged_rules
 
 
 def _active_clone_review_batches_for_changes(changes):
@@ -24425,6 +26444,25 @@ def clone_matrix_config():
     else:
         scope.pop('exclude_tag_names', None)
 
+    # The clone resolver reads product_matrix, so reconcile its configured
+    # relationships with V1 before deciding which target items are pending.
+    try:
+        matrix_reconcile = _reconcile_matrix_before_clone()
+        if not matrix_reconcile.get('ok', True):
+            return jsonify({
+                'success': False,
+                'code': 'matrix_v1_sync_required',
+                'message': matrix_reconcile.get('message') or '矩阵未能按 V1 同步，请稍后重试',
+            }), 503
+    except Exception as exc:
+        db.session.rollback()
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'code': 'matrix_v1_sync_failed',
+            'message': f'矩阵按 V1 对账失败：{exc}',
+        }), 503
+
     detection_methods = normalize_detection_methods(review.get('detection_methods')) if review_enabled else []
     manual_difference_text = str(review.get('manual_difference_text') or '').strip()
     if review_enabled:
@@ -24434,7 +26472,7 @@ def clone_matrix_config():
         if existing_batch:
             existing_scope = _clone_review_json(existing_batch.scope_snapshot_json, {})
             if isinstance(existing_scope, dict):
-                for derived_key in ('parameter_refresh', 'generation_total', 'excluded_count'):
+                for derived_key in ('parameter_refresh', 'generation_total', 'excluded_count', 'parse_warnings'):
                     existing_scope.pop(derived_key, None)
             same_request = (
                 existing_batch.created_by == current_user.username
@@ -24737,12 +26775,19 @@ def clone_matrix_config():
             manual_rules = []
             ai_parse_status = 'not_required'
             if 'manual_difference_ai' in detection_methods:
-                manual_rules, ai_parse_status = _clone_review_ai_rules(manual_difference_text, target_model)
+                manual_rules, ai_parse_status, parse_warnings = _clone_review_ai_rules(
+                    manual_difference_text,
+                    target_model,
+                    source,
+                    include_warnings=True,
+                )
             merged_rules = merge_difference_rules(manual_rules)
             review_scope_snapshot = dict(scope)
             review_scope_snapshot['excluded_count'] = resolved_scope['excluded_count']
             if parameter_refresh:
                 review_scope_snapshot['parameter_refresh'] = parameter_refresh
+            if 'manual_difference_ai' in detection_methods:
+                review_scope_snapshot['parse_warnings'] = parse_warnings
             review_batch = MatrixCloneReviewBatch(
                 batch_id=str(uuid.uuid4()),
                 operation_id=operation_id,
@@ -25021,6 +27066,179 @@ def scan_matrix_clone_review(batch_id):
         return jsonify({'success': False, 'message': str(exc)}), 500
     finally:
         _release_matrix_clone_scan(batch.batch_id)
+
+
+@app.route('/api/matrix/clone-review/<batch_id>/reparse-rules', methods=['POST'])
+@login_required
+def reparse_matrix_clone_review_rules(batch_id):
+    """Reparse rules for an unsubmitted batch after a parser upgrade."""
+    batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '差异校验批次不存在'}), 404
+    if batch.created_by != current_user.username:
+        return jsonify({'success': False, 'message': '只能重新解析自己创建的复核批次'}), 403
+    if batch.status in {'ready_to_submit', 'submitted', 'cancelled', 'applying'}:
+        return jsonify({'success': False, 'message': '已完成或已提交的批次不可重新解析'}), 409
+    if _matrix_clone_scan_is_active(batch):
+        return jsonify({'success': False, 'code': 'clone_review_scan_in_progress', 'message': '当前批次正在校验，请等待本轮完成'}), 409
+    payload = request.get_json(silent=True) or {}
+    submitted_text = payload.get('manual_difference_text')
+    if submitted_text is not None:
+        if 'manual_difference_ai' not in _clone_review_json(batch.detection_methods_json, []):
+            return jsonify({'success': False, 'code': 'manual_difference_not_enabled', 'message': '当前批次未启用输入差异分析'}), 422
+        if not isinstance(submitted_text, str) or not submitted_text.strip():
+            return jsonify({'success': False, 'code': 'manual_difference_required', 'message': '请输入新旧型号差异'}), 422
+        if len(submitted_text.strip()) > 5000:
+            return jsonify({'success': False, 'code': 'manual_difference_too_long', 'message': '新旧型号差异不能超过 5000 个字符'}), 422
+    if not _claim_matrix_clone_scan(batch.batch_id):
+        return jsonify({'success': False, 'code': 'clone_review_scan_in_progress', 'message': '当前批次正在校验，请等待本轮完成'}), 409
+    try:
+        rules = _reparse_clone_review_batch_rules(batch, submitted_text)
+        items = MatrixCloneReviewItem.query.filter_by(
+            batch_id=batch.batch_id,
+            detection_status='pending_scan',
+        ).count()
+        batch.status = 'scanning' if items else 'reviewing'
+        db.session.flush()
+        if items:
+            _scan_clone_review_batch(batch, commit_every=25)
+        db.session.commit()
+        payload = _clone_review_batch_payload(batch)
+        payload.update({'reparsed': True, 'reparsed_rule_count': len(rules)})
+        return jsonify(payload)
+    except Exception as exc:
+        db.session.rollback()
+        batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+        if batch:
+            batch.status = 'partial_failed'
+            batch.error_message = str(exc)[:1000]
+            db.session.commit()
+        return jsonify({'success': False, 'message': str(exc)}), 500
+    finally:
+        _release_matrix_clone_scan(batch_id)
+
+
+@app.route('/api/matrix/clone-review/<batch_id>/rewrite-difference', methods=['POST'])
+@login_required
+def rewrite_matrix_clone_review_difference(batch_id):
+    """Suggest a clearer, source-grounded difference statement without saving it."""
+    batch = db.session.get(MatrixCloneReviewBatch, str(batch_id))
+    if not batch:
+        return jsonify({'success': False, 'message': '差异校验批次不存在'}), 404
+    if batch.created_by != current_user.username:
+        return jsonify({'success': False, 'message': '只能整理自己创建的复核批次'}), 403
+    if 'manual_difference_ai' not in _clone_review_json(batch.detection_methods_json, []):
+        return jsonify({'success': False, 'message': '当前批次未启用输入差异分析'}), 422
+    if batch.status in {'ready_to_submit', 'submitted', 'cancelled', 'applying'} or _matrix_clone_scan_is_active(batch):
+        return jsonify({'success': False, 'message': '当前批次正在处理或已完成，暂不能整理差异说明'}), 409
+
+    payload = request.get_json(silent=True) or {}
+    source_text = str(payload.get('text') or batch.manual_difference_text or '').strip()
+    feedback = str(payload.get('feedback') or '').strip()
+    if not source_text:
+        return jsonify({'success': False, 'message': '请先输入差异说明'}), 422
+    if len(source_text) > 5000 or len(feedback) > 2000:
+        return jsonify({'success': False, 'message': '差异说明最多 5000 字，补充意见最多 2000 字'}), 422
+
+    config = load_ai_config() or {}
+    if not all(str(config.get(key) or '').strip() for key in ('api_key', 'base_url', 'model')):
+        return jsonify({'success': False, 'message': 'AI 尚未配置，请先在数据设置中完成配置'}), 503
+
+    source_model = str(batch.source_value or '').strip()
+    target_model = str((_clone_review_json(batch.target_models_json, []) or [''])[0]).strip()
+    scope_snapshot = _clone_review_json(batch.scope_snapshot_json, {})
+    parameter_refresh = scope_snapshot.get('parameter_refresh') if isinstance(scope_snapshot, dict) else {}
+    catalog_rules, catalog_error = _clone_review_parameter_difference_rules(
+        source_model,
+        target_model,
+        snapshot_id=str((parameter_refresh or {}).get('snapshot_id') or '').strip() or None,
+        category_name=str((parameter_refresh or {}).get('category_name') or '').strip() or None,
+    )
+    catalog_facts = [{
+        'feature': rule.get('feature_name'),
+        'source_model': source_model,
+        'source_value': rule.get('source_value'),
+        'target_model': target_model,
+        'target_value': rule.get('target_value'),
+    } for rule in catalog_rules]
+    parsed_rules = parse_manual_difference_text(
+        source_text,
+        target_model=target_model,
+        source_model=source_model,
+    )
+    manual_facts = [{
+        'feature': rule.get('feature_name'),
+        'source_model': source_model,
+        'source_value': rule.get('source_value'),
+        'target_model': target_model,
+        'target_value': rule.get('target_value'),
+    } for rule in parsed_rules]
+    system_prompt = (
+        '你是新品机型差异说明整理助手。只整理用户文字，不判断哪一个产品参数为真，不补充外部知识。'
+        '将差异按“字段：旧型号 值；新型号 值”组织，每个字段单独一行，型号方向必须正确。'
+        '必须保留原文里的型号与所有数值、单位、数值组合和适用条件，不得改数、换算、删掉或合并含义不同的数值。'
+        '同一字段出现最高值、日常值、模式值等多个口径时要分别标明；无法确认归属或口径时，在草稿中保留原文并列为待确认问题。'
+        '参数目录事实仅用于对照，不得据此覆盖用户输入。补充意见是用户给出的新依据，可以据此改写。'
+        '返回严格 JSON 对象：draft_text 为完整改写草稿，unresolved_questions 为数组；每项包含 question 和 evidence，'
+        'evidence 必须是当前输入文字的连续原文。没有问题时返回空数组。不要输出 Markdown 围栏或额外字段。'
+    )
+    user_prompt = json.dumps({
+        'source_model': source_model,
+        'target_model': target_model,
+        'input_text': source_text,
+        'confirmed_parameter_catalog_differences': catalog_facts,
+        'catalog_status': catalog_error or 'available',
+        'deterministically_recognized_input_facts': manual_facts,
+        'user_returned_questions_and_corrections': feedback,
+    }, ensure_ascii=False)
+    try:
+        raw = _ai_call_llm(config, system_prompt, user_prompt, temperature=0.0)
+        result = _clone_review_json(raw, {})
+    except Exception as exc:
+        return jsonify({'success': False, 'message': f'AI 整理失败：{str(exc)[:300]}'}), 502
+
+    draft_text = str(result.get('draft_text') or '').strip() if isinstance(result, dict) else ''
+    if not draft_text or len(draft_text) > 5000:
+        return jsonify({'success': False, 'message': 'AI 返回的整理草稿为空或超出 5000 字'}), 502
+    allowed_text = f'{source_text}\n{feedback}'
+    source_numbers = set(re.findall(r'\d+(?:\.\d+)?', allowed_text))
+    draft_numbers = set(re.findall(r'\d+(?:\.\d+)?', draft_text))
+    invented_numbers = sorted(draft_numbers - source_numbers)
+    if invented_numbers:
+        return jsonify({
+            'success': False,
+            'message': 'AI 草稿包含原文没有的数值，请重试或自行整理。',
+            'invented_values': invented_numbers[:10],
+        }), 502
+    omitted_numbers = sorted(source_numbers - draft_numbers)
+    if omitted_numbers:
+        return jsonify({
+            'success': False,
+            'message': 'AI 草稿遗漏了输入中的数值，请调整后重试。',
+            'omitted_values': omitted_numbers[:10],
+        }), 502
+    if source_model and source_model not in draft_text:
+        return jsonify({'success': False, 'message': 'AI 草稿遗漏了旧型号，请重试或自行整理。'}), 502
+    if target_model and target_model not in draft_text:
+        return jsonify({'success': False, 'message': 'AI 草稿遗漏了新型号，请重试或自行整理。'}), 502
+
+    questions = []
+    raw_questions = result.get('unresolved_questions') if isinstance(result, dict) else []
+    if isinstance(raw_questions, list):
+        for item in raw_questions[:12]:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get('question') or '').strip()[:300]
+            evidence = str(item.get('evidence') or '').strip()[:500]
+            if question and evidence and evidence in allowed_text:
+                questions.append({'question': question, 'evidence': evidence})
+    return jsonify({
+        'success': True,
+        'draft_text': draft_text,
+        'unresolved_questions': questions,
+        'saved': False,
+        'catalog_available': not bool(catalog_error),
+    })
 
 
 @app.route('/api/matrix/clone-review/items/<item_id>/refresh', methods=['POST'])
@@ -25472,7 +27690,7 @@ def complete_matrix_clone_review(batch_id):
             item.decision = 'keep'
             item.apply_status = 'not_required'
             item.result_wiki_id = item.question_wiki_id
-    detection_error_count = sum(_clone_review_item_has_detection_error(item) for item in items)
+    detection_error_count = sum(_clone_review_item_has_unresolved_detection_error(item) for item in items)
     pending_ai_count = sum(_clone_review_item_ai_pending(item) for item in items)
     pending_decision_count = sum(item.decision in {'pending', 'defer'} for item in items)
     pending_apply_count = sum(
@@ -25488,13 +27706,25 @@ def complete_matrix_clone_review(batch_id):
         errors.append(f'还有 {pending_ai_count} 条高、中风险知识正在等待 AI 语义复核')
     if pending_apply_count:
         errors.append(f'还有 {pending_apply_count} 条已确认决定尚未执行成功')
-    if any(rule.status in {'pending_parse', 'source_conflict', 'parse_failed', 'stale'} for rule in rules):
+    if any(
+        rule.status == 'pending_parse'
+        or _clone_review_hard_rule_is_unresolved(rule, items)
+        for rule in rules
+    ):
         errors.append('差异规则仍存在冲突、失败或过期状态')
     if 'manual_difference_ai' in methods and batch.ai_parse_status in {'parse_failed', 'needs_confirmation'}:
         errors.append('用户差异说明尚未成功形成可确认规则')
-    if 'parameter_check' in methods and batch.error_message:
+    if (
+        'parameter_check' in methods
+        and batch.error_message
+        and not _clone_review_batch_error_is_resolved_by_manual_decisions(batch, items)
+    ):
         errors.append(f'参数校对未完成：{batch.error_message}')
-    hard_rule_errors = any(rule.status in {'pending_parse', 'source_conflict', 'parse_failed', 'stale'} for rule in rules)
+    hard_rule_errors = any(
+        rule.status == 'pending_parse'
+        or _clone_review_hard_rule_is_unresolved(rule, items)
+        for rule in rules
+    )
     if needs_rule_confirmation and not bool(payload.get('rules_confirmed')) and not errors and not hard_rule_errors:
         return jsonify({
             'success': False,
@@ -25570,16 +27800,214 @@ def _preserve_unmatched_matrix_item_on_merge(question_wiki_id, manual_edit, acti
     return bool(manual_edit) and question_wiki_id in active_wiki_ids
 
 
+def _apply_matrix_projection_system_fields(record):
+    """Mark V1-derived matrix relationships as active formal data."""
+    normalized = dict(record or {})
+    normalized.update({
+        'release_status': 'released',
+        'association_status': 'active',
+        'product_release_scope': 'formal',
+    })
+    return normalized
+
+
+def _reconcile_authoritative_matrix_from_v1(client, kb_items):
+    """Make product_matrix contain exactly the published V1 relationships."""
+    resolver = ProductCategoryResolver(parse_product_catalog())
+    for item in kb_items or []:
+        _fill_kb_product_category(item, resolver)
+    desired_by_wiki = {}
+    for item in kb_items or []:
+        wiki_id = str(item.get('question_wiki_id') or '').strip()
+        if not wiki_id:
+            continue
+        names = {
+            str(model).strip()
+            for model in re.split(r'[,，]', str(item.get('product_name') or ''))
+            if str(model).strip()
+        }
+        desired_by_wiki[wiki_id] = names
+
+    upsert_rows = []
+    for wiki_id, models in desired_by_wiki.items():
+        item = next((row for row in kb_items if str(row.get('question_wiki_id') or '').strip() == wiki_id), {})
+        for model in models:
+            upsert_rows.append(_apply_matrix_projection_system_fields({
+                'question_wiki_id': wiki_id,
+                'product_name': model,
+                'is_configured': True,
+                'manual_edit': False,
+                'edit_source': 'kb_sync',
+                'last_synced_at': datetime.utcnow(),
+                'question_content': item.get('question'),
+                'answer_content': item.get('answer'),
+                'update_time': item.get('update_time'),
+                'product_category': item.get('product_category_name'),
+            }))
+    # V1 is the sole source of truth. Rebuild the relation table so stale,
+    # duplicate, and previously submitted rows cannot survive reconciliation.
+    # Local PostgreSQL writes are held in one transaction. This prevents an
+    # interrupted per-row rebuild from exposing a partial matrix to readers.
+    transactional = isinstance(client, LocalPostgreSQLClient)
+    previous_defer_commit = getattr(client, '_defer_commit', False)
+    if transactional:
+        client._defer_commit = True
+    try:
+        if transactional:
+            response = client.replace_product_matrix(upsert_rows)
+            if response is None or getattr(response, 'status_code', 500) >= 400:
+                raise RuntimeError(f'主库矩阵重建失败：{getattr(response, "text", "unknown error")}')
+        else:
+            response = client.delete('product_matrix', {'question_wiki_id': 'not.is.null'})
+            if response is None or getattr(response, 'status_code', 500) >= 400:
+                raise RuntimeError(f'主库矩阵清理失败：{getattr(response, "text", "unknown error")}')
+            if upsert_rows:
+                response = client.upsert('product_matrix', upsert_rows, on_conflict='question_wiki_id,product_name')
+                if response is None or getattr(response, 'status_code', 500) >= 400:
+                    raise RuntimeError(f'主库矩阵重建失败：{getattr(response, "text", "unknown error")}')
+
+        # A successful DELETE/UPSERT response only confirms that the request was
+        # accepted. Read the relation table back and enforce the actual
+        # postcondition before committing the local transaction.
+        actual_rows = client.select_all(
+            'product_matrix',
+            columns='question_wiki_id,product_name,is_configured',
+            # Pagination must use a unique ordering key. A wiki ID can have
+            # many product rows, so ordering by it alone can skip or duplicate
+            # rows at page boundaries and falsely report V1 discrepancies.
+            order_by='id',
+            order_dir='asc',
+            page_size=1000,
+        ) or []
+        desired_relations = {
+            (row['question_wiki_id'], row['product_name'])
+            for row in upsert_rows
+        }
+        actual_relations = {
+            (str(row.get('question_wiki_id') or '').strip(), str(row.get('product_name') or '').strip())
+            for row in actual_rows
+            if str(row.get('question_wiki_id') or '').strip()
+            and str(row.get('product_name') or '').strip()
+        }
+        unconfigured = {
+            (str(row.get('question_wiki_id') or '').strip(), str(row.get('product_name') or '').strip())
+            for row in actual_rows
+            if not bool(row.get('is_configured'))
+            and str(row.get('question_wiki_id') or '').strip()
+            and str(row.get('product_name') or '').strip()
+        }
+        missing = desired_relations - actual_relations
+        extra = actual_relations - desired_relations
+        if missing or extra or unconfigured:
+            raise RuntimeError(
+                '主库矩阵与 V1 不一致：'
+                f'缺少 {len(missing)} 条，多余 {len(extra)} 条，未配置 {len(unconfigured)} 条'
+            )
+        if transactional:
+            client.connection.commit()
+        return {'upserted': len(upsert_rows), 'deleted': 'all', 'verified': len(actual_relations)}
+    except Exception:
+        if transactional and getattr(client, 'connection', None) is not None:
+            client.connection.rollback()
+        raise
+    finally:
+        if transactional:
+            client._defer_commit = previous_defer_commit
+
+
+def _rebuild_local_matrix_from_v1(kb_items):
+    """Rebuild the local projection so it is exactly the V1 relation set."""
+    resolver = ProductCategoryResolver(parse_product_catalog())
+    for item in kb_items or []:
+        _fill_kb_product_category(item, resolver)
+    db.session.query(ProductMatrix).delete(synchronize_session=False)
+    rows = []
+    for item in kb_items or []:
+        wiki_id = str(item.get('question_wiki_id') or '').strip()
+        if not wiki_id:
+            continue
+        for product_name in dict.fromkeys(
+            str(model).strip()
+            for model in re.split(r'[,，]', str(item.get('product_name') or ''))
+            if str(model).strip()
+        ):
+            rows.append(ProductMatrix(
+                question_wiki_id=wiki_id,
+                product_name=product_name,
+                is_configured=True,
+                manual_edit=False,
+                edit_source='kb_sync',
+                last_synced_at=datetime.utcnow(),
+                question_content=item.get('question'),
+                answer_content=item.get('answer'),
+                update_time=item.get('update_time'),
+                product_category=item.get('product_category_name'),
+            ))
+    if rows:
+        db.session.bulk_save_objects(rows)
+    db.session.commit()
+    return len(rows)
+
+
+def _reconcile_matrix_before_clone():
+    """Refresh the matrix projection from V1 before reading clone scope.
+
+    Clone scope resolution reads ``product_matrix`` locally.  Reconcile the
+    authoritative product relations first so stale submitted rows cannot make
+    a new-product clone appear already complete.
+    """
+    if not is_supabase_matrix_enabled():
+        return {'enabled': False, 'attempted': False, 'ok': True}
+    client = get_supabase_client()
+    if not client:
+        if app.config.get('TESTING'):
+            return {'enabled': True, 'attempted': False, 'ok': True}
+        return {'enabled': True, 'attempted': True, 'ok': False, 'message': '本地主库未配置'}
+    kb_items = _formal_select_all(
+        client,
+        'knowledge_base_v1',
+        columns='question_wiki_id,question,answer,product_name,product_category_name,update_time,content_version',
+        order_by='question_wiki_id',
+        order_dir='asc',
+        page_size=1000,
+    ) or []
+    _backfill_kb_categories_for_sync(client, kb_items)
+    authoritative = _reconcile_authoritative_matrix_from_v1(client, kb_items)
+    pulled = _maybe_pull_matrix_and_logs_from_supabase(force=True)
+    if isinstance(pulled, dict) and pulled.get('ok') is False:
+        return {'enabled': True, 'attempted': True, 'ok': False, 'message': pulled.get('message') or '矩阵同步失败'}
+    local_rebuilt = _rebuild_local_matrix_from_v1(kb_items)
+    return {
+        'enabled': True,
+        'attempted': True,
+        'ok': True,
+        'authoritative': authoritative,
+        'local_rebuilt': local_rebuilt,
+    }
+
+
 def _run_matrix_sync(mode='merge'):
     client = get_supabase_client()
     if not client:
         return {'success': False, 'message': '数据库未连接', '_http_status': 400}
 
     try:
-        _maybe_pull_matrix_and_logs_from_supabase(force=False)
         # 1. Fetch KB Data (All items)
-        kb_items = client.select_all('knowledge_base_v1', columns='question_wiki_id,question,answer,product_name,product_category_name,update_time', order_by='question_wiki_id')
+        kb_items = client.select_all(
+            'knowledge_base_v1',
+            columns='question_wiki_id,question,answer,product_name,product_category_name,update_time,content_version',
+            order_by='question_wiki_id',
+            use_formal=False,
+        )
+        categories_filled = _backfill_kb_categories_for_sync(client, kb_items)
         kb_map = {item['question_wiki_id']: item for item in kb_items if item.get('question_wiki_id')}
+
+        # Reconcile the authoritative PostgreSQL projection before refreshing
+        # SQLite.  Previously one-click sync only pulled the stale projection
+        # down, so the next new-product submission could still use old rows.
+        authoritative = _reconcile_authoritative_matrix_from_v1(client, kb_items)
+        _maybe_pull_matrix_and_logs_from_supabase(force=True)
+        local_rebuilt = _rebuild_local_matrix_from_v1(kb_items)
         
         # 2. Sync Columns (Critical: Ensure columns exist for all products found in KB)
         all_products = set()
@@ -25723,17 +28151,12 @@ def _run_matrix_sync(mode='merge'):
                         db.session.add(matrix_item)
                         added += 1
             
-            active_wiki_ids = set(kb_map)
-            # Preserve manual model differences, but never retain an ID deleted from V1.
+            # V1 is authoritative: remove every local relationship not present
+            # in the current V1 product list, including manual submissions.
             for key, m in matrix_map.items():
                 if key not in processed_keys:
-                    if not _preserve_unmatched_matrix_item_on_merge(
-                        m.question_wiki_id,
-                        m.manual_edit,
-                        active_wiki_ids,
-                    ):
-                        db.session.delete(m)
-                        deleted += 1
+                    db.session.delete(m)
+                    deleted += 1
 
         db.session.commit()
         return {
@@ -25741,6 +28164,9 @@ def _run_matrix_sync(mode='merge'):
             'added': added,
             'updated': updated,
             'deleted': deleted
+            , 'authoritative_matrix': authoritative
+            , 'local_rebuilt': local_rebuilt
+            , 'categories_filled': categories_filled
         }
 
     except Exception as e:
@@ -25769,29 +28195,37 @@ def kb_sync_downstream():
     治理：月度召回仍依赖 Excel 导入；本接口会同步评分快照，治理页关联展示会随之更新。
     """
     steps = {}
-    r_matrix = _run_matrix_sync('merge')
-    steps['matrix'] = r_matrix
-    if not r_matrix.get('success'):
-        return jsonify({'success': False, 'message': r_matrix.get('message', 'matrix sync failed'), 'steps': steps}), 500
+    try:
+        r_matrix = _run_matrix_sync('merge')
+        steps['matrix'] = r_matrix
+        if not r_matrix.get('success'):
+            return jsonify({'success': False, 'message': r_matrix.get('message', 'matrix sync failed'), 'steps': steps}), 500
 
-    r_links = _run_sync_kb_links()
-    steps['links'] = r_links
-    if not r_links.get('success'):
-        return jsonify({'success': False, 'message': r_links.get('message', 'links sync failed'), 'steps': steps}), 500
+        r_links = _run_sync_kb_links()
+        steps['links'] = r_links
+        if not r_links.get('success'):
+            return jsonify({'success': False, 'message': r_links.get('message', 'links sync failed'), 'steps': steps}), 500
 
-    r_scores = _run_scoring_sync()
-    steps['scoring'] = r_scores
-    if not r_scores.get('success'):
-        return jsonify({'success': False, 'message': r_scores.get('message', 'scoring sync failed'), 'steps': steps}), 500
+        r_scores = _run_scoring_sync()
+        steps['scoring'] = r_scores
+        if not r_scores.get('success'):
+            return jsonify({'success': False, 'message': r_scores.get('message', 'scoring sync failed'), 'steps': steps}), 500
 
-    steps['governance'] = {
-        'note': '治理「月度召回」数据仍通过治理页 Excel 导入；评分表已随上一步同步，治理页展示会关联最新快照。'
-    }
-    return jsonify({
-        'success': True,
-        'message': '已同步：矩阵、多媒体预览、评分；治理说明见 steps.governance',
-        'steps': steps
-    })
+        steps['governance'] = {
+            'note': '治理「月度召回」数据仍通过治理页 Excel 导入；评分表已随上一步同步，治理页展示会关联最新快照。'
+        }
+        return jsonify({
+            'success': True,
+            'message': '已同步：矩阵、多媒体预览、评分；治理说明见 steps.governance',
+            'steps': steps
+        })
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'message': f'一键同步下游失败：{exc}',
+            'steps': steps,
+        }), 500
 
 
 if __name__ == '__main__':

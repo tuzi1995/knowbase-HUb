@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>机型分类映射管理 - 改版验证页</title>
+<link rel="stylesheet" href="design-system.css?v=3">
+<link rel="stylesheet" href="vendor/fontawesome.min.css">
+<link rel="stylesheet" href="styles.css?v=65">
+<link rel="stylesheet" href="extra_styles.css?v=72">
+<style>body{margin:0;background:#e8edf3;}</style>
+</head>
+<body>
+
+<!-- 复制自 index.html 的 modelMappingModal（3696-3750 行） -->
+<div id="modelMappingModal" class="modal" style="display:flex;position:static;height:100vh;background:transparent;">
+  <div class="modal-content mm-modal-content">
+      <div class="modal-header mm-modal-header">
+          <h3 class="mm-modal-title"><i class="fas fa-map-signs"></i>机型分类映射管理</h3>
+          <button class="close-modal-btn" onclick="return false">&times;</button>
+      </div>
+
+      <div class="modal-body mm-modal-body">
+          <div class="mm-toolbar">
+              <div class="mm-view-switch" role="tablist" aria-label="机型映射视图">
+                  <button id="modelMappingAuditViewBtn" type="button" class="mm-view-switch-btn" role="tab" onclick="return false">
+                      <i class="fas fa-table-list"></i> 型号核查
+                  </button>
+                  <button id="modelMappingCategoriesViewBtn" type="button" class="mm-view-switch-btn active" role="tab" onclick="return false">
+                      <i class="fas fa-folder-tree"></i> 分类编辑
+                  </button>
+              </div>
+              <button onclick="return false" class="primary-btn btn-sm"><i class="fas fa-plus"></i> 新增映射分类</button>
+              <button onclick="return false" class="action-btn btn-sm"><i class="fas fa-file-import"></i> 批量导入</button>
+              <div class="mm-toolbar-spacer"></div>
+              <div class="mm-search-wrap">
+                  <i class="fas fa-search mm-search-icon"></i>
+                  <input id="modelMappingSearch" class="mm-search-input" type="text" placeholder="搜索型号或分类..." aria-label="搜索型号或分类">
+              </div>
+              <button onclick="return false" class="action-btn btn-sm" title="导出当前机型分类映射配置（Excel）">
+                  <i class="fas fa-file-export"></i> 导出配置
+              </button>
+              <button onclick="return false" class="success-btn btn-sm"><i class="fas fa-save"></i> 保存配置</button>
+          </div>
+
+          <section id="modelMappingAuditView" class="mm-audit-view" role="tabpanel" hidden>
+              <div class="mm-audit-toolbar">
+                  <div id="modelMappingAuditSummary" class="mm-audit-summary" aria-live="polite"></div>
+                  <div class="mm-audit-filters" role="group" aria-label="型号核查筛选">
+                      <button type="button" class="active" aria-pressed="true" onclick="return false">全部</button>
+                      <button type="button" aria-pressed="false" onclick="return false">未映射</button>
+                      <button type="button" aria-pressed="false" onclick="return false">多分类</button>
+                  </div>
+              </div>
+              <div class="mm-audit-table-wrap custom-scrollbar">
+                  <table class="mm-audit-table">
+                      <thead>
+                          <tr>
+                              <th scope="col">型号</th>
+                              <th scope="col">所属分类</th>
+                              <th scope="col">分类数</th>
+                              <th scope="col">状态</th>
+                          </tr>
+                      </thead>
+                      <tbody id="modelMappingAuditBody"></tbody>
+                  </table>
+              </div>
+          </section>
+
+          <section id="modelMappingCategoriesView" class="mm-categories-view" role="tabpanel">
+              <div class="mm-category-table-wrap custom-scrollbar">
+                  <table class="mm-table mm-category-table">
+                      <thead>
+                          <tr>
+                              <th scope="col">映射分类</th>
+                              <th scope="col">已映射型号</th>
+                              <th scope="col">操作</th>
+                          </tr>
+                      </thead>
+                      <tbody id="modelMappingTableBody"></tbody>
+                  </table>
+              </div>
+          </section>
+
+      </div>
+  </div>
+</div>
+
+<script>
+// 模拟数据（取自真实映射配置）
+const modelMappings = {
+  "A10 系列": ["A10", "A10 Plus", "A10 Ultra", "A10 UltraE"],
+  "A20 系列": ["A20", "A20 Air", "A20 Pro"],
+  "A30 2.0(内部名a Morph Lite E)": ["A30 2.0", "A30 CE 性能版", "A30 CE 增强版", "拓界 Neo", "拓界 Airy"],
+  "A30 Pro Steam 系列": ["A30 Pro Steam", "A30 Pro Steam 5合1版", "A30 Pro Steam 智享版", "A30 Pro Steam 2.0", "A30 Pro Steam 2.0 尊享版", "A30 Pro Steam 2.0 5合1版", "A30 Pro Steam 3.0"],
+  "A30 系列不支持翻新机": ["A30", "A30 CE", "A30 CE ProE", "A30 Lite", "A30 SE", "A30 Muse", "A30 U", "A30 Combo", "A30 Pro Turbo", "A30 Pure", "拓界 S", "拓界 Aura", "拓界 Pro", "A30 CE 畅享版", "A30 CE 悦享版", "A30 Pro Steam 智享版", "A30 Pro CE 悦享版", "A30 2.0", "拓界 Neo", "拓界 Airy", "A30 CE 性能版", "A30 CE 增强版", "A30超能版", "拓界 Tech", "智净"],
+  "A30 系列(不带拓界系列)": ["A30 Pro", "A30", "A30 CE", "A30 ProE", "A30 Pro Steam", "A30 Lite", "A30 SE", "A30 Muse", "A30 U", "A30 Combo", "A30 Pro Turbo", "A30 Pure", "A30 Pro Combo", "A30 Pro Ultra", "A30 Pro Steam 5合1版", "A30 CE 畅享版", "A30 CE 悦享版", "A30 Pro Steam 智享版", "A30 Pro CE 悦享版", "A30 2.0", "A30 Pro Steam 2.0", "A30 CE 性能版", "A30 CE 增强版", "A30 Pro 2.0", "A30 Pro Steam 2.0 尊享版", "智净", "A30超能版", "A30 Pro Steam 2.0 5合1版", "A30 Pro Combo 2.0", "A30 Pro Steam 3.0"]
+};
+
+// 与 app_v8.js renderModelMappingTable() 的表格分支保持一致的渲染逻辑
+function renderModelMappingTable() {
+    const tbody = document.getElementById('modelMappingTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const categories = Object.keys(modelMappings).sort();
+
+    categories.forEach(category => {
+        const models = modelMappings[category];
+        const tr = document.createElement('tr');
+
+        const tdName = document.createElement('td');
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.className = 'mm-category-input';
+        nameInput.value = category;
+        nameInput.setAttribute('aria-label', '分类名称，可直接编辑重命名');
+        tdName.appendChild(nameInput);
+        const cnt = document.createElement('span');
+        cnt.className = 'mm-category-count';
+        cnt.innerText = String(models.length);
+        tdName.appendChild(cnt);
+
+        const tdModels = document.createElement('td');
+        const modelsDiv = document.createElement('div');
+        modelsDiv.className = 'mm-models-container';
+
+        models.forEach(model => {
+            const chip = document.createElement('span');
+            chip.className = 'mm-model-chip';
+            chip.append(document.createTextNode(model));
+            const remove = document.createElement('i');
+            remove.className = 'fas fa-times mm-model-delete';
+            remove.title = '移除型号';
+            chip.appendChild(remove);
+            modelsDiv.appendChild(chip);
+        });
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'mm-add-model-btn';
+        addBtn.innerHTML = '<i class="fas fa-plus"></i><span class="mm-add-model-label">添加机型</span>';
+        addBtn.title = '添加/管理机型';
+        modelsDiv.appendChild(addBtn);
+
+        tdModels.appendChild(modelsDiv);
+
+        const tdActions = document.createElement('td');
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'icon-btn mm-action-copy';
+        copyBtn.innerHTML = '<i class="fas fa-copy"></i>';
+        copyBtn.title = '一键复制全部型号（逗号分隔）';
+        tdActions.appendChild(copyBtn);
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'icon-btn delete-btn';
+        delBtn.innerHTML = '<i class="fas fa-trash-alt"></i>';
+        delBtn.title = '删除此分类映射';
+        tdActions.appendChild(delBtn);
+
+        tr.appendChild(tdName);
+        tr.appendChild(tdModels);
+        tr.appendChild(tdActions);
+        tbody.appendChild(tr);
+    });
+}
+
+renderModelMappingTable();
+
+// 模拟一行悬停态（最后一行），验证 hover 展开效果
+const rows = document.querySelectorAll('#modelMappingTableBody tr');
+const lastRow = rows[rows.length - 1];
+lastRow.style.background = '#f8fafc';
+const lastAddBtn = lastRow.querySelector('.mm-add-model-btn');
+lastAddBtn.style.borderColor = '#bfdbfe';
+lastAddBtn.style.color = '#1d4ed8';
+lastAddBtn.style.background = '#eff6ff';
+const lastLabel = lastAddBtn.querySelector('.mm-add-model-label');
+lastLabel.style.maxWidth = '60px';
+lastLabel.style.opacity = '1';
+// 该行第二个 chip 展示 hover 带删除符状态
+const chips = lastRow.querySelectorAll('.mm-model-chip');
+if (chips[1]) {
+    chips[1].style.borderColor = '#93c5fd';
+    chips[1].style.color = '#1d4ed8';
+    chips[1].style.backgroundColor = '#eff6ff';
+    const del = chips[1].querySelector('.mm-model-delete');
+    if (del) del.style.opacity = '1';
+}
+</script>
+</body>
+</html>

@@ -14,6 +14,7 @@ env/
 # JavaScript dependencies and build outputs
 node_modules/
 KnowledgeBaseTool_Local/link_viewer/dist/
+KnowledgeBaseTool_Local/link_viewer/.build-*/
 
 # Local databases and generated archives
 *.db
@@ -27,10 +28,14 @@ KnowledgeBaseTool_Local/instance/
 *.log
 Logs/
 KnowledgeBaseTool_Local/mac脚本/Logs/
+.model_mappings_history/
+**/.model_mappings_history/
 
 # Local secrets and machine-specific configuration
 .env
 .env.*
+.kmatrix.env
+.kmatrix.qa.env
 **/ai_config.json
 **/scoring_config.json
 **/supabase_config*.json
@@ -58,3 +63,33 @@ backend/data/
 test-results/
 
 node_modules
+
+# Per-instance runtime state (including QA session keys), never source code
+KnowledgeBaseTool_Local/instance-*/
+KnowledgeBaseTool_Local/.prompt_runtime_cache/
+
+# Local database exports and ad-hoc source snapshots; retain files on disk
+deliverables/**/*.dump
+KnowledgeBaseTool_Local/server.py.pre-*
+KnowledgeBaseTool_Local/_inspection.txt
+
+# Generated frontend siblings: vendor assets remain versioned
+KnowledgeBaseTool_Local/link_viewer/app_v8.min.js
+KnowledgeBaseTool_Local/link_viewer/styles.min.css
+KnowledgeBaseTool_Local/link_viewer/extra_styles.min.css
+KnowledgeBaseTool_Local/link_viewer/index.prod.html
+KnowledgeBaseTool_Local/link_viewer/test_optimization.prod.html
+
+# Mutable business state; versioned examples live in config_templates/
+KnowledgeBaseTool_Local/product_catalog.json
+KnowledgeBaseTool_Local/model_mappings.json
+KnowledgeBaseTool_Local/model_mappings.json.order.json
+KnowledgeBaseTool_Local/product_release_intents.json
+⚙️ 配置文件/product_catalog.json
+⚙️ 配置文件/model_mappings.json
+⚙️ 配置文件/model_mappings.json.order.json
+⚙️ 配置文件/product_release_intents.json
+⚙️ 配置文件-qa/product_catalog.json
+⚙️ 配置文件-qa/model_mappings.json
+⚙️ 配置文件-qa/model_mappings.json.order.json
+⚙️ 配置文件-qa/product_release_intents.json
