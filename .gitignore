@@ -93,3 +93,12 @@ KnowledgeBaseTool_Local/product_release_intents.json
 ⚙️ 配置文件-qa/model_mappings.json
 ⚙️ 配置文件-qa/model_mappings.json.order.json
 ⚙️ 配置文件-qa/product_release_intents.json
+
+.workbuddy/
+status/
+recovery-backups/
+qa_cache/
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm

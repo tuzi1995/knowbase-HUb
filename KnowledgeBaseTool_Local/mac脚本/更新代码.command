@@ -171,7 +171,13 @@ KNOWN_HOSTS="$SCRIPT_DIR/known_hosts"
 SSH_OPTS=(-o "UserKnownHostsFile=$KNOWN_HOSTS" -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=8)
 
 SSH_IDENTITY=""
-if [[ -f "$HOME/.ssh/id_ed25519" ]]; then
+if [[ -n "${KMATRIX_SSH_IDENTITY:-}" ]]; then
+  SSH_IDENTITY="$KMATRIX_SSH_IDENTITY"
+  if [[ ! -f "$SSH_IDENTITY" ]]; then
+    echo "KMATRIX_SSH_IDENTITY does not point to a readable private key file." >>"$LOG_FILE"
+    fail 77
+  fi
+elif [[ -f "$HOME/.ssh/id_ed25519" ]]; then
   SSH_IDENTITY="$HOME/.ssh/id_ed25519"
 elif [[ -f "$HOME/.ssh/id_rsa" ]]; then
   SSH_IDENTITY="$HOME/.ssh/id_rsa"
@@ -217,7 +223,13 @@ command -v scp >/dev/null 2>&1 || fail 1
 
 echo "[0.5/3] Check SSH auth (key/agent)..."
 if ! ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$SSH_TARGET" "echo AUTH_OK" >>"$LOG_FILE" 2>&1; then
-  echo "NOTE: SSH needs password. Recommend SSH key + ssh-agent to avoid repeated prompts." >>"$LOG_FILE"
+  {
+    echo "SSH authentication failed before packaging; no deployment files were uploaded."
+    echo "Configure a key for $SSH_TARGET and ensure it is available to this ToolHub process."
+    echo "Use KMATRIX_SSH_IDENTITY=/path/to/private_key for a non-default key, or load it into ssh-agent."
+  } >>"$LOG_FILE"
+  echo "SSH authentication failed. Configure a key for $SSH_TARGET; see: $LOG_FILE"
+  fail 77
 fi
 
 echo "[1/3] Package project (zip)..."
