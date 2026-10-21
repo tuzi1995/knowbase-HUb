@@ -8082,6 +8082,10 @@ def update_kb_item():
         # (required for 修改记录详情对比; one extra SELECT per edit).
         before_row = None
         if kb_id:
+            # Management edits include creating/modifying rows that do not yet
+            # have a released matrix association. Read V1 directly, but retain
+            # the formal scope boundary so release candidates stay isolated.
+            edit_filters = {'question_wiki_id': f'eq.{kb_id}', 'kb_scope': 'eq.formal'}
             try:
                 _kb_cols = (
                     'question_wiki_id,question_type,question,answer,answer_type,if_bm25,'
@@ -8092,8 +8096,9 @@ def update_kb_item():
                     'knowledge_base_v1',
                     page=1,
                     page_size=1,
-                    filters={'question_wiki_id': f'eq.{kb_id}'},
+                    filters=edit_filters,
                     columns=_kb_cols,
+                    use_formal=False,
                 )
                 if before_resp.status_code in (200, 206):
                     rows = before_resp.json() or []
@@ -8107,10 +8112,11 @@ def update_kb_item():
                 try:
                     rows2 = client.select_all(
                         'knowledge_base_v1',
-                        filters={'question_wiki_id': f'eq.{kb_id}'},
+                        filters=edit_filters,
                         columns=_kb_cols,
                         order_by='question_wiki_id',
-                        page_size=1
+                        page_size=1,
+                        use_formal=False,
                     ) or []
                     if rows2 and isinstance(rows2[0], dict):
                         before_row = rows2[0]
@@ -8263,7 +8269,7 @@ def update_kb_item():
         committed_version = None
         if kb_id:
             # Update existing
-            update_filters = {'question_wiki_id': kb_id}
+            update_filters = {'question_wiki_id': kb_id, 'kb_scope': 'eq.formal'}
             if base_version is not None:
                 update_filters['content_version'] = f'eq.{base_version}'
                 data['content_version'] = base_version + 1
@@ -8301,10 +8307,11 @@ def update_kb_item():
             try:
                 verify_rows = client.select_all(
                     'knowledge_base_v1',
-                    filters={'question_wiki_id': f'eq.{saved_id}'},
+                    filters={'question_wiki_id': f'eq.{saved_id}', 'kb_scope': 'eq.formal'},
                     columns='question_wiki_id,content_version',
                     order_by='question_wiki_id',
                     page_size=1,
+                    use_formal=False,
                 ) or []
                 actual_version = int(verify_rows[0].get('content_version')) if verify_rows else None
                 if actual_version != committed_version:

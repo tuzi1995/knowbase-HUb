@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 import server
 
@@ -61,6 +62,100 @@ class _VersionedKnowledgeClient:
         assert filters['content_version'] == 'eq.7'
         self.row.update(dict(data))
         return _UpdateResponse()
+
+
+class _UnreleasedKnowledgeClient(_VersionedKnowledgeClient):
+    """A management row that has no released product-matrix association."""
+
+    def __init__(self, scope='formal', fallback=False, missing=False):
+        super().__init__()
+        self.row.update(kb_scope=scope, review_status='creating')
+        self.fallback = fallback
+        self.missing = missing
+        self.writes = []
+
+    def _visible_rows(self, use_formal, filters):
+        if use_formal or self.missing:
+            return []
+        scope_filter = (filters or {}).get('kb_scope')
+        if scope_filter and scope_filter != f"eq.{self.row['kb_scope']}":
+            return []
+        return [dict(self.row)]
+
+    def select(self, table, use_formal=True, filters=None, **kwargs):
+        assert table == 'knowledge_base_v1'
+        if self.fallback:
+            return _UpdateResponse(status_code=500)
+        return _UpdateResponse(self._visible_rows(use_formal, filters))
+
+    def select_all(self, table, use_formal=True, filters=None, **kwargs):
+        if table == 'knowledge_base_modifications':
+            return []
+        assert table == 'knowledge_base_v1'
+        return self._visible_rows(use_formal, filters)
+
+    def update(self, table, data, filters, returning=False):
+        self.writes.append(dict(data))
+        response = super().update(table, data, filters)
+        return _UpdateResponse([dict(self.row)]) if returning else response
+
+
+@pytest.mark.parametrize('fallback,strict_version', [(False, False), (True, False), (False, True)])
+def test_unified_update_saves_unreleased_formal_management_row(fallback, strict_version):
+    client = _UnreleasedKnowledgeClient(fallback=fallback)
+    payload = {
+        'question_wiki_id': 'KB-VERSIONED',
+        'similar_questions': ['漂洗加脱水多久'],
+        'base_version': 7,
+        'strict_version': strict_version,
+        'operation_id': 'unreleased-management-edit',
+    }
+    with patch.object(server, 'get_supabase_client', return_value=client), patch.object(
+        server, '_supabase_insert_drop_unknown_columns', return_value=_UpdateResponse()
+    ) as insert_log, patch.object(
+        server, 'invalidate_relationships_for_source_change', return_value={}
+    ), server.app.test_request_context('/api/kb/update', method='POST', json=payload):
+        response = server.update_kb_item.__wrapped__()
+
+    assert not isinstance(response, tuple), response[0].get_json() if isinstance(response, tuple) else ''
+    result = response.get_json()
+    assert result['success'] is True
+    assert result['content_version'] == 8
+    assert len(client.writes) == 1
+    assert json.loads(client.row['similar_questions']) == ['漂洗加脱水多久']
+    record = insert_log.call_args.args[2]
+    meta = record['change_meta']
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    assert meta['before']['question'] == '原问题'
+    assert meta['before']['similar_questions'] is None
+    assert 'similar_questions' in meta['changed_fields']
+    assert record['base_version'] == 7
+    assert record['committed_version'] == 8
+
+
+@pytest.mark.parametrize('scope,missing,base_version,status', [
+    ('pending', False, 7, 404),
+    ('shadow', False, 7, 404),
+    ('formal', True, 7, 404),
+    ('formal', False, 6, 409),
+])
+def test_unified_update_preserves_scope_missing_and_conflict_guards(scope, missing, base_version, status):
+    client = _UnreleasedKnowledgeClient(scope=scope, missing=missing)
+    with patch.object(server, 'get_supabase_client', return_value=client), patch.object(
+        server, '_supabase_insert_drop_unknown_columns'
+    ) as insert_log, server.app.test_request_context('/api/kb/update', method='POST', json={
+        'question_wiki_id': 'KB-VERSIONED',
+        'question': '不应写入的问题',
+        'base_version': base_version,
+        'operation_id': 'unreleased-guard',
+    }):
+        response, actual_status = server.update_kb_item.__wrapped__()
+
+    assert actual_status == status
+    assert response.get_json()['success'] is False
+    assert client.writes == []
+    insert_log.assert_not_called()
 
 
 def test_source_code_is_stable_and_display_label_is_preserved():
