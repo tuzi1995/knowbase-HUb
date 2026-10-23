@@ -1,0 +1,59 @@
+{
+  "summary": {
+    "mode": "dry_run",
+    "workbook_rows": 562,
+    "matched": 562,
+    "changed": 0,
+    "unchanged": 562,
+    "blank_business_tags": 0,
+    "distinct_business_tags": 249,
+    "source_differences_preserved_from_database": [],
+    "id_corrections_matched_by_unique_url": [
+      {
+        "row": 49,
+        "workbook_id": "13eff13e-75fa-4c34-857d-08a9fe995e8c",
+        "database_id": "1422017b-9c93-49ce-8a04-96b89fce37e6",
+        "reason": "exact_unique_image_url"
+      }
+    ],
+    "table_records": 813,
+    "top_labels": [
+      [
+        "产品对比图",
+        72
+      ],
+      [
+        "尺寸图-扫地机",
+        39
+      ],
+      [
+        "开箱图-扫地机",
+        36
+      ],
+      [
+        "预留安装-扫地机",
+        35
+      ],
+      [
+        "开箱图-洗地机",
+        16
+      ],
+      [
+        "说明书-传感器",
+        12
+      ],
+      [
+        "说明书-尘盒",
+        9
+      ],
+      [
+        "说明书-清水箱加水",
+        7
+      ]
+    ]
+  },
+  "source_workbook": "/Users/tuzi/个人项目/One/knowbase_hub_8085/deliverables/media-labeling/多媒体图片线下打标清单_高清预览_20261019.xlsx",
+  "workbook_sha256": "365084d1bab13ec0ee10bf0965a5d978c795d78efe052995c56aebd4d678e995",
+  "active_config": "/Users/tuzi/个人项目/One/knowbase_hub_8085/KnowledgeBaseTool_Local/supabase_config_local.json",
+  "changes": []
+}

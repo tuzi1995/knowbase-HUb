@@ -4,10 +4,14 @@
   const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   let state = {catalog: {}, assets: [], cells: []};
   let loaded = false;
-  let category = '', imageSearch = '', view = 'allLinksView', detail = null, draft = [], preview = null;
+  let category = '', rowModel = '', columnModel = '', imageSearch = '', view = 'allLinksView', detail = null, draft = [], preview = null;
   const positions = {};
   const chosen = new Set();
+  const selectedTargets = new Map();
   const endpoint = '/api/comparison-matrix';
+  let targetIdSearch = '', targetQuestionSearch = '';
+  let candidateFilter = 'all', candidateSort = 'newest', candidateView = 'list', selectedCandidateIndex = 0, currentCellPair = [], showAllReferences = false;
+  let previousDialogFocus = null;
   async function api(path, data) {
     const response = await fetch(endpoint + path, data === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
     if (!(response.headers.get('content-type') || '').includes('application/json')) {
@@ -24,10 +28,20 @@
   }
   const safe = fn => async (...args) => { try { return await fn(...args); } catch (err) { error(err); } };
   function dialog(title, html) {
+    $('comparisonDialog').classList.remove('cm-confirm-dialog');
     $('comparisonDialogTitle').textContent = title;
     $('comparisonDialogBody').innerHTML = html;
     $('comparisonDialogError').textContent = '';
-    if (!$('comparisonDialog').open) $('comparisonDialog').showModal();
+    if (!$('comparisonDialog').open) {
+      previousDialogFocus = document.activeElement;
+      $('comparisonDialog').showModal();
+      $('comparisonDialog').querySelector('[autofocus]')?.focus();
+    }
+  }
+  $('comparisonDialog').addEventListener('close', () => previousDialogFocus?.focus?.());
+  function svg(name) {
+    const paths = {close:'<path d="m6 6 12 12M18 6 6 18"/>', left:'<path d="m15 18-6-6 6-6"/>', right:'<path d="m9 18 6-6-6-6"/>', list:'<path d="M8 6h12M8 12h12M8 18h12M3 6h.01M3 12h.01M3 18h.01"/>', grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>', search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>', lock:'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>', image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>', clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'};
+    return `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ''}</svg>`;
   }
   function image(url) {
     return `<a href="${escape(url)}" target="_blank" rel="noopener noreferrer"><img class="cm-thumb" src="${escape(url)}" alt="对比图预览，加载失败可打开链接" loading="lazy" referrerpolicy="no-referrer"></a>`;
@@ -35,9 +49,18 @@
   function toolbar() {
     return `<div class="cm-toolbar"><button class="primary-btn" data-cm="batch">新增批次</button><button class="action-btn" data-cm="initialize">初始化历史台账</button><button class="action-btn" data-cm="refresh">刷新</button><button class="action-btn" data-cm="executions">执行清单</button></div>`;
   }
+  const categoryPriority = ['扫地机', '洗地机', '洗衣机', '吸尘器'];
+  function categories() {
+    return Object.keys(state.catalog).sort((a, b) => {
+      const ai = categoryPriority.indexOf(a), bi = categoryPriority.indexOf(b);
+      if (ai >= 0 || bi >= 0) return (ai < 0 ? categoryPriority.length : ai) - (bi < 0 ? categoryPriority.length : bi);
+      return Object.keys(state.catalog).indexOf(a) - Object.keys(state.catalog).indexOf(b);
+    });
+  }
+  function orderedModels() { return [...(state.catalog[category] || [])].reverse(); }
   async function refresh() {
     state = await api('/overview'); loaded = true;
-    if (!state.catalog[category]) category = Object.keys(state.catalog)[0] || '';
+    if (!state.catalog[category]) category = categories()[0] || '';
     $('comparisonStatus').hidden = true;
     renderImages(); renderMatrix();
   }
@@ -71,16 +94,18 @@
   function findCell(a, b) { return state.cells.find(c => c.category === category && c.pair.includes(a) && c.pair.includes(b)); }
   function renderMatrix() {
     const previousScroll = $('cmMatrixScroll') ? {left:$('cmMatrixScroll').scrollLeft, top:$('cmMatrixScroll').scrollTop} : null;
-    const models = state.catalog[category] || [];
+    const models = orderedModels();
+    const visibleRows = rowModel ? models.filter(model => model === rowModel) : models;
+    const visibleColumns = columnModel ? models.filter(model => model === columnModel) : models;
     const cells = state.cells.filter(c => c.category === category);
     const pending = cells.filter(c => c.decision_id && c.action === 'replace');
     const total = models.length*(models.length-1)/2, configured = cells.filter(c=>c.active_url).length;
     const selected = pending.filter(c=>chosen.has(c.decision_id)).length;
     $('comparisonMatrixView').innerHTML = `<div class="cm-list-header"><div><h3>对比矩阵</h3><p class="cm-list-summary">按品类查看型号对比，点击格子选择图片并确认替换。</p></div>${toolbar()}</div>
-      <div class="cm-matrix-controls"><label for="cmCategory">品类 <select id="cmCategory" class="input-modern">${Object.keys(state.catalog).map(c => `<option ${c === category ? 'selected' : ''}>${escape(c)}</option>`).join('')}</select></label><div class="cm-matrix-stats"><span><b>${models.length}</b> 个型号</span><span><b>${configured} / ${total}</b> 已配置</span><span><b>${pending.length}</b> 条替换决定</span></div><div class="cm-matrix-legend"><span class="cm-legend-active">已有图片</span><span class="cm-legend-candidate">有候选</span><span class="cm-legend-empty">暂无图片</span></div></div>
+      <div class="cm-matrix-controls"><label for="cmCategory">品类 <select id="cmCategory" class="input-modern">${categories().map(c => `<option ${c === category ? 'selected' : ''}>${escape(c)}</option>`).join('')}</select></label><label for="cmRowModel">行型号 <select id="cmRowModel" class="input-modern"><option value="">全部型号</option>${models.map(m => `<option value="${escape(m)}" ${m === rowModel ? 'selected' : ''}>${escape(m)}</option>`).join('')}</select></label><label for="cmColumnModel">列型号 <select id="cmColumnModel" class="input-modern"><option value="">全部型号</option>${models.map(m => `<option value="${escape(m)}" ${m === columnModel ? 'selected' : ''}>${escape(m)}</option>`).join('')}</select></label><div class="cm-matrix-stats"><span><b>${visibleRows.length} × ${visibleColumns.length}</b> 个可见位置 / ${models.length} 个型号</span><span><b>${configured} / ${total}</b> 已配置</span><span><b>${pending.length}</b> 条替换决定</span></div><div class="cm-matrix-legend"><span class="cm-legend-active">已有图片</span><span class="cm-legend-candidate">有候选</span><span class="cm-legend-empty">暂无图片</span></div></div>
       <div class="cm-matrix-hint">A–B 与 B–A 共用一份记录；确认待写入时，当前生效图仍保留。</div>
-      <div class="cm-matrix-wrap" id="cmMatrixScroll" role="region" aria-label="${escape(category)}型号对比矩阵" tabindex="0">${models.length ? `<table class="cm-matrix" style="--cm-model-columns:${models.length+1}"><thead><tr><th scope="col">型号 / 型号</th>${models.map(m=>`<th scope="col">${escape(m)}</th>`).join('')}</tr></thead><tbody>${models.map((a,i)=>`<tr><th scope="row">${escape(a)}</th>${models.map((b,j)=> {
-        if(i===j) return '<td class="cm-diagonal" aria-label="同型号不比较"><span>—</span></td>';
+      <div class="cm-matrix-wrap" id="cmMatrixScroll" role="region" aria-label="${escape(category)}型号对比矩阵" tabindex="0">${models.length ? `<table class="cm-matrix" style="--cm-model-columns:${visibleColumns.length+1}"><thead><tr><th scope="col">型号 / 型号</th>${visibleColumns.map(m=>`<th scope="col">${escape(m)}</th>`).join('')}</tr></thead><tbody>${visibleRows.map(a=>`<tr><th scope="row">${escape(a)}</th>${visibleColumns.map(b=> {
+        if(a===b) return '<td class="cm-diagonal" aria-label="同型号不比较"><span>—</span></td>';
         const cell=findCell(a,b); const candidates=state.assets.filter(v=>v.tagged && v.category===category && v.models.includes(a) && v.models.includes(b));
         const kind=cell?.active_url ? 'active' : candidates.length ? 'candidate' : 'empty';
         return `<td><button class="cm-cell" data-kind="${kind}" aria-label="${escape(a)} / ${escape(b)}：${escape(cell?.status || (candidates.length ? '待确认' : '暂无图片'))}，${candidates.length} 个候选" data-cm="cell" data-a="${escape(a)}" data-b="${escape(b)}">${cell?.active_url ? `<img src="${escape(cell.active_url)}" alt="当前生效图" loading="lazy" referrerpolicy="no-referrer">` : `<strong>${candidates.length ? '选择图片' : '暂无图片'}</strong>`}${cell?.status || candidates.length ? `<span class="cm-cell-status">${escape(cell?.status || '待确认')}</span>` : ''}<small>${candidates.length ? `${candidates.length} 个候选` : '点击查看'}</small></button></td>`;
@@ -111,26 +136,81 @@
   }
   async function openCell(a,b) {
     detail = await api(`/cell?category=${encodeURIComponent(category)}&a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`);
+    targetIdSearch = targetQuestionSearch = '';
+    candidateFilter = 'all'; candidateSort = 'newest'; candidateView = 'list'; showAllReferences = false; selectedTargets.clear();
     const current = detail.cell;
-    const selectedId = detail.decision?.asset_id || detail.candidates[0]?.id;
-    dialog(`${a} / ${b} · 逐格确认`, `<p>当前：${current.active_url ? image(current.active_url)+escape(current.active_url) : '缺失'} · ${escape(current.status || '待确认')}</p>
-      ${detail.historical_conflict ? '<p class="cm-warning">同一型号对存在多张历史图，需人工选择初始图；各 KB 的真实引用继续单独展示。</p>':''}
-      <label>选择候选 <select class="input-modern" id="cmCandidate">${detail.candidates.map(v=>`<option value="${escape(v.id)}" ${v.id===selectedId?'selected':''}>${escape(v.models.join(' → '))} · ${escape(v.batch_name)}</option>`).join('')}</select></label><div id="cmCandidateDetail"></div>
-      <div class="cm-toolbar"><button data-cm="keep">保持旧图（保存决定）</button><button data-cm="initial">登记为初始历史图</button><button class="primary-btn" data-cm="confirm">确认所选目标，待写入</button></div>
-      <details><summary>确认历史（${detail.history.length} 条）</summary>${detail.history.map(h=>`<section class="cm-diff"><p>${escape(h.created_at)} · ${escape(h.actor)} · ${escape(({keep:'保持旧图',initialize:'历史登记',replace:'替换'})[h.action])} · ${escape(h.status)}</p><div class="cm-url">${escape(h.url || '缺失')}${h.targets.map(t=>`<p>${escape(t.kb_id)} · ${escape(t.field)}[${t.position}] · 版本 ${t.base_version}<br>${escape(t.old_url)}</p>`).join('')}</div></section>`).join('') || '暂无确认记录'}</details>`);
+    currentCellPair = [a, b];
+    selectedCandidateIndex = Math.max(0, detail.candidates.findIndex(v => v.id === (detail.decision?.asset_id || detail.candidates[0]?.id)));
+    const batchPending=state.cells.filter(cell=>cell.category===category && !cell.active_url && !cell.decision_id).length;
+    const batchConfirmed=state.cells.filter(cell=>cell.category===category && cell.decision_id).length;
+    dialog(`${a} / ${b} · 逐格确认`, `<div class="cm-confirm-header-meta"><span>逐格确认</span>对比矩阵 · 产品对比图 <i></i> 本批次待确认 <code>${batchPending}</code> <i></i> 已确认 <code>${batchConfirmed}</code></div><div class="cm-confirm-layout" data-origin-a="${escape(a)}" data-origin-b="${escape(b)}">
+      <div class="cm-confirm-main">
+        <section class="cm-sec"><div class="cm-sec-title"><strong>当前格</strong><span class="cm-lock-note">${svg('lock')}由矩阵点击定位，不可更改</span></div><div class="cm-current-cell"><span>行 <code>[${escape(modelIndex(a))}]</code> ${escape(a)}</span><i></i><span>列 <code>[${escape(modelIndex(b))}]</code> ${escape(b)}</span><i></i><span class="cm-state ${current.active_url ? 'is-active' : ''}"><b></b>${current.active_url ? '已有旧图 · 可替换' : '缺失 · 待确认'}</span></div>${current.active_url ? `<small class="cm-old-image-note">当前图片：${escape(current.active_url)}</small>` : ''}</section>
+        ${detail.historical_conflict ? '<p class="cm-warning">同一型号对存在多张历史图，需人工选择初始图；各 KB 的真实引用继续单独展示。</p>':''}
+        <section class="cm-sec"><div class="cm-sec-title"><strong>候选图片 <span class="cm-count" id="cmCandidateCount"></span></strong><div class="cm-view-switch"><button type="button" data-cm-view="list" aria-label="列表视图" title="列表视图">${svg('list')}</button><button type="button" data-cm-view="grid" aria-label="网格视图" title="网格视图">${svg('grid')}</button></div><span class="cm-shortcut-hint">键盘 1–9 快速切换</span></div><div id="cmCandidateFilters" class="cm-candidate-filters"></div><div class="cm-candidate-tools"><span id="cmFilterCounts"></span><label>排序 <select id="cmCandidateSort" aria-label="候选排序"><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="name">型号排序</option></select></label></div><div id="cmCandidateList" class="cm-candidate-list" role="radiogroup" aria-label="候选图片"></div></section>
+        <section class="cm-sec" id="cmOtherRefs"></section>
+        <section class="cm-sec"><div class="cm-sec-title"><strong>搜索关联目标</strong><span class="cm-sec-note">已有图片可替换对应位置；没有图片的 KB 会追加新图</span></div><div class="cm-target-search-grid"><label>搜索 KB ID<div class="cm-search-box">${svg('search')}<input id="cmTargetIdSearch" type="search" aria-label="搜索 KB ID" placeholder="输入 KB ID"></div></label><label>搜索问题<div class="cm-search-box">${svg('search')}<input id="cmTargetQuestionSearch" type="search" aria-label="搜索问题" placeholder="输入问题关键词"></div></label></div><p id="cmTargetCount" class="cm-target-count"></p><div id="cmTargetResults" class="cm-target-results"><div class="cm-search-empty">${svg('search')}输入 ID 或问题后显示搜索结果</div></div></section>
+        <section class="cm-sec"><div class="cm-sec-title"><strong>确认历史 <span class="cm-count">${detail.history.length} 条</span></strong></div><details class="cm-history"><summary>${svg('clock')}本单元格的操作记录 <span class="cm-count">${detail.history.length}</span><small>确认后将自动追加</small></summary><div class="cm-history-body">${detail.history.length ? detail.history.map(h=>`<div class="cm-history-row"><time>${escape(formatTime(h.created_at))}</time><span>${escape(({keep:'保持旧图',initialize:'历史登记',replace:'替换'})[h.action] || h.action)} · ${escape(h.status)}</span><span>${escape(h.actor || '—')}</span></div>`).join('') : `<div class="cm-history-empty">${svg('clock')}暂无确认记录。完成一次写入后，此处将展示时间、动作与操作人。</div>`}</div></details></section>
+      </div><aside class="cm-preview-panel"><div class="cm-preview-panel-head">${svg('image')}图片预览<span id="cmPreviewIndex" class="cm-count"></span></div><div class="cm-preview-image" id="cmPreviewImage"></div><dl id="cmPreviewMeta"></dl></aside></div>
+      <footer class="cm-confirm-footer"><p>将写入 <b id="cmWriteCount">0</b> 个位置：${escape(a)} × ${escape(b)}<span class="cm-key-hints"><kbd>↑</kbd><kbd>↓</kbd> 切换候选 <kbd>Enter</kbd> 确认 <kbd>Esc</kbd> 关闭</span></p><div class="cm-footer-actions"><button class="cm-link" data-cm="initial">登记为初始历史图</button><button class="cm-alt" data-cm="keep">保持旧图（保存决定）</button><button class="cm-pri" data-cm="confirm" ${detail.candidates.length ? '' : 'disabled'}>确认所选目标并写入 <span>Enter</span></button></div></footer>`);
+    $('comparisonDialog').classList.add('cm-confirm-dialog');
     renderCandidate();
   }
+  function modelIndex(model) { return Math.max(0, orderedModels().indexOf(model)); }
   function renderCandidate() {
-    const candidate = detail.candidates.find(a=>a.id===$('cmCandidate').value);
-    if(!candidate) { $('cmCandidateDetail').textContent='没有人工确认的图片候选，请先补充历史图型号或录入新图。'; return; }
-    const selected=detail.decision?.asset_id===candidate.id ? detail.decision.targets : [];
-    $('cmCandidateDetail').innerHTML = `${image(candidate.url)}<p class="cm-url">${escape(candidate.url)}</p><p>图片覆盖：${escape(candidate.models.join(' → '))} · ${escape(candidate.status)}</p><p>逐条勾选目标；只替换显示的位置。位置从 0 开始；同一 URL 出现多次也分别确认。</p>
-      <div class="cm-targets">${candidate.targets.filter(t=>t.old_url!==candidate.url).map((t,i)=>`<label class="cm-target"><input type="checkbox" data-cm-target="${i}" ${selected.some(v=>['kb_id','field','position','old_url','base_version'].every(k=>v[k]===t[k]))?'checked':''}><div><b>${escape(t.kb_id)}</b> · ${escape(t.field)}[${t.position}] · 版本 ${t.base_version}<br>KB 关联型号：${escape(t.kb_models)}<br>旧图覆盖：${escape(t.old_models.join(' → '))}<br><span>${escape(t.reason)} · 优先级 ${t.rank.join(' / ')}（同级并列）</span><div class="cm-url">旧：${escape(t.old_url)}<br>新：${escape(candidate.url)}</div></div></label>`).join('') || '<p>没有可替换的已确认旧图引用；可补全历史图片覆盖型号后重试。本期仅替换已有位置。</p>'}</div>`;
+    const candidate = detail.candidates[selectedCandidateIndex];
+    if(candidate && !selectedTargets.has(candidate.id)) {
+      const initial = detail.decision?.asset_id===candidate.id ? detail.decision.targets : [];
+      selectedTargets.set(candidate.id, new Map(initial.map(target=>{ const normalized=normalizeTarget(target); return [targetKey(normalized), normalized]; })));
+    }
+    const filterTypes = {all:()=>true,new: a=>Boolean(a.batch_id),history:a=>Boolean(a.historical),pending:a=>a.status!=='使用中'};
+    const filtered = detail.candidates.map((item,index)=>({item,index})).filter(({item})=>filterTypes[candidateFilter](item));
+    filtered.sort((a,b)=>candidateSort==='oldest' ? String(a.item.created_at).localeCompare(String(b.item.created_at)) : candidateSort==='name' ? a.item.models.join(' ').localeCompare(b.item.models.join(' '),'zh-CN') : String(b.item.created_at).localeCompare(String(a.item.created_at)));
+    const filters = [['all','全部'],['new','新品对比图'],['history','历史补图'],['pending','待替换']];
+    $('cmCandidateFilters').innerHTML=filters.map(([id,label])=>`<button type="button" data-cm-filter="${id}" class="${candidateFilter===id?'is-active':''}">${label} <span>${id==='all'?detail.candidates.length:detail.candidates.filter(filterTypes[id]).length}</span></button>`).join('');
+    $('cmCandidateCount').textContent=`${detail.candidates.length} 个`;
+    $('cmFilterCounts').textContent=`显示 ${filtered.length} / ${detail.candidates.length} 个候选`;
+    $('cmCandidateSort').value=candidateSort;
+    $('cmCandidateList').classList.toggle('is-grid',candidateView==='grid');
+    document.querySelectorAll('[data-cm-view]').forEach(el=>el.classList.toggle('is-active',el.dataset.cmView===candidateView));
+    $('comparisonDialog').querySelector('[data-cm="confirm"]').disabled=!detail.candidates.length || !(selectedTargets.get(candidate?.id)?.size);
+    $('cmCandidateList').innerHTML=filtered.map(({item,index})=>`<button type="button" class="cm-candidate-card ${index===selectedCandidateIndex?'is-selected':''}" role="radio" aria-checked="${index===selectedCandidateIndex}" data-cm-candidate-index="${index}"><span class="cm-number">${index+1}</span><span class="cm-radio"></span><img src="${escape(item.url)}" alt="" loading="lazy" referrerpolicy="no-referrer"><span class="cm-candidate-info"><strong>${escape(item.models.join(' → '))} · ${escape(item.batch_name)}</strong><span class="cm-tags"><em>${item.batch_id?'新品对比图':'历史补图'}</em><em>${escape(String(item.created_at || '').slice(0,10) || '历史')}</em><em>${item.references.length} 处引用${item.references.length?' · 含当前格':''}</em></span><small>${escape(shortUrl(item.url))}</small></span><span class="cm-candidate-status">${escape(item.status==='使用中'?'待替换':'待确认')}</span></button>`).join('') || '<div class="cm-candidate-empty">该位置暂无候选图片</div>';
+    renderCandidateDetails(candidate);
   }
+  function shortUrl(url) { try { const parsed=new URL(url); return `${parsed.hostname} · ${parsed.pathname.split('/').filter(Boolean).pop() || ''}`; } catch { return url; } }
+  function renderCandidateDetails(candidate) {
+    const current = detail.cell;
+    $('cmPreviewIndex').textContent=candidate ? `候选 ${selectedCandidateIndex+1}` : '暂无候选';
+    $('cmPreviewImage').innerHTML=candidate ? `<img src="${escape(candidate.url)}" alt="候选对比图" referrerpolicy="no-referrer">` : '<span>该位置暂无候选图片</span>';
+    const coveredModels = candidate?.models || [];
+    const pairRefs=[];
+    for(let i=0;i<coveredModels.length;i++) for(let j=i+1;j<coveredModels.length;j++) {
+      const pair=[coveredModels[i],coveredModels[j]];
+      if(pair.includes(currentCellPair[0]) && pair.includes(currentCellPair[1])) continue;
+      pairRefs.push(pair);
+    }
+    const confirmedPairs=new Set(state.cells.filter(cell=>cell.active_asset_id===candidate?.id || cell.pending_asset_id===candidate?.id).map(cell=>JSON.stringify([...cell.pair].sort())));
+    const sortedPairRefs=pairRefs.map((pair,index)=>({pair,index,confirmed:confirmedPairs.has(JSON.stringify([...pair].sort()))})).sort((a,b)=>Number(b.confirmed)-Number(a.confirmed));
+    const visiblePairRefs=showAllReferences ? sortedPairRefs : sortedPairRefs.slice(0,5);
+    const remainingPairRefs=sortedPairRefs.length-visiblePairRefs.length;
+    $('cmOtherRefs').innerHTML=`<div class="cm-sec-title"><strong>其他引用位置 <span class="cm-count">${pairRefs.length} 处</span></strong><span class="cm-sec-note">同一 URL 出现多次，需分别确认</span></div>${pairRefs.length ? `<div class="cm-reference-list">${visiblePairRefs.map(({pair,index,confirmed})=>`<div><code>位置 ${index+1}</code><span>${escape(pair[0])} × ${escape(pair[1])}</span><em class="${confirmed?'is-confirmed':''}">${confirmed?'已确认':'待确认'}</em></div>`).join('')}</div>${sortedPairRefs.length>5?`<button type="button" class="cm-reference-more" data-cm-references="${showAllReferences?'less':'more'}">${showAllReferences?'收起':`更多（剩余 ${remainingPairRefs} 处）`}</button>`:''}` : '<p class="cm-only-reference">该图片仅在当前格使用</p>'}<div class="cm-reference-tip">ⓘ 本次仅写入位置 0，其余位置需在矩阵中逐格点击确认。</div>`;
+    $('cmPreviewMeta').innerHTML=`<div><dt>当前状态</dt><dd><span class="cm-state ${current.active_url?'is-active':''}"><b></b>${current.active_url?'已有旧图 · 可替换':'缺失 · 待确认'}</span></dd></div><div><dt>覆盖方向</dt><dd class="cm-direction"><span>${escape(detail.cell.pair[0])}</span><small>↓ 覆盖到</small><span>${escape(detail.cell.pair[1])}</span></dd></div><div><dt>写入位置</dt><dd>位置 0 · 当前格（矩阵点击定位）</dd></div><div><dt>图片链接</dt><dd class="cm-preview-url"><span title="${escape(candidate?.url || '')}">${escape(candidate ? shortUrl(candidate.url) : '—')}</span><button type="button" data-cm="copy" data-value="${escape(candidate?.url || '')}">复制</button></dd></div>`;
+    const idQuery=targetIdSearch.trim().toLocaleLowerCase(), questionQuery=targetQuestionSearch.trim().toLocaleLowerCase();
+    const hasSearch=Boolean(idQuery || questionQuery);
+    if(!candidate) { $('cmTargetCount').textContent='已选 0'; $('cmTargetResults').innerHTML='<div class="cm-search-empty">没有可搜索的目标</div>'; $('cmWriteCount').textContent='0'; $('comparisonDialog').querySelector('[data-cm="confirm"]').disabled=true; return; }
+    const selected=selectedTargets.get(candidate.id) || new Map();
+    const allTargets=candidate.targets.map((target,index)=>({target,index})).filter(({target})=>target.old_url!==candidate.url);
+    const matches=allTargets.filter(({target})=>(!idQuery || String(target.kb_id||'').toLocaleLowerCase().includes(idQuery)) && (!questionQuery || String(target.kb_question||'').toLocaleLowerCase().includes(questionQuery)));
+    $('cmTargetCount').textContent=`${hasSearch?`匹配 ${matches.length} / ${allTargets.length} 个目标 · `:''}已选 ${selected.size}`;
+    $('cmWriteCount').textContent=selected.size;
+    $('comparisonDialog').querySelector('[data-cm="confirm"]').disabled=selected.size===0;
+    $('cmTargetResults').innerHTML=!hasSearch?`<div class="cm-search-empty">${svg('search')}输入 ID 或问题后显示搜索结果</div>`:matches.length?`<div class="cm-targets">${matches.map(({target,index})=>{const normalized=normalizeTarget(target),append=normalized.target_mode==='append';return `<label class="cm-target"><input type="checkbox" data-cm-target="${index}" ${selected.has(targetKey(normalized))?'checked':''}><span><b>${escape(target.kb_id)}</b> · ${append?'新增关联':`${escape(target.field)}[${target.position}]`} · 版本 ${target.base_version}<br><small>${escape(target.kb_question||'未填写问题')}</small><br>${append?'新图将追加到该 KB 的图片链接':`旧图：${escape(target.old_url)}`}</span></label>`;}).join('')}</div>`:'<div class="cm-search-empty">未找到匹配的 KB，试试其他关键词</div>';
+  }
+  function normalizeTarget(target) { return {...target,target_mode:target.target_mode || (target.old_url ? 'replace' : 'append')}; }
+  function targetKey(target) { return JSON.stringify(['kb_id','field','position','old_url','base_version','target_mode'].map(key=>target[key] ?? null)); }
   async function saveDecision(action) {
-    const candidate = detail.candidates.find(a=>a.id===$('cmCandidate').value);
-    const targets = candidate?.targets.filter(t=>t.old_url!==candidate.url) || [];
-    const selected = [...document.querySelectorAll('[data-cm-target]:checked')].map(el=>targets[Number(el.dataset.cmTarget)]);
+    const candidate = detail.candidates[selectedCandidateIndex];
+    const selected = [...(candidate ? (selectedTargets.get(candidate.id)?.values() || []) : [])];
     const result=await api('/confirm',{category, pair:detail.cell.pair, base_decision_id:detail.cell.decision_id || null, asset_id:candidate?.id, action, targets:selected});
     if(action==='replace') chosen.add(result.decision_id);
     $('comparisonDialog').close(); await refresh();
@@ -139,8 +219,10 @@
     const valid=new Set(state.cells.map(c=>c.decision_id));
     const ids=[...chosen].filter(id=>valid.has(id));
     preview=await api('/preview',{decision_ids:ids}); preview.ids=ids;
-    dialog('KB 修改前后差异', `<p>同一 KB 合并为一次修改。冲突目标会跳过，其余目标可执行。新增 0 项；替换 ${preview.groups.reduce((n,g)=>n+new Set(g.entries.map(e=>e.field+':'+e.position)).size,0)} 个位置；保持旧图 ${preview.keep_count} 格；冲突 ${preview.groups.filter(g=>g.conflicts.length).length} 个 KB。</p>
-      ${preview.groups.map(g=>`<section class="cm-diff"><h4>${escape(g.kb_id)} · ${escape(g.status)} · 当前版本 ${g.current_version ?? '—'}</h4>${g.conflicts.map(c=>`<p class="cm-warning">${escape(c)}</p>`).join('')}${g.entries.map(e=>`<p>${escape(e.pair.join(' / '))} · ${escape(e.field)}[${e.position}] · 确认版本 ${e.base_version}</p><del>${escape(e.old_url)}</del><ins>${escape(e.new_url)}</ins>`).join('')}</section>`).join('')}
+    const appendCount=preview.groups.reduce((n,g)=>n+new Set(g.entries.filter(e=>e.target_mode==='append').map(e=>e.field+':'+e.position)).size,0);
+    const replaceCount=preview.groups.reduce((n,g)=>n+new Set(g.entries.filter(e=>e.target_mode!=='append').map(e=>e.field+':'+e.position)).size,0);
+    dialog('KB 修改前后差异', `<p>同一 KB 合并为一次修改。冲突目标会跳过，其余目标可执行。新增图片 ${appendCount} 个位置；替换 ${replaceCount} 个位置；保持旧图 ${preview.keep_count} 格；冲突 ${preview.groups.filter(g=>g.conflicts.length).length} 个 KB。</p>
+      ${preview.groups.map(g=>`<section class="cm-diff"><h4>${escape(g.kb_id)} · ${escape(g.status)} · 当前版本 ${g.current_version ?? '—'}</h4>${g.conflicts.map(c=>`<p class="cm-warning">${escape(c)}</p>`).join('')}${g.entries.map(e=>`<p>${escape(e.pair.join(' / '))} · ${escape(e.field)}[${e.position}] · ${e.target_mode==='append'?'新增图片':`替换图片 · 版本 ${e.base_version}`}</p>${e.target_mode==='append'?'<del>无</del>':`<del>${escape(e.old_url)}</del>`}<ins>${escape(e.new_url)}</ins>`).join('')}</section>`).join('')}
       <button class="primary-btn" data-cm="apply">一键应用（实际写入 KB / 恢复清单）</button>`);
   }
   async function executions() {
@@ -150,6 +232,14 @@
     $('comparisonDialogBody').dataset.copy=JSON.stringify(result.rows,null,2);
   }
   document.addEventListener('click', safe(async event => {
+    const referenceButton=event.target.closest('[data-cm-references]');
+    if(referenceButton) { showAllReferences=referenceButton.dataset.cmReferences==='more'; renderCandidateDetails(detail.candidates[selectedCandidateIndex]); return; }
+    const candidateButton=event.target.closest('[data-cm-candidate-index]');
+    if(candidateButton) { selectedCandidateIndex=Number(candidateButton.dataset.cmCandidateIndex); renderCandidate(); return; }
+    const filterButton=event.target.closest('[data-cm-filter]');
+    if(filterButton) { candidateFilter=filterButton.dataset.cmFilter; renderCandidate(); return; }
+    const viewButton=event.target.closest('[data-cm-view]');
+    if(viewButton) { candidateView=viewButton.dataset.cmView; document.querySelectorAll('[data-cm-view]').forEach(el=>el.classList.toggle('is-active',el.dataset.cmView===candidateView)); renderCandidate(); return; }
     const button=event.target.closest('[data-cm]'); if(!button) return;
     const action=button.dataset.cm;
     if(button.disabled) return;
@@ -179,8 +269,21 @@
   }));
   document.addEventListener('change',safe(async event=>{
     const el=event.target;
-    if(el.id==='cmCategory') { category=el.value; renderMatrix(); }
-    if(el.id==='cmCandidate') renderCandidate();
+    if(el.id==='cmCategory') { category=el.value; rowModel=''; columnModel=''; renderMatrix(); }
+    if(el.id==='cmRowModel') { rowModel=el.value; renderMatrix(); }
+    if(el.id==='cmColumnModel') { columnModel=el.value; renderMatrix(); }
+    if(el.id==='cmCandidateSort') { candidateSort=el.value; renderCandidate(); }
+    if(el.dataset.cmTarget!==undefined) {
+      const candidate=detail.candidates[selectedCandidateIndex];
+      const target=candidate?.targets[Number(el.dataset.cmTarget)];
+      if(target) {
+        const normalized = normalizeTarget(target);
+        const selected=selectedTargets.get(candidate.id) || new Map();
+        if(el.checked) selected.set(targetKey(normalized),normalized); else selected.delete(targetKey(normalized));
+        selectedTargets.set(candidate.id,selected);
+        renderCandidateDetails(candidate);
+      }
+    }
     if(el.dataset.cmDecision) {
       if(el.checked) chosen.add(el.dataset.cmDecision); else chosen.delete(el.dataset.cmDecision);
       const count=document.querySelectorAll('#comparisonMatrixView [data-cm-decision]:checked').length;
@@ -199,5 +302,22 @@
     }
   }));
   document.addEventListener('input',event=>{if(event.target.id==='cmImageSearch'){imageSearch=event.target.value; const at=event.target.selectionStart; renderImages(); $('cmImageSearch').focus(); $('cmImageSearch').setSelectionRange(at,at);}});
+  document.addEventListener('input',event=>{
+    const id=event.target.id;
+    if(id!=='cmTargetIdSearch' && id!=='cmTargetQuestionSearch') return;
+    if(id==='cmTargetIdSearch') targetIdSearch=event.target.value; else targetQuestionSearch=event.target.value;
+    const at=event.target.selectionStart;
+    renderCandidateDetails(detail.candidates[selectedCandidateIndex]);
+    const input=$(id); input.focus(); input.setSelectionRange(at,at);
+  });
+  document.addEventListener('keydown',event=>{
+    if(!$('comparisonDialog').open || !$('comparisonDialog').classList.contains('cm-confirm-dialog')) return;
+    const typing=/INPUT|TEXTAREA|SELECT/.test(event.target.tagName) || event.target.isContentEditable;
+    if(event.key==='Escape') return;
+    if(typing) return;
+    if(/^[1-9]$/.test(event.key) && detail.candidates[Number(event.key)-1]) { event.preventDefault(); selectedCandidateIndex=Number(event.key)-1; renderCandidate(); }
+    if(event.key==='ArrowDown' || event.key==='ArrowUp') { event.preventDefault(); const count=detail.candidates.length; if(count) { selectedCandidateIndex=(selectedCandidateIndex+(event.key==='ArrowDown'?1:-1)+count)%count; renderCandidate(); } }
+    if(event.key==='Enter' && !event.target.closest('button')) { event.preventDefault(); $('comparisonDialog').querySelector('[data-cm="confirm"]')?.click(); }
+  });
   window.comparisonUI={switchTab:safe(switchTab)};
 })();

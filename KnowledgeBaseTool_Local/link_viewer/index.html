@@ -9,8 +9,8 @@
   <link rel="stylesheet" href="design-system.css?v=3">
   
   <!-- 原有样式 -->
-  <link rel="stylesheet" href="styles.css?v=67">
-  <link rel="stylesheet" href="extra_styles.css?v=105">
+  <link rel="stylesheet" href="styles.css?v=68">
+  <link rel="stylesheet" href="extra_styles.css?v=118">
   <!-- 滚动性能优化 -->
   <link rel="stylesheet" href="scroll-performance.css?v=4">
   <!-- 加载状态提示样式 -->
@@ -1901,7 +1901,7 @@
         </nav>
         <section id="comparisonImagesView" class="cm-panel" role="tabpanel" hidden></section>
         <section id="comparisonMatrixView" class="cm-panel" role="tabpanel" hidden></section>
-        <dialog id="comparisonDialog" class="cm-dialog" aria-label="产品对比图操作">
+        <dialog id="comparisonDialog" class="cm-dialog" aria-modal="true" aria-labelledby="comparisonDialogTitle">
           <div class="cm-dialog-head"><strong id="comparisonDialogTitle"></strong><button type="button" onclick="document.getElementById('comparisonDialog').close()" aria-label="关闭">×</button></div>
           <div id="comparisonDialogBody"></div>
           <p id="comparisonDialogError" role="alert"></p>
@@ -2006,25 +2006,15 @@
                 <input type="text" id="linkSearchURL" placeholder="搜索 URL..." class="input-modern" oninput="renderLinkTable(); this.title=this.value">
              </div>
              <div class="gov-filter-field link-tag-selector-field">
-                <div class="link-tag-inline-group">
-                  <div class="matrix-status-tabs link-tag-mode-tabs" role="tablist" aria-label="标签筛选逻辑">
-                    <button type="button" class="matrix-status-tab active" data-tag-mode="any" onclick="document.querySelector('input[name=tagFilterMode][value=any]').checked=true; renderLinkTable();">包含任一</button>
-                    <button type="button" class="matrix-status-tab" data-tag-mode="all" onclick="document.querySelector('input[name=tagFilterMode][value=all]').checked=true; renderLinkTable();">包含所有</button>
-                  </div>
-                  <div class="d-none">
-                    <input type="radio" name="tagFilterMode" value="any" checked onchange="renderLinkTable()">
-                    <input type="radio" name="tagFilterMode" value="all" onchange="renderLinkTable()">
-                  </div>
-                  <div class="link-tag-selector-wrap" id="linkTagSelectorWrap">
-                  <button type="button" id="linkTagSelectorBtn" class="link-tag-selector-btn" aria-expanded="false">
-                    <span class="link-tag-selector-label">选择标签</span>
-                    <span id="linkTagSelectorValue" class="link-tag-selector-value">未选择</span>
-                    <span class="link-tag-selector-arrow">▼</span>
-                  </button>
-                  <div id="linkTagDropdown" class="link-tag-dropdown d-none">
-                    <div id="tagFilter" class="link-tag-dropdown-list"></div>
-                  </div>
-                </div>
+                <button type="button" id="linkTagSelectorBtn" class="action-btn btn-secondary-outline kb-tag-filter-trigger" aria-haspopup="dialog" aria-expanded="false" aria-controls="linkTagDropdown">
+                  <i class="fas fa-tags" aria-hidden="true"></i><span>标签筛选</span>
+                  <span id="linkTagSelectorValue" class="kb-tag-filter-value">全部标签</span>
+                  <span id="linkTagFilterCount" class="kb-tag-filter-count" hidden>0</span>
+                  <i class="fas fa-chevron-down kb-tag-filter-arrow" aria-hidden="true"></i>
+                </button>
+                <div class="d-none">
+                  <input type="radio" name="tagFilterMode" value="any" checked>
+                  <input type="radio" name="tagFilterMode" value="all">
                 </div>
              </div>
              <div class="gov-filter-btn-group link-filter-actions">
@@ -3498,12 +3488,18 @@
                             <textarea name="keyword_list" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">图片链接 (每行一个)</label>
-                            <textarea name="image_urls" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
+                            <div class="kb-image-link-heading">
+                                <label class="form-label" for="kbEditImageUrls">图片链接 (每行一个)</label>
+                                <button type="button" class="action-btn btn-sm kb-image-link-picker-trigger" onclick="openKBImageLinkPicker('image')" title="从链接库选择图片" aria-label="从链接库选择图片"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button>
+                            </div>
+                            <textarea id="kbEditImageUrls" name="image_urls" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">视频链接 (每行一个)</label>
-                            <textarea name="video_urls" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
+                            <div class="kb-image-link-heading">
+                                <label class="form-label" for="kbEditVideoUrls">视频链接 (每行一个)</label>
+                                <button type="button" class="action-btn btn-sm kb-image-link-picker-trigger" onclick="openKBImageLinkPicker('video')" title="从链接库选择视频" aria-label="从链接库选择视频"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button>
+                            </div>
+                            <textarea id="kbEditVideoUrls" name="video_urls" rows="4" class="font-mono" style="font-size: 12px; background: #f9f9f9;"></textarea>
                         </div>
                         <div class="form-group">
                             <label class="form-label">文件链接 (每行一个)</label>
@@ -3591,6 +3587,42 @@
         </div>
     </div>
   </div>
+
+  <dialog id="kbImageLinkPickerDialog" class="kb-image-link-picker" role="dialog" aria-modal="true" aria-labelledby="kbImageLinkPickerTitle" aria-describedby="kbImageLinkPickerDescription" onclick="if (event.target === this) closeKBImageLinkPicker()">
+    <header class="kb-image-link-picker-head">
+      <div><h3 id="kbImageLinkPickerTitle">从链接库选择素材</h3><p id="kbImageLinkPickerDescription">支持图片与视频，可多选后插入到当前内容</p></div>
+      <button type="button" class="kb-image-link-picker-close" onclick="closeKBImageLinkPicker()" aria-label="关闭素材选择"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </header>
+    <div class="kb-image-link-picker-filters">
+      <div class="kb-image-link-picker-search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <input id="kbImageLinkSearch" type="search" aria-label="搜索素材名称或链接地址" placeholder="搜索素材名称或链接地址" oninput="scheduleKBImageLinkSearch()" autocomplete="off" autofocus>
+        <button type="button" id="kbImageLinkSearchClear" class="kb-picker-clear" onclick="clearKBImageLinkSearch()" aria-label="清空搜索" hidden><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg></button>
+      </div>
+      <select id="kbImageLinkType" aria-label="素材类型" disabled><option value="image">仅图片</option><option value="video">仅视频</option></select>
+      <select id="kbImageLinkTag" aria-label="素材标签" onchange="loadKBImageLinkPickerPage(1)"><option value="">全部标签</option></select>
+    </div>
+    <div class="kb-image-link-picker-summary">
+      <span id="kbImageLinkPickerStatus" role="status" aria-live="polite">正在加载素材</span>
+      <select id="kbImageLinkSort" class="kb-picker-sort" aria-label="素材排序" onchange="loadKBImageLinkPickerPage(1)"><option value="desc">最近上传</option><option value="asc">最早上传</option></select>
+    </div>
+    <div id="kbImageLinkPickerList" class="kb-image-link-picker-list" aria-label="素材列表"></div>
+    <footer class="kb-image-link-picker-footer">
+      <div class="kb-image-link-picker-page-controls"><span id="kbImageLinkPickerPageInfo">第 1 / 1 页</span><button type="button" id="kbImageLinkPickerPrev" class="kb-picker-button kb-picker-page" onclick="changeKBImageLinkPickerPage(-1)" disabled>上一页</button><button type="button" id="kbImageLinkPickerNext" class="kb-picker-button kb-picker-page" onclick="changeKBImageLinkPickerPage(1)" disabled>下一页</button></div>
+      <div class="kb-image-link-picker-actions"><span id="kbImageLinkPickerSelectedCount" aria-live="polite" aria-atomic="true">已选 0 项</span><button type="button" id="kbImageLinkPickerReset" class="kb-picker-button kb-picker-ghost" onclick="resetKBImageLinkPickerSelection()" disabled>重置</button><button type="button" class="kb-picker-button" onclick="closeKBImageLinkPicker()">取消</button><button type="button" id="kbImageLinkPickerConfirm" class="kb-picker-button kb-picker-primary" onclick="confirmKBImageLinkPickerSelection()" disabled>插入所选素材 (0)</button></div>
+    </footer>
+  </dialog>
+
+  <dialog id="kbImageLinkPreviewDialog" class="kb-image-link-preview-dialog" aria-labelledby="kbImageLinkPreviewTitle" onclick="if (event.target === this) closeKBImageLinkPreview()" oncancel="closeKBImageLinkPreview()">
+    <div class="kb-image-link-preview-toolbar">
+      <strong id="kbImageLinkPreviewTitle">图片预览</strong>
+      <button type="button" class="kb-image-link-preview-close" onclick="closeKBImageLinkPreview()" aria-label="关闭预览"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div class="kb-image-link-preview-stage">
+      <img id="kbImageLinkPreviewImage" alt="图片放大预览">
+      <video id="kbImageLinkPreviewVideo" controls playsinline preload="metadata" hidden></video>
+    </div>
+  </dialog>
 
   <!-- KB Product Model Picker Modal -->
   <div id="kbProductModelPickerModal" class="modal kb-editor-submodal" aria-hidden="true">
@@ -4587,8 +4619,8 @@ G10 系列: G10S, G10S Pro"></textarea>
         </div>
     </div>
 
-    <script src="comparison_matrix.js?v=3"></script>
-<script src="app_v8.js?v=208"></script>
+    <script src="comparison_matrix.js?v=8"></script>
+<script src="app_v8.js?v=2026102202"></script>
 
   <!-- Outside the scrolling filter row so the dropdown is never clipped. -->
   <div id="kbTagFilterDropdown" class="kb-tag-filter-dropdown" role="dialog" aria-labelledby="kbTagFilterTitle" hidden>
@@ -4639,6 +4671,58 @@ G10 系列: G10S, G10S Pro"></textarea>
           <div class="kb-tag-manager-action-buttons">
               <button type="button" class="action-btn" onclick="cancelKbTagManagerAction()">取消</button>
               <button id="kbTagManagerSubmit" type="submit" class="primary-btn btn-primary-gradient">保存名称</button>
+          </div>
+      </form>
+  </dialog>
+
+  <div id="linkTagDropdown" class="kb-tag-filter-dropdown" role="dialog" aria-labelledby="linkTagFilterTitle" hidden>
+      <div class="kb-tag-filter-heading">
+          <strong id="linkTagFilterTitle">按标签筛选</strong>
+          <span id="linkTagFilterSelectionCount" aria-live="polite">未选择标签</span>
+      </div>
+      <div class="kb-tag-filter-mode" role="group" aria-label="标签匹配逻辑">
+          <label><input type="radio" name="linkTagFilterModeDraft" value="any" checked> 包含任一 (OR)</label>
+          <label><input type="radio" name="linkTagFilterModeDraft" value="all"> 包含所有 (AND)</label>
+      </div>
+      <label class="kb-tag-filter-search" for="linkTagFilterSearch">
+          <i class="fas fa-search" aria-hidden="true"></i>
+          <input id="linkTagFilterSearch" type="search" placeholder="搜索标签" autocomplete="off" oninput="renderLinkTagFilterList()">
+      </label>
+      <div id="tagFilter" class="kb-tag-filter-list" role="group" aria-label="可选标签"></div>
+      <div class="kb-tag-filter-footer">
+          <div class="kb-tag-filter-tools">
+              <button type="button" class="kb-tag-manage-link" onclick="openLinkTagManager()">管理标签</button>
+              <button type="button" class="action-btn btn-secondary-outline" onclick="clearLinkTagFilterDropdown()">清空</button>
+          </div>
+          <div>
+              <button type="button" class="action-btn" onclick="setLinkTagDropdownOpen(false, true)">取消</button>
+              <button type="button" class="primary-btn btn-primary-gradient" onclick="applyLinkTagFilterDropdown()">确认筛选</button>
+          </div>
+      </div>
+  </div>
+
+  <dialog id="linkTagManagerDialog" class="kb-tag-manager" aria-labelledby="linkTagManagerTitle" oncancel="if (linkTagManagerState.busy) event.preventDefault()" onclick="if (event.target === this) closeLinkTagManager()">
+      <div class="kb-tag-manager-head">
+          <div><h3 id="linkTagManagerTitle">标签管理</h3><p>统一维护全部链接中的业务标签。改名会同步显示在所有关联多媒体链接中；删除标签会移除关联，链接及预览内容保留。</p></div>
+          <button type="button" class="action-btn" aria-label="关闭标签管理" onclick="closeLinkTagManager()">×</button>
+      </div>
+      <div class="kb-tag-manager-toolbar">
+          <label for="linkTagManagerSearch"><i class="fas fa-search" aria-hidden="true"></i><input type="search" id="linkTagManagerSearch" placeholder="搜索标签名称" oninput="renderLinkTagManager()" autocomplete="off"></label>
+          <span id="linkTagManagerCount"></span>
+          <button type="button" class="action-btn btn-secondary-outline" onclick="loadLinkTagManager()">刷新</button>
+      </div>
+      <p class="kb-tag-manager-note">这里管理全部链接中的业务标签；来源标签自动保留。空标签仅用于筛选。</p>
+      <div id="linkTagManagerStatus" class="kb-tag-manager-status" role="status" aria-live="polite"></div>
+      <div class="kb-tag-manager-table-wrap">
+          <table class="kb-tag-manager-table"><thead><tr><th>标签名称</th><th>关联链接</th><th>操作</th></tr></thead><tbody id="linkTagManagerBody"></tbody></table>
+      </div>
+      <form id="linkTagManagerAction" class="kb-tag-manager-action" hidden onsubmit="event.preventDefault(); submitLinkTagManagerAction()">
+          <strong id="linkTagManagerActionTitle"></strong>
+          <p id="linkTagManagerImpact"></p>
+          <label id="linkTagManagerNameField" for="linkTagManagerName">新的标签名称<input id="linkTagManagerName" type="text" maxlength="100" autocomplete="off"></label>
+          <div class="kb-tag-manager-action-buttons">
+              <button type="button" class="action-btn" onclick="cancelLinkTagManagerAction()">取消</button>
+              <button id="linkTagManagerSubmit" type="submit" class="primary-btn btn-primary-gradient">保存名称</button>
           </div>
       </form>
   </dialog>

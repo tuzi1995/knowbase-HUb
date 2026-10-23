@@ -56,6 +56,13 @@ def image_list(value):
     return result
 
 
+def appendable_image_list(value):
+    """Read an image field for an explicit append without hiding malformed data."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return []
+    return image_list(value)
+
+
 def define_models(db):
     class ComparisonBatch(db.Model):
         __tablename__ = 'comparison_image_batch'
@@ -141,7 +148,7 @@ def register_routes(app, db, models, s):
         refs = {url: [] for url in urls}
         # Associations explain a link's KB context; only actual media positions
         # become executable references. Read the same physical V1 as link sync.
-        rows = c.select_all('knowledge_base_v1', columns='question_wiki_id,product_name,image_urls,link_url,content_version',
+        rows = c.select_all('knowledge_base_v1', columns='question_wiki_id,question,product_name,product_category_name,image_urls,link_url,content_version',
                             order_by='question_wiki_id', use_formal=False) or []
         by_id = {str(row['question_wiki_id']): row for row in rows}
         associations = {url: {} for url in urls}
@@ -171,8 +178,9 @@ def register_routes(app, db, models, s):
                         'kb_exists': True, 'reference_verified': True}
                     refs[url].append({'kb_id': str(row['question_wiki_id']), 'field': field, 'position': position,
                                       'old_url': url, 'base_version': int(row.get('content_version') or 1),
-                                      'kb_models': row.get('product_name') or ''})
-        return tagged, refs, associations
+                                      'kb_models': row.get('product_name') or '',
+                                      'kb_question': str(row.get('question') or '')})
+        return tagged, refs, associations, rows
 
     def validate_models(values):
         if not isinstance(values, list) or len(values) < 2 or any(not isinstance(v, str) for v in values):
@@ -212,26 +220,56 @@ def register_routes(app, db, models, s):
                 'action': decision.action if decision else None,
                 'pending_asset_id': decision.asset_id if decision else None}
 
-    def checked_targets(asset, pair, targets, refs):
+    def checked_targets(asset, pair, targets, refs, append_targets):
         if not isinstance(targets, list) or not targets:
-            raise ValueError('请选择至少一个明确的 KB 旧链接位置；本期不自动新增 KB 图片')
+            raise ValueError('请选择至少一个明确的 KB 位置：替换已有图片，或追加到指定 KB')
         allowed = []
         for old in Asset.query.filter(Asset.confirmed_by != '').all():
             if old.category == asset.category and set(pair) <= set(unpack(old.models_json, [])):
-                allowed += refs.get(old.url, [])
+                allowed += [dict(ref, target_mode='replace') for ref in refs.get(old.url, [])]
+        allowed += append_targets
         clean = []
         for t in targets:
             if not isinstance(t, dict):
                 raise ValueError('替换目标格式无效')
+            target_mode = t.get('target_mode')
+            if target_mode not in ('replace', 'append'):
+                target_mode = 'append' if not t.get('old_url') else 'replace'
             wanted = {k: t.get(k) for k in ('kb_id', 'field', 'position', 'old_url', 'base_version')}
+            wanted['target_mode'] = target_mode
             if not any(all(ref.get(k) == value for k, value in wanted.items()) for ref in allowed):
-                raise ValueError('目标版本或旧链接已变化，或旧图型号未经人工确认，请刷新格子后重新确认')
-            if wanted['old_url'] == asset.url:
+                raise ValueError('目标版本、KB 或旧链接已变化，请刷新格子后重新确认')
+            if target_mode == 'replace' and wanted['old_url'] == asset.url:
                 raise ValueError('新旧链接相同，请选择保持旧图或历史登记')
             if wanted in clean:
                 raise ValueError('替换目标不能重复')
             clean.append(wanted)
         return clean
+
+    def append_targets_for(rows, category, pair, asset):
+        """Expose explicit append choices for KBs that have no current image slot."""
+        result = []
+        for row in rows:
+            kb_id = str(row.get('question_wiki_id') or '').strip()
+            if not kb_id:
+                continue
+            models = {v.strip() for v in re.split(r'[,，;；\s]+', str(row.get('product_name') or '')) if v.strip()}
+            row_category = str(row.get('product_category_name') or '').strip()
+            if row_category != category and not set(pair).issubset(models):
+                continue
+            try:
+                existing = appendable_image_list(row.get('image_urls'))
+            except ValueError:
+                # A malformed existing array must remain a visible conflict,
+                # never be silently overwritten by an append.
+                continue
+            if asset.url in existing or str(row.get('link_url') or '').strip() == asset.url:
+                continue
+            result.append({'kb_id': kb_id, 'field': 'image_urls', 'position': len(existing),
+                           'old_url': '', 'base_version': int(row.get('content_version') or 1),
+                           'kb_question': str(row.get('question') or ''), 'target_mode': 'append',
+                           'rank': [2, len(existing)], 'reason': '追加新图到指定 KB'})
+        return result
 
     def response_error(fn):
         from functools import wraps
@@ -256,7 +294,7 @@ def register_routes(app, db, models, s):
 
     @route('/overview', ['GET'])
     def comparison_overview():
-        tagged, refs, associations = sources()
+        tagged, refs, associations, rows = sources()
         urls = {v['url'] for v in tagged}
         assets = [asset_dict(a, refs, urls, associations) for a in Asset.query.order_by(Asset.created_at).all()]
         return jsonify(success=True, catalog=s.parse_product_catalog(), assets=assets,
@@ -265,7 +303,7 @@ def register_routes(app, db, models, s):
 
     @route('/initialize', ['POST'])
     def comparison_initialize():
-        tagged, refs, associations = sources()
+        tagged, refs, associations, rows = sources()
         added = 0
         for link in tagged:
             if Asset.query.filter_by(url=link['url']).first():
@@ -350,7 +388,7 @@ def register_routes(app, db, models, s):
         if len(set(pair)) != 2 or any(v not in s.parse_product_catalog().get(category, []) for v in pair):
             raise ValueError('无效的同品类型号对')
         cell = db.session.get(Cell, pair_key(category, pair))
-        tagged, refs, associations = sources()
+        tagged, refs, associations, rows = sources()
         urls = {v['url'] for v in tagged}
         candidates = [asset_dict(a, refs, urls, associations) for a in Asset.query.filter_by(category=category).all()
                       if a.confirmed_by and set(pair) <= set(unpack(a.models_json, [])) and a.url in urls]
@@ -359,9 +397,10 @@ def register_routes(app, db, models, s):
             for old in candidates:
                 for ref in old['references']:
                     exact = set(old['models']) == set(candidate['models'])
-                    candidate['targets'].append(dict(ref, old_asset_id=old['id'], old_models=old['models'],
+                    candidate['targets'].append(dict(ref, target_mode='replace', old_asset_id=old['id'], old_models=old['models'],
                                                       rank=[0 if exact else 1, len(old['models'])],
                                                       reason='覆盖型号集合完全一致' if exact else '旧图包含该型号对（备选）'))
+            candidate['targets'].extend(append_targets_for(rows, category, pair, Asset.query.filter_by(id=candidate['id']).first()))
             candidate['targets'].sort(key=lambda v: v['rank'])
         candidates.sort(key=lambda v: (len(v['models']), v['id']))
         decision = db.session.get(Decision, cell.latest_decision_id) if cell and cell.latest_decision_id else None
@@ -404,14 +443,15 @@ def register_routes(app, db, models, s):
         if action != 'keep':
             if not asset or not asset.confirmed_by or asset.category != category or not set(pair) <= set(unpack(asset.models_json, [])):
                 raise ValueError('图片覆盖型号尚未人工确认或不包含此型号对')
-            tagged, refs, associations = sources()
+            tagged, refs, associations, rows = sources()
+            append_targets = append_targets_for(rows, category, pair, asset)
             if not any(v['url'] == asset.url for v in tagged):
                 raise ValueError('该链接已删除或已移除产品对比图标签')
             if action == 'initialize':
                 if cell.active_asset_id or not asset.historical or not refs.get(asset.url):
                     raise ValueError('仅可为缺失格子登记有实际 KB 引用的历史图')
             else:
-                targets = checked_targets(asset, pair, data.get('targets'), refs)
+                targets = checked_targets(asset, pair, data.get('targets'), refs, append_targets)
         decision = Decision(id=str(uuid.uuid4()), cell_id=key, asset_id=cell.active_asset_id if action == 'keep' else asset.id,
                             action=action, targets_json=dump(targets), actor=actor(), created_at=now(),
                             status='已确认待写入' if action == 'replace' else ('已生效' if action == 'initialize' else '保持旧图'))
@@ -484,11 +524,17 @@ def register_routes(app, db, models, s):
             if field not in ('image_urls', 'link_url'):
                 raise ValueError('不允许修改此字段')
             if field == 'image_urls':
-                values = changes.setdefault(field, list(image_list(row.get(field))))
-                original = image_list(row.get(field))
-                if not isinstance(position, int) or position < 0 or position >= len(original) or original[position] != e['old_url']:
-                    raise ValueError('指定图片位置旧 URL 已变化')
-                values[position] = e['new_url']
+                original = appendable_image_list(row.get(field)) if e.get('target_mode') == 'append' else image_list(row.get(field))
+                values = changes.setdefault(field, list(original))
+                if e.get('target_mode') == 'append':
+                    if e.get('old_url') not in ('', None) or position != len(original):
+                        raise ValueError('新增图片位置已变化，请重新确认')
+                    if e['new_url'] not in values:
+                        values.append(e['new_url'])
+                else:
+                    if not isinstance(position, int) or position < 0 or position >= len(original) or original[position] != e['old_url']:
+                        raise ValueError('指定图片位置旧 URL 已变化')
+                    values[position] = e['new_url']
             else:
                 if position != 0 or row.get(field) != e['old_url']:
                     raise ValueError('单链接字段旧 URL 已变化')

@@ -144,3 +144,20 @@ def test_item_tag_api_keeps_manual_and_automatic_tags_separate(api):
     second = client.get('/api/kb/item/tags?question_wiki_id=KB-1').get_json()
     assert second['tags'] == []
     assert second['mapping_tags'] == ['双型号']
+
+
+def test_template_reference_reads_pending_v1_row_when_formal_gate_is_enabled(api, monkeypatch):
+    client, database, _mappings = api
+    database.rows.append({
+        'question_wiki_id': 'KB-PENDING',
+        'question': '待修订问题',
+        'answer': '待修订答案',
+        'product_name': 'A10',
+        'similar_questions': [],
+    })
+    monkeypatch.setattr(server, '_formal_release_filter_enabled', lambda: True)
+
+    response = client.get('/api/kb/template-reference?id=KB-PENDING')
+
+    assert response.status_code == 200
+    assert response.get_json()['data']['question'] == '待修订问题'

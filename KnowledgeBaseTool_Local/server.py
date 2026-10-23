@@ -2345,6 +2345,7 @@ def get_links():
         
         # Search Param
         search_query = request.args.get('search', '').strip()
+        link_type = request.args.get('linkType', '').strip().lower()
         
         # Tag Params
         tags_param = request.args.get('tags', '').strip()
@@ -2357,6 +2358,13 @@ def get_links():
         filters = {}
         if search_query:
             filters['url'] = f"ilike.*{search_query}*"
+        if link_type:
+            if link_type == 'media':
+                filters['type'] = 'in.(image,video)'
+            elif link_type in {'image', 'video', 'youtube', 'file', 'link'}:
+                filters['type'] = f'eq.{link_type}'
+            else:
+                return jsonify({'success': False, 'message': '无效的链接类型'}), 400
             
         if tags_param:
             # tags_param is comma separated: "tag1,tag2"
@@ -2650,6 +2658,93 @@ def get_all_tags():
                     unique_tags.add(str(tag).strip())
                     
     return jsonify(list(sorted(unique_tags)))
+
+def _media_business_tags(tags):
+    if isinstance(tags, str):
+        tags = json.loads(tags)
+    return [tag for tag in (tags or []) if isinstance(tag, str) and tag.strip()
+            and not tag.startswith(('来源:', '外链类型:'))]
+
+
+def _media_tag_management_rows(items):
+    counts = {}
+    for item in items:
+        for tag in set(_media_business_tags(item.get('tags'))):
+            counts[tag] = counts.get(tag, 0) + 1
+    return [{'id': name, 'name': name, 'link_count': counts[name]} for name in sorted(counts)]
+
+
+@app.route('/api/links/tags/manage', methods=['GET', 'PUT', 'DELETE'])
+@login_required
+def manage_media_tags():
+    data = request.get_json(silent=True) if request.method != 'GET' else None
+    if request.method != 'GET':
+        if not isinstance(data, dict):
+            return jsonify({'success': False, 'message': '请求格式错误'}), 400
+        old_name, count = data.get('expected_name'), data.get('expected_count')
+        if (not isinstance(old_name, str) or not _media_business_tags([old_name])
+                or type(count) is not int or count < 0):
+            return jsonify({'success': False, 'message': '请刷新标签列表后重试'}), 400
+        new_name = None
+        if request.method == 'PUT':
+            new_name = data.get('name')
+            if (not isinstance(new_name, str) or not new_name.strip()
+                    or len(new_name.strip()) > 100
+                    or any(ord(ch) < 32 for ch in new_name) or re.search(r'[,，]', new_name)
+                    or not _media_business_tags([new_name.strip()])):
+                return jsonify({'success': False, 'message': '标签名称须为 1–100 个字符，不能包含逗号、控制字符或使用来源标签前缀'}), 400
+            new_name = new_name.strip()
+    client = get_supabase_client()
+    if not isinstance(client, LocalPostgreSQLClient):
+        return jsonify({'success': False, 'message': '多媒体标签管理需要可用的本地主库'}), 503
+    try:
+        if request.method != 'GET':
+            client.begin_deferred_transaction()
+            client._execute_query("SET LOCAL lock_timeout = '10s'", fetch=False)
+            client._execute_query("SET LOCAL statement_timeout = '60s'", fetch=False)
+            client._execute_query('LOCK TABLE link_previews IN SHARE ROW EXCLUSIVE MODE', fetch=False)
+        items = client.select_all('link_previews', columns='id,tags', order_by='id') or []
+        tags = _media_tag_management_rows(items)
+        if request.method == 'GET':
+            return jsonify({'success': True, 'tags': tags})
+        tag = next((tag for tag in tags if tag['name'] == old_name), None)
+        if not tag:
+            return jsonify({'success': False, 'message': '标签已被删除，请刷新列表'}), 404
+        if tag['link_count'] != count:
+            return jsonify({'success': False, 'message': '关联数量已变化，请刷新列表后重试'}), 409
+        if new_name is not None and any(tag['name'] != old_name and tag['name'].strip().casefold() == new_name.casefold() for tag in tags):
+            return jsonify({'success': False, 'message': '该标签名称已存在，请使用其他名称'}), 409
+        changed = []
+        for item in items:
+            stored = item.get('tags') or []
+            if isinstance(stored, str):
+                stored = json.loads(stored)
+            if old_name not in stored:
+                continue
+            updated = [new_name if tag_name == old_name else tag_name
+                       for tag_name in stored if tag_name != old_name or new_name is not None]
+            result = client._execute_query(
+                'UPDATE link_previews SET tags = %s::jsonb WHERE id = %s RETURNING id',
+                [json.dumps(updated, ensure_ascii=False), item['id']],
+            )
+            if not result or len(result) != 1:
+                raise RuntimeError('多媒体标签写入失败')
+            changed.append({'id': item['id'], 'tags': updated})
+        after = client.select_all('link_previews', columns='id,tags', order_by='id') or []
+        expected = {item['id']: item['tags'] for item in changed}
+        if after != [{**item, 'tags': expected.get(item['id'], item.get('tags'))} for item in items]:
+            raise RuntimeError('多媒体标签写入校验失败')
+        client.commit_deferred_transaction()
+        return jsonify({'success': True, 'old_name': old_name, 'name': new_name,
+                        'link_count': len(changed), 'items': changed})
+    except Exception:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': '标签操作失败，请重试；未提交的修改已回滚'}), 500
+    finally:
+        if getattr(client, '_defer_commit', False):
+            client.rollback_deferred_transaction()
+        client.close()
+
 
 @app.route('/api/links/<link_id>', methods=['DELETE'])
 @login_required
@@ -18108,6 +18203,41 @@ def kb_item_upsert():
              
         return jsonify({'success': True, 'data': resp.json()})
 
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/kb/template-reference', methods=['GET'])
+@login_required
+def get_kb_template_reference():
+    """Read a V1 row for reuse in the maintenance editor, including pending revisions."""
+    wiki_id = str(request.args.get('id') or request.args.get('question_wiki_id') or '').strip()
+    if not wiki_id:
+        return jsonify({'success': False, 'message': 'id is required'}), 400
+
+    client = get_supabase_client()
+    if not client:
+        return jsonify({'success': False, 'message': '本地主库未配置'}), 400
+
+    try:
+        columns = (
+            'question_wiki_id,question_type,question,answer,answer_type,if_bm25,'
+            'similar_questions,error_list,keyword_list,image_urls,video_urls,file_urls,'
+            'link_type,link_url,update_time,product_category_name,product_name'
+        )
+        response = client.select(
+            'knowledge_base_v1',
+            page=1,
+            page_size=1,
+            filters={'question_wiki_id': f'eq.{wiki_id}'},
+            columns=columns,
+            use_formal=False,
+        )
+        if response.status_code not in (200, 206):
+            return jsonify({'success': False, 'message': response.text}), 500
+        rows = response.json() or []
+        return jsonify({'success': True, 'data': rows[0] if rows else {}})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500

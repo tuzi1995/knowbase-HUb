@@ -115,6 +115,421 @@ async function api(path, method = 'GET', body = null) {
   }
 }
 
+const kbImageLinkPickerState = {
+    page: 1, pageSize: 30, total: 0, allTotal: null, tags: [], timer: null,
+    requestId: 0, session: 0, selected: new Map(), closeBound: false, loading: false,
+    returnFocus: null, dimensions: new Map(), mediaType: 'image', fileSizes: new Map(),
+    fileSizeAttempts: new Set(), fileSizeQueue: [], fileSizeActive: 0
+};
+
+function kbPickerIcon(name, size = 16) {
+    const paths = {
+        check: '<path d="m5 12 4 4L19 6"/>',
+        image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m3 17 5-5 4 4 3-3 6 6"/>',
+        video: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m10 8 6 4-6 4Z"/>',
+        preview: '<circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M7 10h6m-3-3v6"/>'
+    };
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', size); svg.setAttribute('height', size);
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = paths[name] || paths.image;
+    return svg;
+}
+
+function openKBImageLinkPicker(mediaType = 'image') {
+    const dialog = document.getElementById('kbImageLinkPickerDialog');
+    if (!dialog || dialog.open) return;
+    kbImageLinkPickerState.mediaType = mediaType === 'video' ? 'video' : 'image';
+    const mediaLabel = kbImageLinkPickerState.mediaType === 'video' ? '视频' : '图片';
+    document.getElementById('kbImageLinkPickerTitle').textContent = `从链接库选择${mediaLabel}`;
+    document.getElementById('kbImageLinkPickerDescription').textContent = `支持多选，所选${mediaLabel}将插入到${mediaLabel}链接`;
+    const session = ++kbImageLinkPickerState.session;
+    kbImageLinkPickerState.returnFocus = document.activeElement;
+    kbImageLinkPickerState.selected.clear();
+    kbImageLinkPickerState.allTotal = null;
+    kbImageLinkPickerState.total = 0;
+    if (!kbImageLinkPickerState.closeBound) {
+        dialog.addEventListener('cancel', event => { event.preventDefault(); closeKBImageLinkPicker(); });
+        dialog.addEventListener('close', () => {
+            clearTimeout(kbImageLinkPickerState.timer);
+            ++kbImageLinkPickerState.requestId;
+            ++kbImageLinkPickerState.session;
+            kbImageLinkPickerState.loading = false;
+            kbImageLinkPickerState.selected.clear();
+            updateKBImageLinkPickerSelection();
+            kbImageLinkPickerState.returnFocus?.focus();
+        });
+        dialog.addEventListener('keydown', event => {
+            if (event.key !== 'Tab') return;
+            const focusable = [...dialog.querySelectorAll('button:not(:disabled), input, select, [tabindex="0"]')]
+                .filter(node => !node.hidden && node.getClientRects().length);
+            const first = focusable[0], last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+        });
+        kbImageLinkPickerState.closeBound = true;
+    }
+    document.getElementById('kbImageLinkSearch').value = '';
+    document.getElementById('kbImageLinkSearchClear').hidden = true;
+    document.getElementById('kbImageLinkType').value = kbImageLinkPickerState.mediaType;
+    document.getElementById('kbImageLinkSort').value = 'desc';
+    kbImageLinkPickerState.tags = [];
+    renderKBImageLinkTagOptions();
+    document.getElementById('kbImageLinkTag').value = '';
+    kbImageLinkPickerState.page = 1;
+    updateKBImageLinkPickerSelection();
+    dialog.showModal();
+    document.getElementById('kbImageLinkSearch').focus();
+    loadKBImageLinkPickerPage(1);
+    // Tags load independently so a tag-list failure cannot block browsing.
+    Promise.resolve(api('/tags')).then(tags => {
+        if (session !== kbImageLinkPickerState.session) return;
+        kbImageLinkPickerState.tags = Array.isArray(tags) ? tags.filter(tag => typeof tag === 'string') : [];
+        renderKBImageLinkTagOptions();
+    }).catch(() => {
+        if (session === kbImageLinkPickerState.session) {
+            document.getElementById('kbImageLinkTag').title = '标签暂时无法加载，可关闭后重试';
+        }
+    });
+}
+
+function closeKBImageLinkPicker() {
+    clearTimeout(kbImageLinkPickerState.timer);
+    ++kbImageLinkPickerState.requestId;
+    const dialog = document.getElementById('kbImageLinkPickerDialog');
+    if (dialog?.open) dialog.close();
+    kbImageLinkPickerState.selected.clear();
+    updateKBImageLinkPickerSelection();
+}
+
+function setKBImageLinkPickerStatus(message) {
+    const status = document.getElementById('kbImageLinkPickerStatus');
+    if (status) status.textContent = message || '';
+}
+
+function renderKBImageLinkTagOptions() {
+    const select = document.getElementById('kbImageLinkTag');
+    if (!select) return;
+    const selected = select.value;
+    select.replaceChildren(new Option('全部标签', ''));
+    kbImageLinkPickerState.tags.forEach(tag => select.add(new Option(tag, tag)));
+    if (kbImageLinkPickerState.tags.includes(selected)) select.value = selected;
+    select.removeAttribute('title');
+}
+
+function scheduleKBImageLinkSearch() {
+    document.getElementById('kbImageLinkSearchClear').hidden = !document.getElementById('kbImageLinkSearch').value;
+    clearTimeout(kbImageLinkPickerState.timer);
+    // Invalidate an older response immediately, including during the debounce window.
+    ++kbImageLinkPickerState.requestId;
+    kbImageLinkPickerState.timer = setTimeout(() => loadKBImageLinkPickerPage(1), 250);
+}
+
+function clearKBImageLinkSearch() {
+    document.getElementById('kbImageLinkSearch').value = '';
+    document.getElementById('kbImageLinkSearchClear').hidden = true;
+    document.getElementById('kbImageLinkSearch').focus();
+    loadKBImageLinkPickerPage(1);
+}
+
+function clearKBImageLinkPickerFilters() {
+    document.getElementById('kbImageLinkSearch').value = '';
+    document.getElementById('kbImageLinkSearchClear').hidden = true;
+    document.getElementById('kbImageLinkType').value = kbImageLinkPickerState.mediaType;
+    document.getElementById('kbImageLinkTag').value = '';
+    loadKBImageLinkPickerPage(1);
+}
+
+function updateKBImageLinkPickerPagination() {
+    const pageCount = Math.max(1, Math.ceil(kbImageLinkPickerState.total / kbImageLinkPickerState.pageSize));
+    document.getElementById('kbImageLinkPickerPageInfo').textContent = `第 ${kbImageLinkPickerState.page} / ${pageCount} 页`;
+    document.getElementById('kbImageLinkPickerPrev').disabled = kbImageLinkPickerState.loading || kbImageLinkPickerState.page <= 1;
+    document.getElementById('kbImageLinkPickerNext').disabled = kbImageLinkPickerState.loading || kbImageLinkPickerState.page >= pageCount;
+}
+
+function renderKBImageLinkPickerFeedback(kind, message) {
+    const list = document.getElementById('kbImageLinkPickerList');
+    list.replaceChildren();
+    list.setAttribute('aria-busy', String(kind === 'loading'));
+    list.scrollTop = 0;
+    if (kind === 'loading') {
+        for (let i = 0; i < 8; i++) {
+            const skeleton = document.createElement('div');
+            skeleton.className = 'kb-picker-skeleton';
+            skeleton.setAttribute('aria-hidden', 'true');
+            skeleton.innerHTML = '<div></div><span></span><span></span>';
+            list.append(skeleton);
+        }
+        return;
+    }
+    const empty = document.createElement('div');
+    empty.className = 'kb-picker-feedback';
+    const text = document.createElement('p'); text.textContent = message;
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'kb-picker-button';
+    button.textContent = kind === 'error' ? '重新加载' : '清空筛选条件';
+    button.addEventListener('click', () => kind === 'error' ? loadKBImageLinkPickerPage() : clearKBImageLinkPickerFilters());
+    empty.append(kbPickerIcon('image', 16), text, button);
+    list.append(empty);
+}
+
+async function loadKBImageLinkPickerPage(page = kbImageLinkPickerState.page) {
+    clearTimeout(kbImageLinkPickerState.timer);
+    const requestId = ++kbImageLinkPickerState.requestId;
+    kbImageLinkPickerState.loading = true;
+    renderKBImageLinkPickerFeedback('loading');
+    updateKBImageLinkPickerPagination();
+    setKBImageLinkPickerStatus('正在加载素材');
+    const params = new URLSearchParams({
+        page: String(page), pageSize: String(kbImageLinkPickerState.pageSize),
+        sortBy: 'created_at', sortDir: document.getElementById('kbImageLinkSort')?.value || 'desc'
+    });
+    const search = (document.getElementById('kbImageLinkSearch')?.value || '').trim();
+    const tag = document.getElementById('kbImageLinkTag')?.value || '';
+    // The entry field defines the allowed type throughout searching and paging.
+    const linkType = kbImageLinkPickerState.mediaType;
+    if (search) params.set('search', search);
+    if (tag) params.set('tags', tag);
+    params.set('linkType', linkType);
+    try {
+        // The unfiltered count is reused within this opening of the picker.
+        const filtered = Boolean(search || tag);
+        const [result, baseline] = await Promise.all([
+            api(`/links?${params.toString()}`),
+            filtered && kbImageLinkPickerState.allTotal === null
+                ? api(`/links?linkType=${linkType}&page=1&pageSize=1`).catch(() => null) : null
+        ]);
+        if (requestId !== kbImageLinkPickerState.requestId) return;
+        if (!result?.success || !Array.isArray(result.data)) throw new Error(result?.message || '链接库返回格式异常');
+        kbImageLinkPickerState.page = Number(result.page) || page;
+        kbImageLinkPickerState.total = Number(result.total) || 0;
+        if (!filtered) kbImageLinkPickerState.allTotal = kbImageLinkPickerState.total;
+        else if (baseline?.success) kbImageLinkPickerState.allTotal = Number(baseline.total) || 0;
+        renderKBImageLinkPickerItems(result.data);
+        const sortLabel = params.get('sortDir') === 'asc' ? '最早上传' : '最近上传';
+        setKBImageLinkPickerStatus(filtered
+            ? `筛选出 ${kbImageLinkPickerState.total} 个素材${kbImageLinkPickerState.allTotal === null ? '' : ` · 共 ${kbImageLinkPickerState.allTotal} 个`}`
+            : `共 ${kbImageLinkPickerState.total} 个素材 · 已按${sortLabel}排序`);
+    } catch (error) {
+        if (requestId !== kbImageLinkPickerState.requestId) return;
+        renderKBImageLinkPickerFeedback('error', '素材加载失败，请重试');
+        setKBImageLinkPickerStatus('素材加载失败');
+    } finally {
+        if (requestId === kbImageLinkPickerState.requestId) {
+            kbImageLinkPickerState.loading = false;
+            updateKBImageLinkPickerPagination();
+        }
+    }
+}
+
+function getKBImageLinkPickerMetadata(item) {
+    let filename = '';
+    try { filename = decodeURIComponent(new URL(item.url).pathname.split('/').pop() || ''); } catch { }
+    const name = item.file_name || item.name || filename || (item.type === 'video' ? '未命名视频' : '未命名图片');
+    const extension = /\.([a-z0-9]{2,5})$/i.exec(filename)?.[1]?.toUpperCase();
+    const format = item.format || extension || (item.type === 'video' ? '视频' : '图片');
+    const dimensions = kbImageLinkPickerState.dimensions.get(item.url);
+    const width = Number(item.width) || dimensions?.width;
+    const height = Number(item.height) || dimensions?.height;
+    const resolution = width && height ? `${width}×${height}` : '尺寸未提供';
+    const bytes = Number(item.file_size) || kbImageLinkPickerState.fileSizes.get(item.url);
+    const size = bytes > 0 ? bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`
+        : kbImageLinkPickerState.fileSizeAttempts.has(item.url) ? '大小未提供' : '计算中…';
+    return { name, tags: Array.isArray(item.tags) ? item.tags.filter(tag => String(tag ?? '').trim() && (typeof _isSysLinkTag !== 'function' || !_isSysLinkTag(tag))).map(tag => String(tag).trim()) : [], description: `${format} · ${resolution} · ${size}` };
+}
+
+function queueKBImageLinkPickerFileSize(item, meta, row) {
+    if (Number(item.file_size) > 0 || kbImageLinkPickerState.fileSizeAttempts.has(item.url)) return;
+    kbImageLinkPickerState.fileSizeAttempts.add(item.url);
+    kbImageLinkPickerState.fileSizeQueue.push(async () => {
+        let bytes = null;
+        try {
+            const response = await fetch(normalizeSafeHttpUrl(item.url), { method: 'HEAD', mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer' });
+            const length = Number(response.headers.get('content-length'));
+            if (response.ok && length > 0) bytes = length;
+        } catch { }
+        if (bytes) kbImageLinkPickerState.fileSizes.set(item.url, bytes);
+        if (row.isConnected) {
+            const details = getKBImageLinkPickerMetadata(item);
+            meta.textContent = details.description;
+            meta.title = details.description;
+        }
+    });
+    pumpKBImageLinkPickerFileSizeQueue();
+}
+
+function pumpKBImageLinkPickerFileSizeQueue() {
+    while (kbImageLinkPickerState.fileSizeActive < 4 && kbImageLinkPickerState.fileSizeQueue.length) {
+        const request = kbImageLinkPickerState.fileSizeQueue.shift();
+        kbImageLinkPickerState.fileSizeActive++;
+        Promise.resolve().then(request).finally(() => {
+            kbImageLinkPickerState.fileSizeActive--;
+            pumpKBImageLinkPickerFileSizeQueue();
+        });
+    }
+}
+
+function renderKBImageLinkPickerItems(items) {
+    const list = document.getElementById('kbImageLinkPickerList');
+    if (!list) return;
+    list.replaceChildren(); list.setAttribute('aria-busy', 'false'); list.scrollTop = 0;
+    const mediaItems = items.filter(item => item.type === kbImageLinkPickerState.mediaType);
+    if (!mediaItems.length) {
+        renderKBImageLinkPickerFeedback('empty', '没有找到匹配的素材');
+        return;
+    }
+    mediaItems.forEach(item => {
+        const details = getKBImageLinkPickerMetadata(item);
+        const row = document.createElement('article');
+        row.className = 'kb-image-link-picker-item'; row.dataset.url = item.url;
+        row.tabIndex = 0; row.setAttribute('role', 'checkbox');
+        row.setAttribute('aria-label', `${item.type === 'video' ? '视频' : '图片'}：${details.name}`);
+        const selected = kbImageLinkPickerState.selected.has(item.url);
+        row.setAttribute('aria-checked', String(selected)); row.classList.toggle('is-selected', selected);
+        const toggle = () => toggleKBImageLinkPickerSelection(item, !kbImageLinkPickerState.selected.has(item.url));
+        row.addEventListener('click', toggle);
+        row.addEventListener('keydown', event => {
+            if (event.target !== row || !['Enter', ' '].includes(event.key)) return;
+            event.preventDefault(); toggle();
+        });
+        const stage = document.createElement('div'); stage.className = 'kb-picker-thumbnail';
+        const fallback = document.createElement('span'); fallback.className = 'kb-picker-thumbnail-fallback';
+        fallback.append(kbPickerIcon(item.type));
+        stage.append(fallback);
+        const preview = document.createElement(item.type === 'video' ? 'video' : 'img');
+        const safePreviewUrl = normalizeSafeHttpUrl(item.url);
+        preview.className = 'kb-image-link-picker-preview';
+        if (item.type === 'video') { preview.preload = 'metadata'; preview.playsInline = true; preview.muted = true; }
+        else { preview.alt = details.name; preview.loading = 'lazy'; preview.referrerPolicy = 'no-referrer'; }
+        const meta = document.createElement('p'); meta.className = 'kb-picker-metadata';
+        meta.textContent = details.description; meta.title = details.description;
+        preview.addEventListener(item.type === 'video' ? 'loadedmetadata' : 'load', () => {
+            const width = preview.naturalWidth || preview.videoWidth, height = preview.naturalHeight || preview.videoHeight;
+            if (width && height) kbImageLinkPickerState.dimensions.set(item.url, { width, height });
+            const description = getKBImageLinkPickerMetadata(item).description;
+            meta.textContent = description; meta.title = description;
+        });
+        preview.addEventListener('error', () => { preview.hidden = true; fallback.classList.add('is-visible'); });
+        if (safePreviewUrl) preview.src = safePreviewUrl;
+        else { preview.hidden = true; fallback.classList.add('is-visible'); }
+        const type = document.createElement('span'); type.className = 'kb-image-link-picker-type';
+        type.textContent = item.type === 'video' ? '视频' : '图片';
+        const check = document.createElement('span'); check.className = 'kb-image-link-picker-select'; check.setAttribute('aria-hidden', 'true');
+        check.append(kbPickerIcon('check', 14));
+        const zoom = document.createElement('button'); zoom.type = 'button'; zoom.className = 'kb-picker-preview-button';
+        zoom.setAttribute('aria-label', `预览${details.name}`); zoom.title = '放大预览'; zoom.disabled = !safePreviewUrl;
+        zoom.append(kbPickerIcon('preview', 14));
+        zoom.addEventListener('click', event => { event.stopPropagation(); openKBImageLinkPreview(safePreviewUrl, item.type); });
+        stage.append(preview, type, check, zoom);
+        const body = document.createElement('div'); body.className = 'kb-picker-card-body';
+        const tags = document.createElement('div'); tags.className = 'kb-picker-tags';
+        tags.setAttribute('aria-label', details.tags.length ? '素材标签' : '素材标签：暂无');
+        tags.title = `${details.name}\n${item.url}`;
+        if (details.tags.length) details.tags.forEach(tag => {
+            const chip = document.createElement('span'); chip.className = 'kb-picker-tag'; chip.textContent = tag; tags.append(chip);
+        });
+        else { const empty = document.createElement('span'); empty.className = 'kb-picker-tags-empty'; empty.textContent = '暂无标签'; tags.append(empty); }
+        body.append(tags, meta);
+        row.append(stage, body); list.append(row);
+        queueKBImageLinkPickerFileSize(item, meta, row);
+    });
+}
+
+function toggleKBImageLinkPickerSelection(item, selected) {
+    if (item.type !== kbImageLinkPickerState.mediaType) return;
+    const card = [...document.querySelectorAll('.kb-image-link-picker-item')].find(element => element.dataset.url === item.url);
+    if (selected) kbImageLinkPickerState.selected.set(item.url, item);
+    else kbImageLinkPickerState.selected.delete(item.url);
+    card?.classList.toggle('is-selected', selected);
+    card?.setAttribute('aria-checked', String(selected));
+    updateKBImageLinkPickerSelection();
+}
+
+function resetKBImageLinkPickerSelection() {
+    kbImageLinkPickerState.selected.clear();
+    document.querySelectorAll('.kb-image-link-picker-item').forEach(card => {
+        card.classList.remove('is-selected'); card.setAttribute('aria-checked', 'false');
+    });
+    updateKBImageLinkPickerSelection();
+}
+
+function openKBImageLinkPreview(url, type = 'image') {
+    const dialog = document.getElementById('kbImageLinkPreviewDialog');
+    const image = document.getElementById('kbImageLinkPreviewImage');
+    const video = document.getElementById('kbImageLinkPreviewVideo');
+    const title = document.getElementById('kbImageLinkPreviewTitle');
+    const safeUrl = normalizeSafeHttpUrl(url);
+    if (!dialog || !safeUrl) return;
+    const isVideo = type === 'video';
+    title.textContent = isVideo ? '视频预览' : '图片预览';
+    image.hidden = isVideo;
+    video.hidden = !isVideo;
+    if (isVideo) {
+        image.removeAttribute('src');
+        video.src = safeUrl;
+        video.load();
+    } else {
+        video.pause();
+        video.removeAttribute('src');
+        image.src = safeUrl;
+    }
+    if (!dialog.open) dialog.showModal();
+}
+
+function closeKBImageLinkPreview() {
+    const dialog = document.getElementById('kbImageLinkPreviewDialog');
+    const video = document.getElementById('kbImageLinkPreviewVideo');
+    if (video) {
+        video.pause();
+        video.removeAttribute('src');
+    }
+    document.getElementById('kbImageLinkPreviewImage')?.removeAttribute('src');
+    if (dialog?.open) dialog.close();
+}
+
+function updateKBImageLinkPickerSelection() {
+    const count = kbImageLinkPickerState.selected.size;
+    const countEl = document.getElementById('kbImageLinkPickerSelectedCount');
+    const confirm = document.getElementById('kbImageLinkPickerConfirm');
+    if (countEl) countEl.textContent = `已选 ${count} 项`;
+    const reset = document.getElementById('kbImageLinkPickerReset');
+    if (reset) reset.disabled = count === 0;
+    if (confirm) {
+        confirm.textContent = `插入所选素材 (${count})`;
+        confirm.disabled = count === 0;
+    }
+}
+
+function confirmKBImageLinkPickerSelection() {
+    const selected = [...kbImageLinkPickerState.selected.values()]
+        .filter(item => item.type === kbImageLinkPickerState.mediaType);
+    if (!selected.length) return;
+    selected.forEach(item => appendKBMediaLink(item.url, item.type));
+    closeKBImageLinkPicker();
+}
+
+function appendKBMediaLink(url, type) {
+    const field = type === 'video' ? 'video_urls' : 'image_urls';
+    const textarea = document.querySelector(`#kbEditForm textarea[name="${field}"]`);
+    if (!textarea || !url) return;
+    const values = textarea.value.split(/[\r\n]+/).map(value => value.trim()).filter(Boolean);
+    const existed = values.includes(url);
+    if (!existed) values.push(url);
+    textarea.value = values.join('\n');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+    setKBImageLinkPickerStatus(existed ? '该链接已存在' : type === 'video' ? '已填入视频链接' : '已填入图片链接');
+}
+
+function changeKBImageLinkPickerPage(delta) {
+    const next = kbImageLinkPickerState.page + delta;
+    const pageCount = Math.max(1, Math.ceil(kbImageLinkPickerState.total / kbImageLinkPickerState.pageSize));
+    if (kbImageLinkPickerState.loading || next < 1 || next > pageCount) return;
+    loadKBImageLinkPickerPage(next);
+}
+
 window.newProductReleaseContext = window.newProductReleaseContext || {
   modelId: 'A-100',
   requestId: '',
@@ -851,6 +1266,8 @@ let linksLoaded = false;
 let linksLoadPromise = null;
 let linkFilterKey = '';
 let activeFilterTags = [];
+// Empty string is a filter value only; it is never saved as a record tag.
+const LINK_EMPTY_TAG_FILTER = '';
 let selectedIds = new Set();
 let linkCurrentPage = 1;
 let linkPageSize = 20;
@@ -915,6 +1332,14 @@ function _isSysLinkTag(tag) {
     return t.startsWith('来源:') || t.startsWith('外链类型:');
 }
 
+function getMediaBusinessTagOptions() {
+    const tags = new Set((allTags || []).filter(tag => !_isSysLinkTag(tag) && String(tag).trim()));
+    (currentLinks || []).forEach(item => (item.tags || []).forEach(tag => {
+        if (!_isSysLinkTag(tag) && String(tag).trim()) tags.add(String(tag).trim());
+    }));
+    return Array.from(tags).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+
 function _getLinkSysMeta(item) {
     const tags = Array.isArray(item?.tags) ? item.tags : [];
     let source = '';
@@ -945,7 +1370,7 @@ async function fetchGlobalTags() {
     try {
         const res = await api('/tags');
         if (Array.isArray(res)) {
-            allTags = res.filter(t => !_isSysLinkTag(t));
+            allTags = normalizeKnowledgeBaseTags(res.filter(t => !_isSysLinkTag(t)));
         }
     } catch (e) {
         console.error('Failed to load tags:', e);
@@ -7473,41 +7898,101 @@ async function downloadImage(url) {
   }
 }
 
-function renderTagChip(tag, active) {
-  const el = document.createElement('span');
-  el.className = 'tag-chip' + (active ? ' active' : '');
-  el.textContent = tag;
-  el.setAttribute('role', 'option');
-  el.setAttribute('aria-selected', active ? 'true' : 'false');
-  el.addEventListener('click', () => {
-    activeFilterTags = active ? activeFilterTags.filter(t => t !== tag) : [...activeFilterTags, tag];
-    linkCurrentPage = 1;
-    renderLinkTable();
+let tempLinkSelectedTags = new Set();
+
+function renderLinkTagFilterList() {
+  const list = document.getElementById('tagFilter');
+  if (!list) return;
+  list.replaceChildren();
+  const count = document.getElementById('linkTagFilterSelectionCount');
+  if (count) count.textContent = tempLinkSelectedTags.size ? `已选 ${tempLinkSelectedTags.size} 个标签` : '未选择标签';
+  const query = (document.getElementById('linkTagFilterSearch')?.value || '').trim().toLocaleLowerCase();
+  const options = [LINK_EMPTY_TAG_FILTER, ...getMediaBusinessTagOptions()];
+  const visible = options.filter(tag => (tag === LINK_EMPTY_TAG_FILTER ? '空标签' : tag).toLocaleLowerCase().includes(query));
+  if (!visible.length) {
+    list.innerHTML = '<div class="kb-tag-load-state">没有匹配标签</div>';
+    return;
+  }
+  visible.forEach(tag => {
+    const label = document.createElement('label');
+    label.className = 'kb-tag-filter-option';
+    if (tag === LINK_EMPTY_TAG_FILTER) label.title = '没有业务标签（只有来源或外链类型标签也算空标签）';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = tempLinkSelectedTags.has(tag);
+    label.classList.toggle('is-selected', checkbox.checked);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) tempLinkSelectedTags.add(tag);
+      else tempLinkSelectedTags.delete(tag);
+      label.classList.toggle('is-selected', checkbox.checked);
+      if (count) count.textContent = tempLinkSelectedTags.size ? `已选 ${tempLinkSelectedTags.size} 个标签` : '未选择标签';
+    });
+    const text = document.createElement('span');
+    text.textContent = tag === LINK_EMPTY_TAG_FILTER ? '空标签' : tag;
+    label.append(checkbox, text);
+    list.appendChild(label);
   });
-  return el;
 }
 
-function setLinkTagDropdownOpen(open) {
-  const wrap = document.getElementById('linkTagSelectorWrap');
+function positionLinkTagFilterDropdown() {
   const panel = document.getElementById('linkTagDropdown');
-  const btn = document.getElementById('linkTagSelectorBtn');
-  if (wrap) wrap.classList.toggle('open', open);
-  if (panel) panel.classList.toggle('d-none', !open);
-  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  const button = document.getElementById('linkTagSelectorBtn');
+  if (!panel || panel.hidden || !button) return;
+  const rect = button.getBoundingClientRect();
+  const margin = 12, gap = 6;
+  const width = Math.min(360, window.innerWidth - margin * 2);
+  panel.style.width = `${width}px`;
+  panel.style.left = `${Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin))}px`;
+  const below = window.innerHeight - rect.bottom - gap - margin;
+  const above = rect.top - gap - margin;
+  const openBelow = below >= Math.min(panel.scrollHeight, 360) || below >= above;
+  panel.style.maxHeight = `${Math.max(0, openBelow ? below : above)}px`;
+  panel.style.top = `${openBelow ? rect.bottom + gap : Math.max(margin, rect.top - gap - panel.offsetHeight)}px`;
+}
+
+function setLinkTagDropdownOpen(open, returnFocus = false) {
+  const panel = document.getElementById('linkTagDropdown');
+  const button = document.getElementById('linkTagSelectorBtn');
+  if (!panel || !button) return;
+  if (open) {
+    tempLinkSelectedTags = new Set(activeFilterTags);
+    const mode = document.querySelector('input[name="tagFilterMode"]:checked')?.value || 'any';
+    document.querySelectorAll('input[name="linkTagFilterModeDraft"]').forEach(input => { input.checked = input.value === mode; });
+    document.getElementById('linkTagFilterSearch').value = '';
+    renderLinkTagFilterList();
+  }
+  panel.hidden = !open;
+  button.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) {
+    positionLinkTagFilterDropdown();
+    document.getElementById('linkTagFilterSearch')?.focus({ preventScroll: true });
+  } else if (returnFocus) button.focus({ preventScroll: true });
+}
+
+function applyLinkTagFilterDropdown() {
+  activeFilterTags = Array.from(tempLinkSelectedTags);
+  const mode = document.querySelector('input[name="linkTagFilterModeDraft"]:checked')?.value || 'any';
+  document.querySelectorAll('input[name="tagFilterMode"]').forEach(input => { input.checked = input.value === mode; });
+  setLinkTagDropdownOpen(false, true);
+  renderLinkTable();
+}
+
+function clearLinkTagFilterDropdown() {
+  tempLinkSelectedTags.clear();
+  renderLinkTagFilterList();
 }
 
 function updateLinkTagSelectorSummary() {
-  const valueEl = document.getElementById('linkTagSelectorValue');
-  if (!valueEl) return;
-  if (!activeFilterTags.length) {
-    valueEl.textContent = '未选择';
-    return;
+  const button = document.getElementById('linkTagSelectorBtn');
+  const value = document.getElementById('linkTagSelectorValue');
+  const count = document.getElementById('linkTagFilterCount');
+  const labels = activeFilterTags.map(tag => tag === LINK_EMPTY_TAG_FILTER ? '空标签' : tag);
+  if (value) value.textContent = !labels.length ? '全部标签' : labels.length <= 2 ? labels.join('、') : `已选 ${labels.length} 个标签`;
+  if (count) { count.textContent = labels.length; count.hidden = !labels.length; }
+  if (button) {
+    button.classList.toggle('is-active', labels.length > 0);
+    button.title = labels.length ? labels.join('、') : '按标签筛选';
   }
-  if (activeFilterTags.length <= 2) {
-    valueEl.textContent = activeFilterTags.join('、');
-    return;
-  }
-  valueEl.textContent = `已选 ${activeFilterTags.length} 个标签`;
 }
 
 function parseCreatedAtSeconds(item) {
@@ -7598,14 +8083,11 @@ function getFilteredLinkItems() {
 
   if (activeFilterTags.length) {
     const filterMode = document.querySelector('input[name="tagFilterMode"]:checked')?.value || 'any';
-    if (filterMode === 'all') {
-      items = items.filter(d => {
-        const itemTags = d.tags || [];
-        return activeFilterTags.every(t => itemTags.includes(t));
-      });
-    } else {
-      items = items.filter(d => (d.tags || []).some(t => activeFilterTags.includes(t)));
-    }
+    items = items.filter(d => {
+      const itemTags = (d.tags || []).filter(t => !_isSysLinkTag(t) && String(t).trim());
+      const matchesTag = tag => tag === LINK_EMPTY_TAG_FILTER ? itemTags.length === 0 : itemTags.includes(tag);
+      return filterMode === 'all' ? activeFilterTags.every(matchesTag) : activeFilterTags.some(matchesTag);
+    });
   }
 
   const statusFilter = document.getElementById('linkFilterStatus');
@@ -7813,7 +8295,7 @@ function renderLinkRow(item) {
   (item.tags || []).filter(t => !_isSysLinkTag(t)).forEach(t => {
     const el = document.createElement('span');
     el.className = 'tag';
-    el.appendChild(document.createTextNode(`${String(t)} `));
+    el.appendChild(document.createTextNode(String(t)));
     const removeTag = document.createElement('button');
     removeTag.type = 'button';
     removeTag.className = 'rm-tag';
@@ -7841,12 +8323,20 @@ function renderLinkRow(item) {
     const unique = Array.from(new Set([...(item.tags || []).filter(t => !_isSysLinkTag(t)), ...newTags]));
     updateTags(item.id, unique);
   });
+  inp.addEventListener('keydown', event => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    btn.click();
+  });
   addRow.append(inp, btn);
 
   // Setup auto-complete for row input
   setupRowTagInput(inp, addRow, (item.tags || []).filter(t => !_isSysLinkTag(t)));
 
-  tdTags.append(tagList, addRow);
+  const tagEditor = document.createElement('div');
+  tagEditor.className = 'tag-editor';
+  tagEditor.append(tagList, addRow);
+  tdTags.appendChild(tagEditor);
   tr.appendChild(tdTags);
 
   // Action
@@ -8163,15 +8653,6 @@ function renderLinkTable() {
     pageItems.forEach(item => tbody.appendChild(renderLinkRow(item)));
   }
 
-  const filter = document.getElementById('tagFilter');
-  if (filter) {
-      filter.innerHTML = '';
-      const allTags = new Set();
-      currentLinks.forEach(d => (d.tags || []).forEach(t => { if (!_isSysLinkTag(t)) allTags.add(t); }));
-      Array.from(allTags).sort().forEach(tag => {
-        filter.appendChild(renderTagChip(tag, activeFilterTags.includes(tag)));
-      });
-  }
   updateLinkTagSelectorSummary();
 
   updateBatchUI();
@@ -8185,6 +8666,168 @@ function renderLinkTable() {
   document.querySelectorAll('[data-tag-mode]').forEach(btn => {
     btn.classList.toggle('active', btn.getAttribute('data-tag-mode') === tagMode);
   });
+}
+
+const linkTagManagerState = { tags: [], loading: false, busy: false, action: null, error: '', sequence: 0 };
+
+async function openLinkTagManager() {
+    if (linkTagManagerState.busy) return;
+    setLinkTagDropdownOpen(false);
+    const dialog = document.getElementById('linkTagManagerDialog');
+    if (!dialog) return;
+    linkTagManagerState.action = null;
+    document.getElementById('linkTagManagerAction').hidden = true;
+    document.getElementById('linkTagManagerSearch').value = '';
+    if (!dialog.open) dialog.showModal();
+    await loadLinkTagManager();
+}
+
+function closeLinkTagManager() {
+    if (!linkTagManagerState.busy) document.getElementById('linkTagManagerDialog')?.close();
+}
+
+async function loadLinkTagManager() {
+    if (linkTagManagerState.busy) return;
+    const sequence = ++linkTagManagerState.sequence;
+    linkTagManagerState.loading = true;
+    linkTagManagerState.error = '';
+    cancelLinkTagManagerAction();
+    renderLinkTagManager();
+    try {
+        const result = await api('/links/tags/manage');
+        if (!result?.success || !Array.isArray(result.tags)) throw new Error(result?.message || '标签列表加载失败，请重试');
+        if (sequence !== linkTagManagerState.sequence) return;
+        linkTagManagerState.tags = result.tags;
+        allTags = normalizeKnowledgeBaseTags(result.tags.map(tag => tag.name));
+    } catch (error) {
+        if (sequence !== linkTagManagerState.sequence) return;
+        linkTagManagerState.error = error.message;
+    } finally {
+        if (sequence === linkTagManagerState.sequence) {
+            linkTagManagerState.loading = false;
+            renderLinkTagManager();
+        }
+    }
+}
+
+function renderLinkTagManager() {
+    const state = linkTagManagerState;
+    const body = document.getElementById('linkTagManagerBody');
+    if (!body) return;
+    const query = (document.getElementById('linkTagManagerSearch')?.value || '').trim().toLocaleLowerCase();
+    const visible = state.tags.filter(tag => tag.name.toLocaleLowerCase().includes(query));
+    document.getElementById('linkTagManagerCount').textContent = `共 ${state.tags.length} 个标签`;
+    const status = document.getElementById('linkTagManagerStatus');
+    status.textContent = state.error || (state.loading ? '正在读取标签…' : state.busy ? '正在保存，请稍候…' : '');
+    status.classList.toggle('is-error', Boolean(state.error));
+    body.replaceChildren();
+    if (state.loading || state.error && !state.tags.length || !visible.length) {
+        const row = body.insertRow();
+        const cell = row.insertCell();
+        cell.colSpan = 3;
+        cell.className = 'kb-tag-manager-empty';
+        cell.textContent = state.loading ? '正在读取标签…' : state.error ? '请点击刷新重新加载标签' : query ? '没有匹配的标签' : '暂无多媒体标签';
+    } else {
+        visible.forEach(tag => {
+            const row = body.insertRow();
+            row.insertCell().textContent = tag.name;
+            row.insertCell().textContent = `${tag.link_count} 条`;
+            const actions = row.insertCell();
+            ['rename', 'delete'].forEach(action => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = action === 'delete' ? 'kb-tag-manager-delete' : 'kb-tag-manage-link';
+                button.textContent = action === 'delete' ? '删除' : '修改名称';
+                button.setAttribute('aria-label', `${button.textContent}：${tag.name}`);
+                button.addEventListener('click', () => startLinkTagManagerAction(tag.id, action));
+                actions.appendChild(button);
+            });
+        });
+    }
+    document.querySelectorAll('#linkTagManagerDialog button, #linkTagManagerDialog input').forEach(element => {
+        element.disabled = state.busy || state.loading;
+    });
+}
+
+function startLinkTagManagerAction(id, kind) {
+    if (linkTagManagerState.busy || linkTagManagerState.loading) return;
+    const tag = linkTagManagerState.tags.find(tag => tag.id === id);
+    if (!tag) return;
+    linkTagManagerState.action = { tag, kind };
+    linkTagManagerState.error = '';
+    const deleting = kind === 'delete';
+    const form = document.getElementById('linkTagManagerAction');
+    form.hidden = false;
+    form.classList.toggle('is-delete', deleting);
+    document.getElementById('linkTagManagerActionTitle').textContent = `${deleting ? '删除标签' : '修改名称'}：${tag.name}`;
+    document.getElementById('linkTagManagerImpact').textContent = deleting
+        ? `将删除此标签及其与 ${tag.link_count} 条多媒体链接的关联，链接及预览内容保留。此操作无法撤销。`
+        : `修改后，${tag.link_count} 条关联多媒体链接会同步显示新的标签名称。`;
+    document.getElementById('linkTagManagerNameField').hidden = deleting;
+    const input = document.getElementById('linkTagManagerName');
+    input.value = tag.name;
+    input.required = !deleting;
+    const submit = document.getElementById('linkTagManagerSubmit');
+    submit.textContent = deleting ? '确认删除标签' : '保存名称';
+    renderLinkTagManager();
+    if (deleting) submit.focus();
+    else { input.focus(); input.select(); }
+}
+
+function cancelLinkTagManagerAction() {
+    if (linkTagManagerState.busy) return;
+    linkTagManagerState.action = null;
+    const form = document.getElementById('linkTagManagerAction');
+    if (form) form.hidden = true;
+}
+
+function syncLinkManagedTag(result) {
+    const replace = values => Array.from(new Set(Array.from(values || []).flatMap(name => name === result.old_name ? result.name ? [result.name] : [] : [name])));
+    activeFilterTags = replace(activeFilterTags);
+    tempLinkSelectedTags = new Set(replace(tempLinkSelectedTags));
+    allTags = normalizeKnowledgeBaseTags(replace(allTags));
+    const updated = new Map(result.items.map(item => [item.id, item.tags]));
+    currentLinks = currentLinks.map(item => updated.has(item.id) ? { ...item, tags: updated.get(item.id) } : item);
+    renderLinkTable();
+}
+
+async function submitLinkTagManagerAction() {
+    const state = linkTagManagerState;
+    if (state.busy || !state.action) return;
+    const { tag, kind } = state.action;
+    const name = document.getElementById('linkTagManagerName').value.trim();
+    if (kind === 'rename' && (!name || name.length > 100 || /[,，\x00-\x1f]/.test(name) || _isSysLinkTag(name))) {
+        state.error = '标签名称不能为空，最多 100 个字符，不能包含逗号、控制字符或使用来源标签前缀';
+        renderLinkTagManager();
+        return;
+    }
+    if (kind === 'rename' && state.tags.some(item => item.id !== tag.id && item.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+        state.error = '该标签名称已存在，请使用其他名称';
+        renderLinkTagManager();
+        return;
+    }
+    state.busy = true;
+    state.error = '';
+    renderLinkTagManager();
+    let saved = false;
+    try {
+        const result = await api('/links/tags/manage', kind === 'delete' ? 'DELETE' : 'PUT', {
+            name, expected_name: tag.name, expected_count: tag.link_count,
+        });
+        if (!result?.success) throw new Error(result?.message || '标签操作失败，请重试');
+        saved = true;
+        syncLinkManagedTag(result);
+        state.tags = kind === 'delete' ? state.tags.filter(item => item.id !== tag.id)
+            : state.tags.map(item => item.id === tag.id ? { ...item, id: result.name, name: result.name } : item);
+        showToast(kind === 'delete' ? '标签已删除，链接及预览内容已保留' : '标签名称已更新', 'success');
+    } catch (error) {
+        state.error = error.message;
+    } finally {
+        state.busy = false;
+        if (saved) cancelLinkTagManagerAction();
+        renderLinkTagManager();
+    }
+
 }
 
 // ==========================================
@@ -17097,6 +17740,7 @@ let __kbProductPickerEntries = [];
 let __kbSimilarPickerItems = null;
 let __kbEditLegacyLinkType = '';
 let __kbEditLinkTypeTouched = false;
+let __kbEditAutoProductCategories = null;
 
 function __kbEditNormalizeText(v) {
     return String(v ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
@@ -17130,6 +17774,7 @@ function __kbEditSyncLinkTypeValue() {
 function __kbEditMarkLinkTypeTouched() {
     __kbEditLinkTypeTouched = true;
     __kbEditSyncLinkTypeValue();
+    __kbEditSyncAnswerType();
 }
 
 function __kbEditSetLinkTypeValue(value) {
@@ -17192,6 +17837,65 @@ function __kbEditResolveProductNames(value) {
         unrecognized,
         hasChineseComma: String(value ?? '').includes('，')
     };
+}
+
+function __kbEditProductCategoriesForNames(value) {
+    const categoryByModel = new Map();
+    document.querySelectorAll('#productCheckboxes input.product-item-check:not([data-category="extra_legacy"])').forEach((cb) => {
+        const modelKey = __kbEditNormalizeProductLookup(cb.value);
+        const category = String(cb.dataset.category || '').trim();
+        if (modelKey && category) categoryByModel.set(modelKey, category);
+    });
+    const categories = [];
+    const seen = new Set();
+    __kbEditParseProductNames(value, true).forEach((model) => {
+        const category = categoryByModel.get(__kbEditNormalizeProductLookup(model));
+        if (category && !seen.has(category)) {
+            seen.add(category);
+            categories.push(category);
+        }
+    });
+    return categories;
+}
+
+function __kbEditSyncProductCategoryFromNames(value = null) {
+    const input = document.getElementById('productCategorySelectInput');
+    const modelInput = document.getElementById('kbEditProductName');
+    if (!input || !modelInput) return [];
+    const categories = __kbEditProductCategoriesForNames(value ?? modelInput.value);
+    const current = String(input.getAttribute('data-value') || input.value || '')
+        .split(/[\n,，]+/).map(item => item.trim()).filter(Boolean);
+    if (!categories.length) {
+        if (__kbEditAutoProductCategories && current.join(',') === __kbEditAutoProductCategories.join(',')) {
+            __kbEditSetProductCategoryInput('');
+        }
+        __kbEditAutoProductCategories = null;
+        return [];
+    }
+    if (current.join(',') !== categories.join(',')) __kbEditSetProductCategoryInput(categories.join(','));
+    __kbEditAutoProductCategories = categories;
+    return categories;
+}
+
+function __kbEditSyncAnswerType() {
+    const form = document.getElementById('kbEditForm');
+    const answerType = form?.elements?.['answer_type'];
+    if (!answerType) return '';
+    const hasContent = (field) => parseSmartListValue(form.elements?.[field]?.value || '', {
+        splitOnAsciiComma: true,
+        splitOnChineseCommaWhenUrlList: true,
+        isUrlList: true,
+    }).some(value => String(value || '').trim());
+    const kinds = [];
+    if (hasContent('image_urls')) kinds.push('图片');
+    if (hasContent('video_urls')) kinds.push('视频');
+    if (__kbEditSyncLinkTypeValue()) kinds.push('链接');
+    const next = kinds.length > 1 ? '混合' : (kinds[0] || '文本');
+    if (answerType.value !== next) {
+        answerType.value = next;
+        answerType.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    return next;
 }
 
 function __kbEditRenderProductRecognition(result = null) {
@@ -17865,6 +18569,8 @@ function __kbEditRestoreDraftDigest(digest) {
         pcInput.value = raw.split(/[,\n，]+/).map(s => s.trim()).filter(Boolean).join('，');
     }
     __kbEditApplyProductsToForm(digest.product_name || '');
+    __kbEditSyncProductCategoryFromNames(digest.product_name || '');
+    __kbEditSyncAnswerType();
     __kbEditRenderPreview();
 }
 
@@ -18148,11 +18854,14 @@ function __kbEditApplyProductsToForm(productValue) {
 function __kbEditHasMeaningfulCreateInput(digest = null) {
     const d = digest || __kbEditCollectDigest();
     const keys = [
-        'product_category_name', 'question_type', 'question', 'answer', 'answer_type',
+        'product_category_name', 'question_type', 'question', 'answer',
         'product_name', 'similar_questions', 'keyword_list', 'image_urls', 'video_urls',
         'file_urls', 'link_type', 'link_url', 'kb_tags_input'
     ];
-    return keys.some(k => String(d?.[k] ?? '').trim());
+    // New forms automatically use 文本; that default alone is not filled content.
+    const answerType = String(d?.answer_type ?? '').trim();
+    return keys.some(k => String(d?.[k] ?? '').trim())
+        || (answerType !== '' && answerType !== '文本');
 }
 
 function __kbEditSyncTemplateReferenceUi(message = '') {
@@ -18294,6 +19003,8 @@ function __kbEditApplyTemplateItem(item, templateId, tags = []) {
     __kbEditSetLinkTypeValue(item.link_type || '');
     if (form.elements['link_url']) setVal('link_url', item.link_url || '');
     __kbEditApplyProductsToForm(item.product_name || '');
+    __kbEditSyncProductCategoryFromNames(item.product_name || '');
+    __kbEditSyncAnswerType();
 
     const tagsEl = document.getElementById('kbEditTagsInput');
     if (tagsEl) tagsEl.value = Array.isArray(tags) ? tags.join(', ') : '';
@@ -18337,7 +19048,7 @@ async function kbSearchTemplateById() {
     }
 
     try {
-        const res = await api(`/kb/item?table=knowledge_base_v1&id=${encodeURIComponent(rawId)}`);
+        const res = await api(`/kb/template-reference?id=${encodeURIComponent(rawId)}`);
         if (!res || !res.success) throw new Error(res?.message || res?.error || '搜索失败');
         const item = res.data || {};
         if (!item || !Object.keys(item).length) {
@@ -18566,6 +19277,7 @@ async function openKBEditModal(id = null, options = {}) {
     kbLoadClipboardSession();
 
     form.reset();
+    __kbEditAutoProductCategories = null;
     document.getElementById('kbEditReleaseOptions')?.classList.add('d-none');
     if (document.getElementById('kbEditEffectMode')) document.getElementById('kbEditEffectMode').value = 'immediate';
     if (document.getElementById('kbEditPublicImpactConfirmed')) document.getElementById('kbEditPublicImpactConfirmed').checked = false;
@@ -18699,6 +19411,8 @@ async function openKBEditModal(id = null, options = {}) {
     // Bind lightweight UI helpers (stats / selected counts)
     try { __kbEditBindUiHelpers(); } catch {}
     try { __kbEditBindDirtyChecker(); } catch {}
+    __kbEditSyncProductCategoryFromNames();
+    __kbEditSyncAnswerType();
     __kbEditCaptureInitialState(!id);
     await __kbEditRefreshReleaseOptionsVisibility();
     const draft = __kbEditReadDraft(__kbEditDraftContextId);
@@ -18750,7 +19464,10 @@ function __kbEditBindUiHelpers() {
         productsToggleTextEl.textContent = productsDetailsEl.open ? '点击收起' : '点击展开';
     };
 
-    const pcOptions = ['扫地机', '洗地机', '吸尘器', '洗衣机'];
+    const catalogCategories = Array.from(new Set(Array.from(document.querySelectorAll(
+        '#productCheckboxes input.product-item-check:not([data-category="extra_legacy"])'
+    )).map(cb => String(cb.dataset.category || '').trim()).filter(Boolean)));
+    const pcOptions = catalogCategories.length ? catalogCategories : ['扫地机', '洗地机', '吸尘器', '洗衣机'];
     const parsePcValue = (v) => String(v || '').split(/[,\n，]+/).map(s => s.trim()).filter(Boolean);
     const setPcValue = (arr) => {
         const uniq = Array.from(new Set((arr || []).map(s => String(s).trim()).filter(Boolean)));
@@ -18813,10 +19530,12 @@ function __kbEditBindUiHelpers() {
     if (pNameEl) {
         pNameEl.addEventListener('input', () => {
             __kbEditSyncProductCheckboxesFromInput();
+            __kbEditSyncProductCategoryFromNames();
             void __kbEditRefreshReleaseOptionsVisibility();
         });
         pNameEl.addEventListener('change', () => {
             __kbEditSyncProductCheckboxesFromInput({ canonicalize: true });
+            __kbEditSyncProductCategoryFromNames();
             void __kbEditRefreshReleaseOptionsVisibility();
         });
     }
@@ -18826,9 +19545,19 @@ function __kbEditBindUiHelpers() {
             const t = e.target;
             if (t && t.matches && t.matches('input.product-item-check')) {
                 updateSelectedProductsCount();
+                __kbEditSyncProductCategoryFromNames();
             }
         });
     }
+
+    form.addEventListener('input', (e) => {
+        const field = String(e.target?.name || '');
+        if (field === 'image_urls' || field === 'video_urls') __kbEditSyncAnswerType();
+    }, true);
+    form.addEventListener('change', (e) => {
+        const field = String(e.target?.name || '');
+        if (field === 'image_urls' || field === 'video_urls') __kbEditSyncAnswerType();
+    }, true);
 
     form.addEventListener('input', (e) => {
         const name = String(e.target?.name || '');
@@ -18873,6 +19602,7 @@ function __kbEditBindUiHelpers() {
             const cur = new Set(getPcSelected());
             if (cur.has(opt)) cur.delete(opt);
             else cur.add(opt);
+            __kbEditAutoProductCategories = null;
             setPcValue(Array.from(cur));
             renderPcMenu();
         });
@@ -27390,20 +28120,21 @@ function setupRowTagInput(input, container, existingTags) {
     function render() {
         dropdown.innerHTML = '';
         const currentVal = input.value;
-        const inputTags = currentVal.split(/[,，]/).map(t => t.trim()).filter(Boolean);
-
-        // Filter: not in existing tags AND not in current input
-        const available = allTags.filter(t => !existingTags.includes(t) && !inputTags.includes(t));
+        const segments = currentVal.split(/[,，]/);
+        const query = (segments.pop() || '').trim();
+        const inputTags = segments.concat(query).map(t => t.trim()).filter(Boolean);
+        const available = getMediaBusinessTagOptions().filter(tag =>
+            !existingTags.includes(tag) && !inputTags.slice(0, -1).includes(tag)
+            && (!query || tag.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
+        );
 
         if (available.length === 0) {
-            dropdown.classList.remove('show');
+            dropdown.textContent = query ? '无匹配标签，可直接添加' : '没有更多标签可选';
+            dropdown.classList.add('show');
             return;
         }
 
-        // Limit to 10 suggestions for inline input
-        const suggestions = available.slice(0, 10);
-
-        suggestions.forEach(tag => {
+        available.forEach(tag => {
             const item = document.createElement('div');
             item.className = 'dropdown-item';
             item.textContent = tag;
@@ -27412,15 +28143,10 @@ function setupRowTagInput(input, container, existingTags) {
 
             item.onclick = (e) => {
                 e.stopPropagation();
-                // For row input, we might just replace the current partial input or append
-                // Simple logic: append if comma exists, or replace if empty/partial
-                // But row input is usually for ONE tag or comma separated.
-                // Let's use same logic as main input: append
-
                 const currentVal = input.value;
-                const sep = currentVal.trim().length > 0 && !currentVal.trim().endsWith(',') && !currentVal.trim().endsWith('，') ? ', ' : '';
-
-                input.value = currentVal + sep + tag;
+                const separator = Math.max(currentVal.lastIndexOf(','), currentVal.lastIndexOf('，'));
+                const prefix = currentVal.slice(0, separator + 1);
+                input.value = `${prefix}${prefix ? ' ' : ''}${tag}`;
                 input.dispatchEvent(new Event('input'));
                 dropdown.classList.remove('show');
                 input.focus();
@@ -28431,14 +29157,11 @@ function renderModelSelectorList(filter = '') {
         grouped[cat].push(canonical);
     });
 
-    const cats = Object.keys(grouped).sort((a, b) => {
-        if (a === '未归类') return 1;
-        if (b === '未归类') return -1;
-        return a.localeCompare(b, 'zh');
-    });
+    // 分组和型号沿用型号目录的遍历顺序；目录外的已选型号追加在末尾。
+    const cats = Object.keys(grouped);
 
     cats.forEach(cat => {
-        const models = Array.from(new Set(grouped[cat])).sort((a, b) => String(a).localeCompare(String(b), 'zh'));
+        const models = Array.from(new Set(grouped[cat]));
         addSection(cat, models);
     });
 }
@@ -28913,19 +29636,24 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (openLinkImportModalBtn) openLinkImportModalBtn.addEventListener('click', openLinkImportModal);
 
   const linkTagSelectorBtn = document.getElementById('linkTagSelectorBtn');
-  if (linkTagSelectorBtn) linkTagSelectorBtn.addEventListener('click', (e) => {
-    e.preventDefault();
-    const wrap = document.getElementById('linkTagSelectorWrap');
-    const isOpen = !!wrap && wrap.classList.contains('open');
-    setLinkTagDropdownOpen(!isOpen);
+  const linkTagPanel = document.getElementById('linkTagDropdown');
+  linkTagSelectorBtn?.addEventListener('click', () => setLinkTagDropdownOpen(Boolean(linkTagPanel?.hidden)));
+  document.addEventListener('pointerdown', event => {
+    if (linkTagPanel && !linkTagPanel.hidden && !linkTagPanel.contains(event.target) && !linkTagSelectorBtn.contains(event.target)) setLinkTagDropdownOpen(false);
   });
-
-  document.addEventListener('click', (e) => {
-    const wrap = document.getElementById('linkTagSelectorWrap');
-    if (!wrap) return;
-    if (wrap.contains(e.target)) return;
-    setLinkTagDropdownOpen(false);
+  document.addEventListener('focusin', event => {
+    if (linkTagPanel && !linkTagPanel.hidden && !linkTagPanel.contains(event.target) && !linkTagSelectorBtn.contains(event.target)) setLinkTagDropdownOpen(false);
   });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && linkTagPanel && !linkTagPanel.hidden) {
+      event.preventDefault();
+      setLinkTagDropdownOpen(false, true);
+    }
+  });
+  window.addEventListener('resize', positionLinkTagFilterDropdown);
+  document.addEventListener('scroll', event => {
+    if (!linkTagPanel?.contains(event.target)) positionLinkTagFilterDropdown();
+  }, true);
 
   const openImportFileLinkBtn = document.getElementById('openImportFileLinkBtn');
   if (openImportFileLinkBtn) openImportFileLinkBtn.addEventListener('click', () => {

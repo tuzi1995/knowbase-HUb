@@ -23,7 +23,7 @@ class Knowledge:
         self.links = [{'id': 'old-link', 'url': OLD, 'tags': ['产品对比图', '原标签'], 'kb_id': 'KB1,KB2', 'type': 'image', 'created_at': '2026-10-01'}]
         self.kbs = {kb: dict(question_wiki_id=kb, question='原问题', answer='原答案',
                             product_name='A,B,C', product_category_name='扫地机', content_version=1,
-                            image_urls=json.dumps([OTHER, OLD, OLD]), link_url=OTHER) for kb in ('KB1', 'KB2')}
+                            kb_scope='formal', image_urls=json.dumps([OTHER, OLD, OLD]), link_url=OTHER) for kb in ('KB1', 'KB2')}
         self.logs = []
         self.writes = []
         self.fail = set()
@@ -267,7 +267,7 @@ def test_unordered_pairs_model_order_and_recommendations(api):
     assert a['cell']['id']==b['cell']['id']==pair_key('扫地机',['B','A'])
     candidate=next(v for v in a['candidates'] if v['url']==NEW)
     assert candidate['targets'][0]['rank']==[0,2]
-    assert candidate['targets'][-1]['rank']==[1,3]
+    assert [v['rank'] for v in candidate['targets'] if v['target_mode'] == 'replace'][-1]==[1,3]
     assert candidate['targets'][0]['old_models']==['B','A']
     assert len(http.get('/api/comparison-matrix/overview').get_json()['cells'])==3
 
@@ -468,7 +468,30 @@ def test_link_index_associations_show_per_kb_models_without_inventing_targets(ap
     assert all(not r['reference_verified'] for r in asset['kb_associations'])
     add(http)
     candidate = next(a for a in detail(http)['candidates'] if a['url'] == NEW)
-    assert candidate['targets'] == []
+    assert {v['kb_id'] for v in candidate['targets'] if v['target_mode'] == 'append'} == {'KB1', 'KB2'}
+
+
+def test_new_kb_without_image_can_be_explicitly_appended(api):
+    http, main = api
+    main.kbs['KB3'] = dict(main.kbs['KB1'], question_wiki_id='KB3',
+                           product_name='A,B', product_category_name='扫地机', image_urls=None,
+                           kb_scope='formal')
+    initialize(http)
+    add(http)
+    data = detail(http)
+    candidate = next(v for v in data['candidates'] if v['url'] == NEW)
+    target = next(v for v in candidate['targets'] if v['kb_id'] == 'KB3' and v['target_mode'] == 'append')
+    assert target['field'] == 'image_urls' and target['position'] == 0 and target['old_url'] == ''
+    assert target['kb_question'] == '原问题'
+    decision = confirm(http, targets=[target])
+    plan = post(http, '/preview', {'decision_ids': [decision]})
+    group = next(v for v in plan['groups'] if v['kb_id'] == 'KB3')
+    assert group['conflicts'] == []
+    assert group['entries'][0]['target_mode'] == 'append'
+    assert group['entries'][0]['old_url'] == ''
+    result = post(http, '/apply', {'decision_ids': [decision], 'token': plan['token']})
+    assert next(v for v in result['groups'] if v['kb_id'] == 'KB3')['status'] == '成功'
+    assert json.loads(main.kbs['KB3']['image_urls']) == [NEW]
 
 
 def test_actual_references_are_found_without_link_index_and_no_models_inferred(api):

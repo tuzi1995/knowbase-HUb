@@ -10543,7 +10543,8 @@ main {
 }
 
 /* Knowledge base tag filter: anchored multi-select dropdown. */
-#kbView .kb-tag-filter-trigger {
+#kbView .kb-tag-filter-trigger,
+#linkView .kb-tag-filter-trigger {
   max-width: 280px;
   justify-content: flex-start !important;
 }
@@ -10568,7 +10569,8 @@ main {
 .kb-tag-filter-trigger[aria-expanded="true"] .kb-tag-filter-arrow {
   transform: rotate(180deg);
 }
-#kbView .kb-tag-filter-trigger.is-active {
+#kbView .kb-tag-filter-trigger.is-active,
+#linkView .kb-tag-filter-trigger.is-active {
   border-color: #93c5fd !important;
   color: #2563eb !important;
   background: #eff6ff !important;
@@ -10760,3 +10762,116 @@ main {
   .kb-tag-manager-table th, .kb-tag-manager-table td { padding: 8px 6px; }
   .kb-tag-manager-table th:first-child { width: auto; }
 }
+
+/* Media tag filters share the knowledge filter panel and dialog styles. */
+#linkView .link-tag-selector-field { flex: 0 1 auto; min-width: 0; }
+#linkTagManagerNameField[hidden] { display: none !important; }
+#linkTagManagerCount { color: #64748b; font-size: 12px; }
+#linkTagManagerAction.is-delete #linkTagManagerSubmit { background: #b91c1c; border-color: #b91c1c; }
+
+/* Inline tag editor for the media link table. */
+#linkView .tags-cell {
+  max-width: 320px;
+  overflow: visible !important;
+  white-space: normal;
+}
+#linkView .tag-editor {
+  display: flex;
+  width: 100%;
+  min-height: 38px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 5px 6px;
+  border: 1px solid #c9cdd4;
+  border-radius: 6px;
+  background: #fff;
+  transition: border-color .15s, box-shadow .15s;
+}
+#linkView .tag-editor:hover { border-color: #6fa0f2; }
+#linkView .tag-editor:focus-within {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 3px rgba(22,119,255,.12);
+}
+#linkView .tag-list { display: contents; }
+#linkView .tags-cell .tag {
+  display: inline-flex;
+  max-width: 100%;
+  height: 24px;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0 4px 0 8px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: #e6f0ff;
+  color: #1677ff;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+#linkView .tags-cell .rm-tag {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #1677ff;
+  font-size: 12px;
+  line-height: 1;
+  opacity: .5;
+  cursor: pointer;
+  transition: background .15s, color .15s, opacity .15s;
+}
+#linkView .tags-cell .tag:hover { background: #d6e6ff; }
+#linkView .tags-cell .tag:hover .rm-tag { background: rgba(22,119,255,.14); opacity: 1; }
+#linkView .tags-cell .rm-tag:hover { background: #f53f3f; color: #fff; opacity: 1; }
+#linkView .add-tag-row {
+  position: relative;
+  display: flex;
+  min-width: 128px;
+  min-height: 24px;
+  flex: 1 1 128px;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+}
+#linkView .add-tag-row input {
+  width: 100%;
+  min-width: 58px;
+  height: 24px;
+  flex: 1 1 auto;
+  padding: 0 2px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #1d2129;
+  font: inherit;
+  font-size: 12.5px;
+  box-shadow: none;
+}
+#linkView .add-tag-row input::placeholder { color: #86909c; }
+#linkView .add-tag-row button {
+  height: 24px;
+  flex: 0 0 auto;
+  padding: 0 7px;
+  border: 1px dashed #c9cdd4;
+  border-radius: 4px;
+  background: #fff;
+  color: #4e5969;
+  font: inherit;
+  font-size: 12px;
+  line-height: 22px;
+  cursor: pointer;
+}
+#linkView .add-tag-row button:hover { border-color: #1677ff; background: #e6f0ff; color: #1677ff; }
+#linkView .add-tag-row .dropdown-menu { width: max(100%, 220px); border-color: #e5e6eb; }
+#linkView .add-tag-row .dropdown-item { padding: 7px 10px; font-size: 12.5px; }
