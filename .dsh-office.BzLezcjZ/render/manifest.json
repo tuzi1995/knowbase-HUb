@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "backend": "native",
+  "rasterEngine": "libreoffice",
+  "source": "saved",
+  "inputPath": "/Users/tuzi/个人项目/One/knowbase_hub_8085/outputs/20261023-kb-image-review/产品对比图片执行核对_20261023.xlsx",
+  "sourceSha256": "95d2f09079875ccaa85797034c5ef72e34044dbe8b8f6c6d32177eb745a3dcb3",
+  "dpi": 144,
+  "pageCount": 5,
+  "images": [
+    {
+      "index": 1,
+      "sheet": "待补图清单",
+      "range": "A1:F15",
+      "rtl": false,
+      "path": "/Users/tuzi/个人项目/One/knowbase_hub_8085/.dsh-office.BzLezcjZ/render/page-0001.png",
+      "width": 2839,
+      "height": 1248,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1892.6666666666667,
+        "height": 832
+      },
+      "byteLength": 436978
+    }
+  ],
+  "missingFonts": []
+}
