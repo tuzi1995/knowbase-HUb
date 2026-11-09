@@ -27,7 +27,12 @@ class TestProductDeleteCleanup(unittest.TestCase):
     def tearDownClass(cls):
         try:
             cls.s.post(f"{BASE_URL}/api/kb/product_catalog", json=cls.orig_catalog, timeout=20)
-            cls.s.post(f"{BASE_URL}/api/model_mappings", json=cls.orig_mappings, timeout=20)
+            config = cls.s.get(f"{BASE_URL}/api/model_mappings?include_order=1", timeout=10).json()
+            cls.s.post(f"{BASE_URL}/api/model_mappings", json={
+                "mappings": cls.orig_mappings,
+                "category_order": config.get("category_order", list(cls.orig_mappings)),
+                "expected_revision": config.get("revision"),
+            }, timeout=20)
         except Exception:
             pass
 
@@ -46,7 +51,12 @@ class TestProductDeleteCleanup(unittest.TestCase):
 
         new_mappings = dict(self.orig_mappings)
         new_mappings[map_cat] = [model]
-        r2 = self.s.post(f"{BASE_URL}/api/model_mappings", json=new_mappings, timeout=20)
+        config = self.s.get(f"{BASE_URL}/api/model_mappings?include_order=1", timeout=10).json()
+        r2 = self.s.post(f"{BASE_URL}/api/model_mappings", json={
+            "mappings": new_mappings,
+            "category_order": config.get("category_order", list(new_mappings)),
+            "expected_revision": config.get("revision"),
+        }, timeout=20)
         self.assertEqual(r2.status_code, 200, r2.text)
         self.assertTrue(r2.json().get("success"), r2.text)
 

@@ -471,6 +471,35 @@ def test_link_index_associations_show_per_kb_models_without_inventing_targets(ap
     assert {v['kb_id'] for v in candidate['targets'] if v['target_mode'] == 'append'} == {'KB1', 'KB2'}
 
 
+def test_existing_comparison_image_only_offers_replacement_for_same_kb(api):
+    http, main = api
+    main.kbs['KB1']['image_urls'] = json.dumps([OTHER, OLD])
+    main.kbs['KB1']['question'] = 'A和B有什么区别？'
+    initialize(http); add(http)
+    candidate = next(v for v in detail(http)['candidates'] if v['url'] == NEW)
+    targets = [t for t in candidate['targets'] if t['kb_id'] == 'KB1']
+    assert [(t['target_mode'], t['field'], t['position']) for t in targets] == [('replace', 'image_urls', 1)]
+    assert targets[0]['question_match_sources'] == ['主问题']
+    decision = confirm(http, targets=targets)
+    assert detail(http)['cell']['status'] == '已确认待写入'
+    apply(http, [decision])
+    assert json.loads(main.kbs['KB1']['image_urls']) == [OTHER, NEW]
+
+
+def test_append_choice_is_rejected_when_kb_already_has_replaceable_image(api):
+    http, main = api
+    initialize(http); add(http)
+    candidate = next(v for v in detail(http)['candidates'] if v['url'] == NEW)
+    target = dict(kb_id='KB1', field='image_urls', position=3, old_url='',
+                  base_version=1, target_mode='append')
+    result = http.post('/api/comparison-matrix/confirm', json={
+        'category': '扫地机', 'pair': ['A', 'B'], 'asset_id': candidate['id'],
+        'action': 'replace', 'targets': [target], 'base_decision_id': None,
+    })
+    assert result.status_code == 400
+    assert main.writes == []
+
+
 def test_new_kb_without_image_can_be_explicitly_appended(api):
     http, main = api
     main.kbs['KB3'] = dict(main.kbs['KB1'], question_wiki_id='KB3',
@@ -494,6 +523,43 @@ def test_new_kb_without_image_can_be_explicitly_appended(api):
     assert json.loads(main.kbs['KB3']['image_urls']) == [NEW]
 
 
+def test_cell_targets_mark_exact_main_and_similar_question_pair_hits(api):
+    http, main = api
+    main.kbs['KB1']['question'] = 'A和B有什么区别？'
+    main.kbs['KB1']['similar_questions'] = ['B与A怎么选？', 'A和C有什么区别？']
+    main.kbs['KB3'] = dict(main.kbs['KB1'], question_wiki_id='KB3', question='A和C有什么区别？',
+                           similar_questions=['A和B怎么选？'], product_name='A,B',
+                           product_category_name='扫地机', image_urls=None)
+    initialize(http)
+    add(http)
+    candidate = next(v for v in detail(http)['candidates'] if v['url'] == NEW)
+    targets = candidate['targets']
+    main_target = next(v for v in targets if v['kb_id'] == 'KB1' and v['old_url'] == OLD)
+    similar_target = next(v for v in targets if v['kb_id'] == 'KB3' and v['target_mode'] == 'append')
+    assert main_target['question_match_sources'] == ['主问题', '相似问题']
+    assert main_target['question_match_questions'] == [
+        {'source': '主问题', 'question': 'A和B有什么区别？'},
+        {'source': '相似问题', 'question': 'B与A怎么选？'},
+    ]
+    assert similar_target['question_match_sources'] == ['相似问题']
+    assert similar_target['question_match_questions'] == [{'source': '相似问题', 'question': 'A和B怎么选？'}]
+
+
+def test_question_pair_match_rejects_questions_about_a_broader_model_set(api):
+    http, main = api
+    main.kbs['KB3'] = dict(main.kbs['KB1'], question_wiki_id='KB3',
+                           question='A和B有什么区别？', product_name='A,B',
+                           product_category_name='扫地机', image_urls=None)
+    main.kbs['KB4'] = dict(main.kbs['KB3'], question_wiki_id='KB4', question='A和B和C有什么区别？',
+                           similar_questions=[])
+    # A + B is an exact pair; a question mentioning A, B, and C is broader and must not match.
+    initialize(http)
+    add(http)
+    targets = next(v for v in detail(http)['candidates'] if v['url'] == NEW)['targets']
+    assert next(v for v in targets if v['kb_id'] == 'KB3')['question_match_sources'] == ['主问题']
+    assert next(v for v in targets if v['kb_id'] == 'KB4')['question_match_sources'] == []
+
+
 def test_actual_references_are_found_without_link_index_and_no_models_inferred(api):
     http, main = api
     main.links[0]['kb_id'] = None
@@ -502,6 +568,40 @@ def test_actual_references_are_found_without_link_index_and_no_models_inferred(a
     assert asset['models'] == []
     assert {r['kb_id'] for r in asset['kb_associations']} == {'KB1', 'KB2'}
     assert all(r['reference_verified'] for r in asset['kb_associations'])
+
+
+def test_exact_question_pair_allows_new_image_as_current_without_kb_write(api):
+    http, main = api
+    main.kbs['KB1']['question'] = 'A和B有什么区别？'
+    main.kbs['KB1']['image_urls'] = json.dumps([OLD, NEW])
+    initialize(http, ['A', 'B'])
+    add(http)
+    data = detail(http)
+    asset = next(v for v in data['candidates'] if v['url'] == NEW)
+    result = post(http, '/confirm', {'category': '扫地机', 'pair': ['A', 'B'], 'asset_id': asset['id'],
+                                     'action': 'initialize', 'targets': [], 'base_decision_id': None})
+    refreshed = http.get('/api/comparison-matrix/overview').get_json()
+    cell = next(v for v in refreshed['cells'] if set(v['pair']) == {'A', 'B'})
+    assert result['status'] == cell['status'] == '已生效'
+    assert cell['active_url'] == NEW
+    assert main.writes == []
+
+
+def test_new_image_initialization_rejects_nonmatching_question_even_with_reference(api):
+    http, main = api
+    main.kbs['KB1']['question'] = 'A和C有什么区别？'
+    main.kbs['KB1']['image_urls'] = json.dumps([OLD, NEW])
+    initialize(http, ['A', 'B'])
+    add(http)
+    data = detail(http)
+    asset = next(v for v in data['candidates'] if v['url'] == NEW)
+    response = http.post('/api/comparison-matrix/confirm', json={
+        'category': '扫地机', 'pair': ['A', 'B'], 'asset_id': asset['id'],
+        'action': 'initialize', 'targets': [], 'base_decision_id': None,
+    })
+    assert response.status_code == 400
+    assert detail(http)['cell']['active_url'] is None
+    assert main.writes == []
 
 
 def test_association_reads_physical_v1_like_link_sync_and_handles_stale_ids(api, monkeypatch):

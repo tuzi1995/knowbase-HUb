@@ -1405,7 +1405,11 @@ async function fetchOrderedModelMappings() {
     if (!config || typeof config !== 'object' || Array.isArray(config) || config.error || config.success === false) {
         throw new Error('分类映射加载失败');
     }
-    return { mappings: config, category_order: orderedMappingCategories(config, wrapped ? result.category_order : []) };
+    return {
+        mappings: config,
+        category_order: orderedMappingCategories(config, wrapped ? result.category_order : []),
+        revision: wrapped ? String(result.revision || '') : '',
+    };
 }
 
 function kbMappingModelKeys(value) {
@@ -27751,10 +27755,16 @@ function renderProductModels(category) {
     visibleModels.forEach(model => {
         const div = document.createElement('div');
         div.className = 'pm-model-chip pm-model-row';
+        div.title = '双击复制型号';
+        div.addEventListener('dblclick', event => {
+            if (event.target.closest('.pm-model-delete')) return;
+            event.preventDefault();
+            copyToClipboard(String(model));
+        });
 
         const name = document.createElement('span');
         name.textContent = model;
-        name.title = model;
+        name.title = `双击复制：${model}`;
 
         const status = productReleaseStatuses[model] || 'released';
         const statusBadge = document.createElement('span');
@@ -28185,6 +28195,7 @@ function setupRowTagInput(input, container, existingTags) {
 
 let modelMappings = {};
 let modelMappingCategoryOrder = [];
+let modelMappingRevision = '';
 let currentMappingCategory = null; // For Model Selector
 let allUniqueModels = [];
 let modelMappingView = 'audit';
@@ -28196,6 +28207,7 @@ async function loadModelMappingData() {
         const res = await fetchOrderedModelMappings();
         modelMappings = res.mappings;
         modelMappingCategoryOrder = res.category_order;
+        modelMappingRevision = res.revision;
 
         // 2. Load Product Catalog to get all available models
         if (Object.keys(productCatalog).length === 0) {
@@ -29239,13 +29251,29 @@ function exportModelMappingsJson() {
 
 async function saveModelMappings() {
     try {
-        const res = await api('/model_mappings', 'POST', {
+        const payload = {
             mappings: modelMappings,
             category_order: orderedMappingCategories(modelMappings, modelMappingCategoryOrder),
-        });
+            expected_revision: modelMappingRevision,
+        };
+        let res = await api('/model_mappings', 'POST', payload);
+        if (res.code === 'mapping_large_change_confirmation_required') {
+            const before = res.before || {};
+            const after = res.after || {};
+            const confirmed = confirm(
+                `本次保存会大幅减少分类或型号关联：\n`
+                + `分类：${before.categories ?? '?'} → ${after.categories ?? '?'}\n`
+                + `型号关联：${before.associations ?? '?'} → ${after.associations ?? '?'}\n\n`
+                + '确认这是有意调整并继续保存吗？',
+            );
+            if (!confirmed) return;
+            payload.confirm_large_change = true;
+            res = await api('/model_mappings', 'POST', payload);
+        }
         if (!res.success || res.error) {
-            showToast('保存失败: ' + (res.error || res.message || '未知错误'), 'error');
+            showToast('保存失败: ' + (res.message || res.error || '未知错误'), 'error');
         } else {
+            modelMappingRevision = String(res.revision || '');
             if (Array.isArray(res.category_order)) {
                 modelMappingCategoryOrder = res.category_order;
                 kbMappingCategoryOrder = res.category_order;

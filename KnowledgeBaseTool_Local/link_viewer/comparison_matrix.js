@@ -40,7 +40,7 @@
   }
   $('comparisonDialog').addEventListener('close', () => previousDialogFocus?.focus?.());
   function svg(name) {
-    const paths = {close:'<path d="m6 6 12 12M18 6 6 18"/>', left:'<path d="m15 18-6-6 6-6"/>', right:'<path d="m9 18 6-6-6-6"/>', list:'<path d="M8 6h12M8 12h12M8 18h12M3 6h.01M3 12h.01M3 18h.01"/>', grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>', search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>', lock:'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>', image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>', clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'};
+    const paths = {close:'<path d="m6 6 12 12M18 6 6 18"/>', left:'<path d="m15 18-6-6 6-6"/>', right:'<path d="m9 18 6-6-6-6"/>', list:'<path d="M8 6h12M8 12h12M8 18h12M3 6h.01M3 12h.01M3 18h.01"/>', grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>', search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>', expand:'<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>', lock:'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>', image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>', clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'};
     return `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ''}</svg>`;
   }
   function image(url) {
@@ -151,8 +151,8 @@
         <section class="cm-sec" id="cmOtherRefs"></section>
         <section class="cm-sec"><div class="cm-sec-title"><strong>搜索关联目标</strong><span class="cm-sec-note">已有图片可替换对应位置；没有图片的 KB 会追加新图</span></div><div class="cm-target-search-grid"><label>搜索 KB ID<div class="cm-search-box">${svg('search')}<input id="cmTargetIdSearch" type="search" aria-label="搜索 KB ID" placeholder="输入 KB ID"></div></label><label>搜索问题<div class="cm-search-box">${svg('search')}<input id="cmTargetQuestionSearch" type="search" aria-label="搜索问题" placeholder="输入问题关键词"></div></label></div><p id="cmTargetCount" class="cm-target-count"></p><div id="cmTargetResults" class="cm-target-results"><div class="cm-search-empty">${svg('search')}输入 ID 或问题后显示搜索结果</div></div></section>
         <section class="cm-sec"><div class="cm-sec-title"><strong>确认历史 <span class="cm-count">${detail.history.length} 条</span></strong></div><details class="cm-history"><summary>${svg('clock')}本单元格的操作记录 <span class="cm-count">${detail.history.length}</span><small>确认后将自动追加</small></summary><div class="cm-history-body">${detail.history.length ? detail.history.map(h=>`<div class="cm-history-row"><time>${escape(formatTime(h.created_at))}</time><span>${escape(({keep:'保持旧图',initialize:'历史登记',replace:'替换'})[h.action] || h.action)} · ${escape(h.status)}</span><span>${escape(h.actor || '—')}</span></div>`).join('') : `<div class="cm-history-empty">${svg('clock')}暂无确认记录。完成一次写入后，此处将展示时间、动作与操作人。</div>`}</div></details></section>
-      </div><aside class="cm-preview-panel"><div class="cm-preview-panel-head">${svg('image')}图片预览<span id="cmPreviewIndex" class="cm-count"></span></div><div class="cm-preview-image" id="cmPreviewImage"></div><dl id="cmPreviewMeta"></dl></aside></div>
-      <footer class="cm-confirm-footer"><p>将写入 <b id="cmWriteCount">0</b> 个位置：${escape(a)} × ${escape(b)}<span class="cm-key-hints"><kbd>↑</kbd><kbd>↓</kbd> 切换候选 <kbd>Enter</kbd> 确认 <kbd>Esc</kbd> 关闭</span></p><div class="cm-footer-actions"><button class="cm-link" data-cm="initial">登记为初始历史图</button><button class="cm-alt" data-cm="keep">保持旧图（保存决定）</button><button class="cm-pri" data-cm="confirm" ${detail.candidates.length ? '' : 'disabled'}>确认所选目标并写入 <span>Enter</span></button></div></footer>`);
+        </div><aside class="cm-preview-panel"><div class="cm-preview-panel-head">${svg('image')}图片预览<span id="cmPreviewIndex" class="cm-count"></span><button type="button" class="cm-preview-zoom" data-cm="zoom-preview" aria-label="放大查看图片" title="放大查看图片" disabled>${svg('expand')}</button></div><div class="cm-preview-image" id="cmPreviewImage"></div><dl id="cmPreviewMeta"></dl></aside></div>
+      <footer class="cm-confirm-footer"><p>将写入 <b id="cmWriteCount">0</b> 个位置：${escape(a)} × ${escape(b)}<span class="cm-key-hints"><kbd>↑</kbd><kbd>↓</kbd> 切换候选 <kbd>Enter</kbd> 确认 <kbd>Esc</kbd> 关闭</span></p><div class="cm-footer-actions"><button class="cm-link" data-cm="initial" ${detail.candidates.length ? '' : 'disabled'}>登记为当前生效图（不改 KB）</button><button class="cm-alt" data-cm="keep">保持旧图（保存决定）</button><button class="cm-pri" data-cm="confirm" ${detail.candidates.length ? '' : 'disabled'}>确认所选目标并写入 <span>Enter</span></button></div></footer>`);
     $('comparisonDialog').classList.add('cm-confirm-dialog');
     renderCandidate();
   }
@@ -181,6 +181,7 @@
   function renderCandidateDetails(candidate) {
     const current = detail.cell;
     $('cmPreviewIndex').textContent=candidate ? `候选 ${selectedCandidateIndex+1}` : '暂无候选';
+    $('comparisonDialog').querySelector('[data-cm="zoom-preview"]').disabled=!candidate;
     $('cmPreviewImage').innerHTML=candidate ? `<img src="${escape(candidate.url)}" alt="候选对比图" referrerpolicy="no-referrer">` : '<span>该位置暂无候选图片</span>';
     const coveredModels = candidate?.models || [];
     const pairRefs=[];
@@ -200,11 +201,22 @@
     if(!candidate) { $('cmTargetCount').textContent='已选 0'; $('cmTargetResults').innerHTML='<div class="cm-search-empty">没有可搜索的目标</div>'; $('cmWriteCount').textContent='0'; $('comparisonDialog').querySelector('[data-cm="confirm"]').disabled=true; return; }
     const selected=selectedTargets.get(candidate.id) || new Map();
     const allTargets=candidate.targets.map((target,index)=>({target,index})).filter(({target})=>target.old_url!==candidate.url);
-    const matches=allTargets.filter(({target})=>(!idQuery || String(target.kb_id||'').toLocaleLowerCase().includes(idQuery)) && (!questionQuery || String(target.kb_question||'').toLocaleLowerCase().includes(questionQuery)));
+    const questionText = target => [target.kb_question, ...(target.question_match_questions || []).map(item=>item.question)].join(' ');
+    const renderTarget = ({target,index}, evidence=false) => {
+      const normalized=normalizeTarget(target), append=normalized.target_mode==='append';
+      const sources=target.question_match_sources || [];
+      const questions=target.question_match_questions || [];
+      return `<label class="cm-target"><input type="checkbox" data-cm-target="${index}" ${selected.has(targetKey(normalized))?'checked':''}><span><b>${escape(target.kb_id)}</b> · ${append?'新增关联':`${escape(target.field)}[${target.position}]`} · 版本 ${target.base_version}${evidence?`<br><strong>型号对命中：${escape(sources.join('、'))}</strong>`:''}<br><small>${escape(target.kb_question||'未填写主问题')}</small>${evidence?questions.map(item=>`<br><small>${escape(item.source)}：${escape(item.question)}</small>`).join(''):''}<br>${append?'新图将追加到该 KB 的图片链接':`旧图：${escape(target.old_url)}`}</span></label>`;
+    };
+    const matches=allTargets.filter(({target})=>(!idQuery || String(target.kb_id||'').toLocaleLowerCase().includes(idQuery)) && (!questionQuery || questionText(target).toLocaleLowerCase().includes(questionQuery)));
+    const questionMatches=allTargets.filter(({target})=>(target.question_match_sources || []).length);
+    const targetSearchResults = hasSearch
+      ? matches.length ? `<div class="cm-targets">${matches.map(item=>renderTarget(item)).join('')}</div>` : '<div class="cm-search-empty">未找到匹配的 KB，试试其他关键词</div>'
+      : questionMatches.length ? '' : `<div class="cm-search-empty">${svg('search')}输入 ID 或问题后显示其他 KB 目标</div>`;
     $('cmTargetCount').textContent=`${hasSearch?`匹配 ${matches.length} / ${allTargets.length} 个目标 · `:''}已选 ${selected.size}`;
     $('cmWriteCount').textContent=selected.size;
     $('comparisonDialog').querySelector('[data-cm="confirm"]').disabled=selected.size===0;
-    $('cmTargetResults').innerHTML=!hasSearch?`<div class="cm-search-empty">${svg('search')}输入 ID 或问题后显示搜索结果</div>`:matches.length?`<div class="cm-targets">${matches.map(({target,index})=>{const normalized=normalizeTarget(target),append=normalized.target_mode==='append';return `<label class="cm-target"><input type="checkbox" data-cm-target="${index}" ${selected.has(targetKey(normalized))?'checked':''}><span><b>${escape(target.kb_id)}</b> · ${append?'新增关联':`${escape(target.field)}[${target.position}]`} · 版本 ${target.base_version}<br><small>${escape(target.kb_question||'未填写问题')}</small><br>${append?'新图将追加到该 KB 的图片链接':`旧图：${escape(target.old_url)}`}</span></label>`;}).join('')}</div>`:'<div class="cm-search-empty">未找到匹配的 KB，试试其他关键词</div>';
+    $('cmTargetResults').innerHTML=`${questionMatches.length?`<div class="cm-question-matches"><strong>主问题 / 相似问题命中 ${questionMatches.length} 个目标</strong><small>只作核对提示，确认前请人工勾选目标。</small><div class="cm-targets">${questionMatches.map(item=>renderTarget(item,true)).join('')}</div></div>`:''}${targetSearchResults}`;
   }
   function normalizeTarget(target) { return {...target,target_mode:target.target_mode || (target.old_url ? 'replace' : 'append')}; }
   function targetKey(target) { return JSON.stringify(['kb_id','field','position','old_url','base_version','target_mode'].map(key=>target[key] ?? null)); }
@@ -214,6 +226,8 @@
     const result=await api('/confirm',{category, pair:detail.cell.pair, base_decision_id:detail.cell.decision_id || null, asset_id:candidate?.id, action, targets:selected});
     if(action==='replace') chosen.add(result.decision_id);
     $('comparisonDialog').close(); await refresh();
+    if(action==='replace' && typeof showToast==='function') showToast('图片已确认待写入','success');
+    if(action==='initialize') dialog('登记完成','<p>已将所选图片登记为当前生效图，刷新后仍会保留。</p><p>知识库未作修改。</p>');
   }
   async function previewChanges() {
     const valid=new Set(state.cells.map(c=>c.decision_id));
@@ -257,6 +271,10 @@
       if(action==='save-models') { await api(`/assets/${draft[0].assetId}/models`,{models:draft[0].models}); $('comparisonDialog').close(); await refresh(); }
       if(action==='impact') { const a=state.assets.find(a=>a.id===button.dataset.id); category=a.category||category; await switchTab('comparisonMatrixView'); const pairs=[]; a.models.forEach((m,i)=>a.models.slice(i+1).forEach(n=>pairs.push([m,n]))); dialog('受影响格子',`<p>图片覆盖：${escape(a.models.join(' → '))}</p>${pairs.map(p=>`<button data-cm="cell" data-a="${escape(p[0])}" data-b="${escape(p[1])}">${escape(p.join(' / '))}</button>`).join('')||'请先补充图片型号'}`); }
       if(action==='cell') await openCell(button.dataset.a,button.dataset.b);
+      if(action==='zoom-preview') {
+        const candidate=detail?.candidates[selectedCandidateIndex];
+        if(candidate && typeof openKBImageLinkPreview==='function') openKBImageLinkPreview(candidate.url,'image');
+      }
       if(action==='keep') await saveDecision('keep');
       if(action==='initial') await saveDecision('initialize');
       if(action==='confirm') await saveDecision('replace');

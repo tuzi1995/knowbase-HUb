@@ -45,6 +45,36 @@ def pair_key(category, models):
     return digest([category, sorted(models)])
 
 
+def question_match_fields(row, category, pair, catalog):
+    def matches(value):
+        text = re.sub(r'\s+', '', str(value or '')).casefold()
+        if not text:
+            return False
+        tokens = sorted((re.sub(r'\s+', '', model).casefold() for model in catalog.get(category, [])),
+                        key=len, reverse=True)
+        # Prefer the longest model at each mention, not across the entire
+        # question: "G30S Pro 对比 G30S Pro铂金版" contains two models even
+        # though one name is a prefix of the other.
+        pattern = '|'.join(re.escape(token) for token in tokens if token)
+        found = re.findall(pattern, text) if pattern else []
+        wanted = {re.sub(r'\s+', '', model).casefold() for model in pair}
+        return wanted == set(found)
+
+    similar_questions = unpack(row.get('similar_questions'), [])
+    if not isinstance(similar_questions, list):
+        similar_questions = []
+    main_question = str(row.get('question') or '')
+    similar_hits = [str(question) for question in similar_questions if matches(question)]
+    main_hit = matches(main_question)
+    matched_questions = ([{'source': '主问题', 'question': main_question}] if main_hit else []) + [
+        {'source': '相似问题', 'question': question} for question in similar_hits
+    ]
+    return {
+        'question_match_sources': (['主问题'] if main_hit else []) + (['相似问题'] if similar_hits else []),
+        'question_match_questions': matched_questions,
+    }
+
+
 def image_list(value):
     result = unpack(value, None)
     if not isinstance(result, list) or any(not isinstance(v, str) or not v.strip() or v.strip().lower() == 'null' for v in result):
@@ -148,7 +178,7 @@ def register_routes(app, db, models, s):
         refs = {url: [] for url in urls}
         # Associations explain a link's KB context; only actual media positions
         # become executable references. Read the same physical V1 as link sync.
-        rows = c.select_all('knowledge_base_v1', columns='question_wiki_id,question,product_name,product_category_name,image_urls,link_url,content_version',
+        rows = c.select_all('knowledge_base_v1', columns='question_wiki_id,question,similar_questions,product_name,product_category_name,image_urls,link_url,content_version',
                             order_by='question_wiki_id', use_formal=False) or []
         by_id = {str(row['question_wiki_id']): row for row in rows}
         associations = {url: {} for url in urls}
@@ -246,12 +276,19 @@ def register_routes(app, db, models, s):
             clean.append(wanted)
         return clean
 
-    def append_targets_for(rows, category, pair, asset):
-        """Expose explicit append choices for KBs that have no current image slot."""
+    def append_targets_for(rows, category, pair, asset, refs):
+        """Offer append only when the KB has no image covering this pair."""
         result = []
+        catalog = s.parse_product_catalog()
+        replaceable_kbs = {
+            ref['kb_id']
+            for old in Asset.query.filter(Asset.confirmed_by != '').all()
+            if old.category == category and set(pair) <= set(unpack(old.models_json, []))
+            for ref in refs.get(old.url, [])
+        }
         for row in rows:
             kb_id = str(row.get('question_wiki_id') or '').strip()
-            if not kb_id:
+            if not kb_id or kb_id in replaceable_kbs:
                 continue
             models = {v.strip() for v in re.split(r'[,，;；\s]+', str(row.get('product_name') or '')) if v.strip()}
             row_category = str(row.get('product_category_name') or '').strip()
@@ -268,6 +305,7 @@ def register_routes(app, db, models, s):
             result.append({'kb_id': kb_id, 'field': 'image_urls', 'position': len(existing),
                            'old_url': '', 'base_version': int(row.get('content_version') or 1),
                            'kb_question': str(row.get('question') or ''), 'target_mode': 'append',
+                           **question_match_fields(row, category, pair, catalog),
                            'rank': [2, len(existing)], 'reason': '追加新图到指定 KB'})
         return result
 
@@ -392,15 +430,19 @@ def register_routes(app, db, models, s):
         urls = {v['url'] for v in tagged}
         candidates = [asset_dict(a, refs, urls, associations) for a in Asset.query.filter_by(category=category).all()
                       if a.confirmed_by and set(pair) <= set(unpack(a.models_json, [])) and a.url in urls]
+        catalog = s.parse_product_catalog()
+        rows_by_id = {str(row.get('question_wiki_id') or ''): row for row in rows}
         for candidate in candidates:
             candidate['targets'] = []
             for old in candidates:
                 for ref in old['references']:
                     exact = set(old['models']) == set(candidate['models'])
-                    candidate['targets'].append(dict(ref, target_mode='replace', old_asset_id=old['id'], old_models=old['models'],
+                    row = rows_by_id.get(str(ref.get('kb_id') or ''), {})
+                    candidate['targets'].append(dict(ref, **question_match_fields(row, category, pair, catalog),
+                                                      target_mode='replace', old_asset_id=old['id'], old_models=old['models'],
                                                       rank=[0 if exact else 1, len(old['models'])],
                                                       reason='覆盖型号集合完全一致' if exact else '旧图包含该型号对（备选）'))
-            candidate['targets'].extend(append_targets_for(rows, category, pair, Asset.query.filter_by(id=candidate['id']).first()))
+            candidate['targets'].extend(append_targets_for(rows, category, pair, Asset.query.filter_by(id=candidate['id']).first(), refs))
             candidate['targets'].sort(key=lambda v: v['rank'])
         candidates.sort(key=lambda v: (len(v['models']), v['id']))
         decision = db.session.get(Decision, cell.latest_decision_id) if cell and cell.latest_decision_id else None
@@ -444,12 +486,21 @@ def register_routes(app, db, models, s):
             if not asset or not asset.confirmed_by or asset.category != category or not set(pair) <= set(unpack(asset.models_json, [])):
                 raise ValueError('图片覆盖型号尚未人工确认或不包含此型号对')
             tagged, refs, associations, rows = sources()
-            append_targets = append_targets_for(rows, category, pair, asset)
+            append_targets = append_targets_for(rows, category, pair, asset, refs)
             if not any(v['url'] == asset.url for v in tagged):
                 raise ValueError('该链接已删除或已移除产品对比图标签')
             if action == 'initialize':
-                if cell.active_asset_id or not asset.historical or not refs.get(asset.url):
-                    raise ValueError('仅可为缺失格子登记有实际 KB 引用的历史图')
+                if cell.active_asset_id or not refs.get(asset.url):
+                    raise ValueError('仅可为缺失格子登记有实际 KB 引用的图片')
+                if not asset.historical:
+                    rows_by_id = {str(row.get('question_wiki_id') or ''): row for row in rows}
+                    catalog = s.parse_product_catalog()
+                    matched_reference = any(
+                        question_match_fields(rows_by_id.get(ref['kb_id'], {}), category, pair, catalog)['question_match_sources']
+                        for ref in refs[asset.url]
+                    )
+                    if not matched_reference:
+                        raise ValueError('新品图片需有主问题或相似问题精确命中当前型号对的 KB 引用，才能登记为当前图')
             else:
                 targets = checked_targets(asset, pair, data.get('targets'), refs, append_targets)
         decision = Decision(id=str(uuid.uuid4()), cell_id=key, asset_id=cell.active_asset_id if action == 'keep' else asset.id,

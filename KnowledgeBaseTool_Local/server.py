@@ -3132,6 +3132,7 @@ PRODUCT_RELEASE_INTENTS_FILE = _get_config_path('product_release_intents.json')
 MODEL_MAPPINGS_FILE = _get_config_path('model_mappings.json')
 MODEL_MAPPINGS_BACKUP_DIR = os.path.join(os.path.dirname(MODEL_MAPPINGS_FILE), '.model_mappings_history')
 MODEL_MAPPINGS_BACKUP_LIMIT = 50
+MODEL_MAPPINGS_WRITE_LOCK = threading.Lock()
 _HIDDEN_PRODUCT_MODELS = frozenset({'Z1 Ultra 超水解'})
 
 
@@ -3401,6 +3402,31 @@ def get_model_mapping_category_order(mappings, category_order=None):
             seen.add(category)
     ordered.extend(sorted(category for category in mappings if category not in seen))
     return ordered
+
+
+def get_model_mapping_revision():
+    """Return a content revision for optimistic concurrency on mapping writes."""
+    try:
+        with open(MODEL_MAPPINGS_FILE, 'rb') as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        return ''
+
+
+def _model_mapping_counts(mappings):
+    categories = len(mappings) if isinstance(mappings, dict) else 0
+    associations = sum(
+        len(models) for models in mappings.values() if isinstance(models, list)
+    ) if isinstance(mappings, dict) else 0
+    return {'categories': categories, 'associations': associations}
+
+
+def _is_large_model_mapping_reduction(previous, proposed):
+    before = _model_mapping_counts(previous)
+    after = _model_mapping_counts(proposed)
+    category_drop = before['categories'] >= 10 and after['categories'] <= before['categories'] * 0.5
+    association_drop = before['associations'] >= 100 and after['associations'] <= before['associations'] * 0.5
+    return category_drop or association_drop, before, after
 
 
 def save_model_mappings(mappings, category_order=None):
@@ -3824,7 +3850,11 @@ def handle_model_mappings():
     if request.method == 'GET':
         mappings = get_model_mappings()
         if request.args.get('include_order') == '1':
-            return jsonify({'mappings': mappings, 'category_order': get_model_mapping_category_order(mappings)})
+            return jsonify({
+                'mappings': mappings,
+                'category_order': get_model_mapping_category_order(mappings),
+                'revision': get_model_mapping_revision(),
+            })
         return jsonify(mappings)
     
     mappings = request.json
@@ -3838,22 +3868,65 @@ def handle_model_mappings():
     if not isinstance(mappings, dict):
         return jsonify({'success': False, 'message': 'Invalid format'}), 400
 
-    # The mapping editor never uses an empty payload as a deliberate bulk
-    # delete. Reject it when persisted mappings exist so a stale/partially
-    # initialized UI cannot erase the configuration.
-    if not mappings and get_model_mappings():
+    expected_revision = str(request.json.get('expected_revision') or '').strip()
+    if not expected_revision:
         return jsonify({
             'success': False,
-            'code': 'empty_mapping_write_rejected',
-            'message': '空映射不会覆盖已有配置，请先加载配置后再保存。',
-        }), 409
-        
-    backup_path = save_model_mappings(mappings, category_order=category_order)
-    persisted_mappings = get_model_mappings()
+            'code': 'mapping_revision_required',
+            'message': '缺少配置版本，请重新加载分类映射后再保存。',
+        }), 428
+
+    with MODEL_MAPPINGS_WRITE_LOCK:
+        current_revision = get_model_mapping_revision()
+        if not current_revision or not hmac.compare_digest(expected_revision, current_revision):
+            return jsonify({
+                'success': False,
+                'code': 'mapping_revision_conflict',
+                'message': '分类映射已被其他页面或进程修改，请重新加载后再保存。',
+                'revision': current_revision,
+            }), 409
+
+        current_mappings = get_model_mappings()
+        current_revision = get_model_mapping_revision()
+        if not hmac.compare_digest(expected_revision, current_revision):
+            return jsonify({
+                'success': False,
+                'code': 'mapping_revision_conflict',
+                'message': '分类映射已被其他页面或进程修改，请重新加载后再保存。',
+                'revision': current_revision,
+            }), 409
+
+        # The mapping editor never uses an empty payload as a deliberate bulk
+        # delete. Reject it when persisted mappings exist so a stale/partially
+        # initialized UI cannot erase the configuration.
+        if not mappings and current_mappings:
+            return jsonify({
+                'success': False,
+                'code': 'empty_mapping_write_rejected',
+                'message': '空映射不会覆盖已有配置，请先加载配置后再保存。',
+            }), 409
+
+        normalized = normalize_model_mappings_dict(mappings)
+        large_reduction, before_counts, after_counts = _is_large_model_mapping_reduction(
+            current_mappings, normalized,
+        )
+        if large_reduction and not request.json.get('confirm_large_change'):
+            return jsonify({
+                'success': False,
+                'code': 'mapping_large_change_confirmation_required',
+                'message': '本次保存会大幅减少分类或型号关联，请确认后再保存。',
+                'before': before_counts,
+                'after': after_counts,
+                'revision': current_revision,
+            }), 409
+
+        backup_path = save_model_mappings(mappings, category_order=category_order)
+        persisted_mappings = get_model_mappings()
     return jsonify({
         'success': True,
         'backup_created': bool(backup_path),
         'category_order': get_model_mapping_category_order(persisted_mappings),
+        'revision': get_model_mapping_revision(),
     })
 
 
@@ -8790,6 +8863,28 @@ def delete_kb_item():
             print(f"[DEBUG] Fetched {len(items_to_log)} items to log")
         else:
             print(f"[ERROR] Fetch failed: {fetch_resp.status_code} - {fetch_resp.text}")
+            return jsonify({
+                'success': False,
+                'code': 'delete_snapshot_fetch_failed',
+                'message': '读取删除前数据失败，已取消删除状态变更。',
+            }), 500
+
+        found_ids = {
+            _normalize_kb_import_id(item.get('question_wiki_id'))
+            for item in items_to_log if isinstance(item, dict)
+        }
+        missing_ids = [
+            _normalize_kb_import_id(value)
+            for value in ids
+            if _normalize_kb_import_id(value) not in found_ids
+        ]
+        if missing_ids:
+            return jsonify({
+                'success': False,
+                'code': 'delete_items_not_found',
+                'message': '部分知识记录不存在，已取消删除。',
+                'missing_ids': missing_ids,
+            }), 404
             
         # 2. Update status to 'deleting' in knowledge_base_v1
         # We can use update with 'in' filter? 
@@ -8801,6 +8896,7 @@ def delete_kb_item():
         # But here we are setting SAME status for ALL IDs.
         # So we can use: update knowledge_base_v1 set review_status='deleting' where question_wiki_id in (...)
         
+        _activity_archive_require_immediate_persistence(client)
         print(f"[DEBUG] Updating review_status to 'deleting'")
         update_resp = client.update('knowledge_base_v1', {'review_status': 'deleting'}, {'question_wiki_id': f'in.{id_str}'})
         
@@ -8810,7 +8906,8 @@ def delete_kb_item():
             print(f"[ERROR] {error_msg}")
             return jsonify({'success': False, 'message': error_msg}), 500
              
-        # 3. Log to modifications
+        # 3. Log to modifications. Disable the outbox here: deletion must not
+        # report success until its audit row is persisted immediately.
         if items_to_log:
             mod_records = []
             for item in items_to_log:
@@ -8843,9 +8940,36 @@ def delete_kb_item():
             _convert_array_fields_to_json(mod_records)
             
             print(f"[DEBUG] Inserting {len(mod_records)} modification records")
+            _activity_archive_require_immediate_persistence(client)
             mod_log_resp = _supabase_insert_drop_unknown_columns(client, 'knowledge_base_modifications', mod_records)
-            if mod_log_resp and hasattr(mod_log_resp, 'status_code') and mod_log_resp.status_code >= 400:
-                print(f"[WARN] Failed to log delete modifications: {mod_log_resp.text}")
+            if mod_log_resp is None or getattr(mod_log_resp, 'status_code', 500) >= 400:
+                log_error = getattr(mod_log_resp, 'text', '') if mod_log_resp is not None else ''
+                rollback_failures = []
+                rows_by_status = {}
+                for item in items_to_log:
+                    wiki_id = _normalize_kb_import_id(item.get('question_wiki_id'))
+                    if not wiki_id:
+                        continue
+                    prior_status = str(item.get('review_status') or 'unadjusted')
+                    rows_by_status.setdefault(prior_status, []).append(wiki_id)
+                for prior_status, wiki_ids in rows_by_status.items():
+                    rollback_resp = client.update(
+                        'knowledge_base_v1',
+                        {'review_status': prior_status},
+                        {'question_wiki_id': f'in.{_postgrest_in_str(wiki_ids)}'},
+                    )
+                    if rollback_resp is None or getattr(rollback_resp, 'status_code', 500) >= 400:
+                        rollback_failures.append({
+                            'review_status': prior_status,
+                            'ids': wiki_ids,
+                            'error': getattr(rollback_resp, 'text', '') if rollback_resp is not None else '',
+                        })
+                return jsonify({
+                    'success': False,
+                    'code': 'delete_modification_write_failed',
+                    'message': '删除记录未写入修改记录，已尝试恢复主表状态。' + (f' 数据库错误：{log_error}' if log_error else ''),
+                    'rollback_failures': rollback_failures,
+                }), 500
         
         print(f"[SUCCESS] Deleted {len(ids)} items")
         return jsonify({'success': True, 'count': len(ids)})
