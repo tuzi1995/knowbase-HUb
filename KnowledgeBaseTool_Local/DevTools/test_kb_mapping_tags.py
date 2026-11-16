@@ -110,6 +110,19 @@ def test_mapping_filter_runs_before_pagination_and_combines_with_similar_search(
     assert similar['data'][0]['question_wiki_id'] == 'KB-1'
 
 
+def test_numeric_similar_question_search_returns_only_matching_rows(api):
+    client, database, _mappings = api
+    database.rows[0]['similar_questions'] = ['106']
+    database.rows[1]['similar_questions'] = ['如何清洁']
+
+    result = client.get('/api/kb/data', query_string={
+        'similar_question': '106', 'page': 1, 'pageSize': 50,
+    }).get_json()
+
+    assert result['total'] == 1
+    assert [row['question_wiki_id'] for row in result['data']] == ['KB-1']
+
+
 def test_tags_recalculate_after_kb_or_mapping_changes_without_writes(api):
     client, database, mappings = api
     def tags():

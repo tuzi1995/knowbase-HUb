@@ -21022,8 +21022,8 @@ def _sm_pick_match_type(q_sim, a_sim, threshold):
 def _sm_strip_number_prefix(s):
     try:
         s = str(s or '')
-        s = re.sub(r'^\s*[\(\（]?\s*\d+\s*[\)\）]?\s*', '', s)
-        s = re.sub(r'^\s*\d+\s*[\.、]\s*', '', s)
+        s = re.sub(r'^\s*(?:[\(\（]\s*\d+\s*[\)\）]|\d+\s*[\.、])\s*', '', s)
+        s = re.sub(r'^\s*\d+\s+(?=\S)', '', s)
         s = re.sub(r'^\s*[一二三四五六七八九十]+\s*[、\.]\s*', '', s)
         return s
     except Exception:
