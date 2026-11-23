@@ -21015,6 +21015,8 @@ function openKBSimilarQuestionPicker() {
     const textarea = document.querySelector('#kbEditForm textarea[name="similar_questions"]');
     __kbSimilarPickerItems = parseSmartListValue(textarea?.value || '', { splitOnAsciiComma: true })
         .map(value => String(value || '').trim()).filter(Boolean);
+    const search = document.getElementById('kbSimilarPickerSearch');
+    if (search) search.value = '';
     renderKBSimilarQuestionPicker();
     const modal = document.getElementById('kbSimilarQuestionPickerModal');
     if (modal) {
@@ -21026,18 +21028,9 @@ function openKBSimilarQuestionPicker() {
 
 function renderKBSimilarQuestionPicker() {
     const list = document.getElementById('kbSimilarQuestionPickerList');
-    const count = document.getElementById('kbSimilarPickerCount');
     if (!list) return;
     const items = Array.isArray(__kbSimilarPickerItems) ? __kbSimilarPickerItems : [];
-    if (count) count.textContent = `${items.length} 条相似问`;
     list.replaceChildren();
-    if (!items.length) {
-        const empty = document.createElement('div');
-        empty.className = 'kb-editor-picker-empty';
-        empty.textContent = '暂无相似问，点击“新增相似问”开始添加';
-        list.appendChild(empty);
-        return;
-    }
     items.forEach((value, index) => {
         const row = document.createElement('div');
         row.className = 'kb-similar-picker-row';
@@ -21045,10 +21038,14 @@ function renderKBSimilarQuestionPicker() {
         number.className = 'kb-similar-picker-index';
         number.textContent = String(index + 1).padStart(2, '0');
         const input = document.createElement('textarea');
-        input.rows = 2;
+        input.rows = 1;
         input.value = value;
         input.placeholder = '输入相似问题';
-        input.addEventListener('input', () => { __kbSimilarPickerItems[index] = input.value; });
+        input.setAttribute('aria-label', `第 ${index + 1} 条相似问`);
+        input.addEventListener('input', () => {
+            __kbSimilarPickerItems[index] = input.value;
+            filterKBSimilarQuestionPicker();
+        });
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'action-btn btn-sm kb-similar-picker-remove';
@@ -21062,11 +21059,53 @@ function renderKBSimilarQuestionPicker() {
         row.append(number, input, remove);
         list.appendChild(row);
     });
+    const empty = document.createElement('div');
+    empty.id = 'kbSimilarPickerEmpty';
+    empty.className = 'kb-editor-picker-empty';
+    list.appendChild(empty);
+    filterKBSimilarQuestionPicker();
+}
+
+function filterKBSimilarQuestionPicker(value) {
+    const search = document.getElementById('kbSimilarPickerSearch');
+    if (search && value !== undefined) search.value = String(value ?? '');
+    const query = String(search?.value || '').trim().toLocaleLowerCase();
+    const list = document.getElementById('kbSimilarQuestionPickerList');
+    if (!list) return;
+    let matches = 0;
+    const rows = list.querySelectorAll('.kb-similar-picker-row');
+    // Keep the full draft and original row indices; filtering only changes visibility.
+    rows.forEach(row => {
+        const text = String(row.querySelector('textarea')?.value || '').toLocaleLowerCase();
+        const visible = !query || text.includes(query);
+        row.style.display = visible ? '' : 'none';
+        if (visible) matches++;
+    });
+    const count = document.getElementById('kbSimilarPickerCount');
+    if (count) count.textContent = query
+        ? `匹配 ${matches} / 共 ${rows.length} 条`
+        : `${rows.length} 条相似问`;
+    const clear = document.getElementById('kbSimilarPickerClear');
+    if (clear) clear.hidden = !search?.value;
+    const empty = document.getElementById('kbSimilarPickerEmpty');
+    if (empty) {
+        empty.style.display = matches ? 'none' : '';
+        empty.textContent = rows.length
+            ? '没有匹配的相似问，试试其他关键词或清空搜索'
+            : '暂无相似问，点击“新增相似问”开始添加';
+    }
+}
+
+function clearKBSimilarQuestionSearch() {
+    filterKBSimilarQuestionPicker('');
+    document.getElementById('kbSimilarPickerSearch')?.focus();
 }
 
 function addKBSimilarQuestionRow() {
     if (!Array.isArray(__kbSimilarPickerItems)) __kbSimilarPickerItems = [];
     __kbSimilarPickerItems.push('');
+    const search = document.getElementById('kbSimilarPickerSearch');
+    if (search) search.value = '';
     renderKBSimilarQuestionPicker();
     const list = document.getElementById('kbSimilarQuestionPickerList');
     const inputs = list?.querySelectorAll('textarea');
@@ -21075,6 +21114,8 @@ function addKBSimilarQuestionRow() {
 
 function closeKBSimilarQuestionPicker() {
     __kbSimilarPickerItems = null;
+    const search = document.getElementById('kbSimilarPickerSearch');
+    if (search) search.value = '';
     const modal = document.getElementById('kbSimilarQuestionPickerModal');
     if (modal) {
         modal.classList.remove('is-open');

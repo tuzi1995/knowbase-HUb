@@ -5653,6 +5653,26 @@ select.form-control {
     width: min(860px, 96vw) !important;
 }
 
+.kb-similar-picker-search {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-left: auto;
+}
+
+.kb-similar-picker-search .modern-input {
+    width: 100%;
+    min-width: 0;
+    max-width: 280px;
+}
+
+#kbSimilarPickerClear[hidden] {
+    display: none;
+}
+
 .kb-similar-picker-list {
     display: flex;
     flex-direction: column;
@@ -5675,9 +5695,11 @@ select.form-control {
 
 .kb-similar-picker-row textarea {
     width: 100%;
-    min-height: 52px;
+    min-height: 40px;
+    height: 40px;
     margin: 0;
     resize: vertical;
+    line-height: 1.4;
 }
 
 .kb-similar-picker-remove {
@@ -5710,6 +5732,17 @@ select.form-control {
 
     .kb-product-picker-grid {
         grid-template-columns: 1fr;
+    }
+
+    .kb-similar-picker-search {
+        flex-basis: 100%;
+        margin-left: 0;
+    }
+
+    .kb-similar-picker-search .modern-input {
+        flex: 1 1 auto;
+        max-width: none;
+        order: 0;
     }
 }
 

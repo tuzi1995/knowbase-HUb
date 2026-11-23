@@ -10,7 +10,7 @@
   
   <!-- 原有样式 -->
   <link rel="stylesheet" href="styles.css?v=68">
-  <link rel="stylesheet" href="extra_styles.css?v=120">
+  <link rel="stylesheet" href="extra_styles.css?v=122">
   <!-- 滚动性能优化 -->
   <link rel="stylesheet" href="scroll-performance.css?v=4">
   <!-- 加载状态提示样式 -->
@@ -3661,8 +3661,12 @@
         </div>
         <div class="modal-body kb-editor-picker-body">
             <div class="kb-editor-picker-toolbar">
-                <span id="kbSimilarPickerCount" class="kb-editor-picker-count">0 条相似问</span>
+                <span id="kbSimilarPickerCount" class="kb-editor-picker-count" role="status" aria-live="polite" aria-atomic="true">0 条相似问</span>
                 <button type="button" class="action-btn btn-sm" onclick="addKBSimilarQuestionRow()"><i class="fas fa-plus" aria-hidden="true"></i><span>新增相似问</span></button>
+                <div class="kb-similar-picker-search">
+                    <input type="search" id="kbSimilarPickerSearch" class="modern-input" aria-label="搜索相似问关键词" placeholder="搜索相似问关键词，如：维修" oninput="filterKBSimilarQuestionPicker(this.value)">
+                    <button type="button" id="kbSimilarPickerClear" class="action-btn btn-sm" onclick="clearKBSimilarQuestionSearch()" hidden>清空</button>
+                </div>
             </div>
             <div id="kbSimilarQuestionPickerList" class="kb-similar-picker-list"></div>
         </div>
@@ -4620,7 +4624,7 @@ G10 系列: G10S, G10S Pro"></textarea>
     </div>
 
     <script src="comparison_matrix.js?v=10"></script>
-<script src="app_v8.js?v=2026110501"></script>
+<script src="app_v8.js?v=2026111901"></script>
 
   <!-- Outside the scrolling filter row so the dropdown is never clipped. -->
   <div id="kbTagFilterDropdown" class="kb-tag-filter-dropdown" role="dialog" aria-labelledby="kbTagFilterTitle" hidden>
